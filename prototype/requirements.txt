@@ -10,3 +10,7 @@ pydantic==2.13.5
 starlette==1.6.0
 libcst==1.9.0
 httpx==0.28.1
+# token 精确计数（core/tokens.py 用官方 tokenizer；缺了会退化成估算，判据会变松）
+tokenizers==0.22.2
+# 覆盖率地板（core/arch.py::gate_coverage，M 级起是真测量；缺了只能如实写"测不了"）
+coverage==7.17.1
