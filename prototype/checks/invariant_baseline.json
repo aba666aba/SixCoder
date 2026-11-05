@@ -818,13 +818,6 @@
     "snip": "\"ok\": ok, \"detail\": detail[:500]}",
     "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
   },
-  "scale.py|比较阈值|10|e5ffcd61": {
-    "file": "scale.py",
-    "kind": "比较阈值",
-    "value": "10",
-    "snip": "id=\"S\", label=\"< 10 万行（原型 / 单一团队）\", max_lines=100_000,",
-    "依据": "展示/日志截断：长度 10 用于展示或摘要，不影响判据"
-  },
   "scale.py|默认上限|max_lines=1|2bf45caf": {
     "file": "scale.py",
     "kind": "默认上限",
@@ -1229,13 +1222,6 @@
     "kind": "截断长度",
     "value": "300",
     "snip": "return f\"差分测试失败：{result['error'][:300]}\"",
-    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
-  },
-  "scale.py|默认上限|max_lines=100|e5ffcd61": {
-    "file": "scale.py",
-    "kind": "默认上限",
-    "value": "100",
-    "snip": "id=\"S\", label=\"< 10 万行（原型 / 单一团队）\", max_lines=100_000,",
     "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
   },
   "scale.py|默认上限|max_lines=500|1c0f5d81": {
@@ -2182,5 +2168,12 @@
     "value": "这类**没有来源证据**，不要当成",
     "snip": "\"这类**没有来源证据**，不要当成'流到了哪里'的结论\"]}",
     "依据": "交付报告/台账里的提示文本：写给维护者看的建议或边界说明，不是系统硬性限制"
+  },
+  "flow.py|截断长度|160|de5b45d3": {
+    "file": "flow.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "out[\"error\"] = \"构造探针对象失败：%s: %s\" % (type(exc).__name__, str(exc)[:160])",
+    "依据": "异常摘要截断：只把异常写进失败原因给人看，判据看的是 ok 布尔与异常类型，不看截断后的文字"
   }
 }
