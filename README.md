@@ -45,26 +45,97 @@
 
 ---
 
-## 60 秒上手
+## 安装与首次运行（照着抄就行）
+
+下面每一条命令都在 Windows 10/11 + Python 3.12 上实测跑过；Linux 把 `py` 换成 `python3` 即可。
+
+### 0. 前置
+
+| 必需 | 说明 |
+|---|---|
+| **Python 3.12** | `python --version` 应输出 `3.12.x` |
+| **Ollama + 一个 ≥7B 的代码模型** | 本地工人模型，缺了就跑不了夜班（系统会如实报"没有可用本地工人模型"，不会假装能用） |
+| Git | 隔离层要按文件回滚，需要 `git` |
+| 可选：JDK / gcc / node | 只有写 Java / C / C++ / JS / TS 时才需要；缺了会在开跑前**如实拒绝、零花费** |
+
+### 1. 拉代码、装依赖
 
 ```powershell
-# 0) 前置：Python 3.12 + Ollama，并拉一个 ≥4B 的代码模型（一次性）
+git clone https://github.com/aba666aba/SixCoder.git
+cd SixCoder
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1          # Linux/macOS：source .venv/bin/activate
+python -m pip install -r prototype\requirements.txt
+```
+
+> 想跑自检再装一份开发依赖：`pip install -r prototype\requirements-dev.txt`（pytest / mypy）。
+
+### 2. 装本地工人模型（一次性）
+
+```powershell
 ollama pull qwen2.5-coder:7b
+```
 
-# 1) 起服务（在仓库根目录下）
+### 3. 验证安装是否正确（这一步会告诉你还差什么）
+
+```powershell
 cd prototype
-python server.py            # → http://127.0.0.1:8760
+python cli.py doctor
+```
 
-# 2) 或者直接命令行跑一次夜班（先小预算试水，¥0.2 封顶）
+正常输出长这样（工具链那几行按你机器实际有就显示，没有会写"不可用"）：
+
+```
+Ollama        [在线]  models=qwen2.5-coder:7b, qwen2.5:7b
+默认模型      qwen2.5-coder:7b
+Python        3.12.10
+数据库        ...\prototype\data\proto.db
+工具链        3/7 可用
+  [OK] python  3.12.10  ...
+```
+
+`Ollama [在线]` + `默认模型` 有值 = 可以开跑了。
+
+### 4. 起服务 / 或直接命令行
+
+```powershell
+# A. 图形界面（浏览器打开 http://127.0.0.1:8760）
+python server.py
+
+# B. 命令行跑一次夜班（先小预算试水，¥0.2 封顶）
 python cli.py night --repo D:\code\myproj `
   --requirement-file D:\code\myproj\需求.txt `
   --scale S --hours 0.1 --max-cny 0.2
 
-# 3) 看报告
+# C. 看交付报告
 notepad D:\code\myproj\DELIVERY.md
 ```
 
-**需求怎么写才干活**（写不清签名和示例，它就干不了活）：
+### 5. 装机自检（可选，20 项环境无关 + 全部判据）
+
+```powershell
+python checks\run_all.py
+```
+
+说明：少数自检项依赖本机工具链（如 C++ 真编译要 g++）。缺的时候会打印
+`SKIP ... 测不了`，**不计为通过**，也不会因此判失败——这是有意的诚实口径。
+
+### 装不上/跑不起来时
+
+| 现象 | 原因 | 修法 |
+|---|---|---|
+| `[FAIL] Ollama 不可达` | Ollama 没启动 | `ollama serve`（或启动桌面端）后重试 |
+| `默认模型` 是空的 | 一个模型都没拉 | `ollama pull qwen2.5-coder:7b` |
+| 夜班报"缺工具链：go/java…" | 本机没有对应编译器 | 装好再加进 PATH；**这一步不花钱** |
+| `ModuleNotFoundError: fastapi` | 依赖没装/装到别的解释器 | 确认已激活 venv，再 `pip install -r prototype\requirements.txt` |
+| 端口被占用 | 8760 已被别的程序用 | `python server.py --port 8761` |
+| 自检里出现 `SKIP` | 本机缺该检查要的能力 | 属正常；要看某项为何跳过，单独跑那条脚本 |
+
+---
+
+## 需求怎么写才干活
+
+写不清签名和示例，它就干不了活：
 
 ```
 代码规模：S
