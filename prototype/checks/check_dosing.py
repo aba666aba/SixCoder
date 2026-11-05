@@ -97,6 +97,18 @@ def main() -> int:
     check("多模块按比例分", dosing.per_module_cap(40, 4) == 10)
     check("模块极多时至少 4 个", dosing.per_module_cap(20, 20) == 4)
 
+    print("[8] 契约锁存按需求指纹判（不然多轮长不起来）")
+    import tempfile
+    from pathlib import Path as _P
+    _ws = _P(tempfile.mkdtemp())
+    _txt = "1) a.py：\n   - f(x: int) -> int：加一\n示例（必须满足）：\nf(1) == 2\n"
+    contractgen.save_locked(_ws, _txt, "需求甲")
+    check("同一需求 → 复用锁存契约", bool(contractgen.load_locked(_ws, "需求甲").strip()))
+    check("换了需求 → 不复用（第二轮才能合成新契约）",
+          contractgen.load_locked(_ws, "需求乙") == "")
+    check("不带需求的老调用仍复用（向后兼容）",
+          bool(contractgen.load_locked(_ws).strip()))
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")

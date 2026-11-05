@@ -188,6 +188,9 @@ def synthesize(requirement: str, task_id: str = "contract", step_index: int | st
     if isinstance(step_index, str):
         step_index = settings_store.strongest_step_index() if step_index.lower() in ("strongest", "best") else None
     allow, allow_why = _dosing.suggest_max_funcs(**(budget or {}))
+    # 正文配额：显式传给 remote（它会再把思考额度加在上面）。
+    # 不传的话 remote 只能拿档案里的 8000，实测被思考吃光 → 正文 0 token。
+    out_budget = int((budget or {}).get("capacity") or 0)
     prompt = PROMPT.format(requirement=_tokens.cut((requirement or "").strip(), 8000),
                            ambiguity_block=_ambiguity_block(ambiguity))
     prompt += (f"\n\n【本轮可用验收带宽】最多 {allow} 个函数"
@@ -196,11 +199,21 @@ def synthesize(requirement: str, task_id: str = "contract", step_index: int | st
         r = remote.complete(prompt if attempt == 1 else
                             prompt + "\n\n【上一次的问题，必须改掉】\n" + "\n".join(problems[:6]),
                             task_id=task_id, node_id="contract", json_mode=True,
-                            step_index=step_index, thinking=thinking)
+                            step_index=step_index, thinking=thinking,
+                            max_out=out_budget or None)
         if not r.get("ok"):
             return {"ok": False, "problems": [f"远端调用失败：{r.get('error')}"],
                     "contracts": {}, "text": "", "by": ""}
         data = _parse_json(r.get("answer") or "")
+        # 「正文被配额截断」≠「模型不会做」：加预算重试一次（实测 max 档思考 12.8k，
+        # 正文只剩 3k，JSON 写到一半就被切了，那一次花掉的 ¥0.06 完全白费）。
+        if data is None and remote.content_truncated(r.get("usage"), out_budget):
+            out_budget = min(64000, max(4000, out_budget) * 2)
+            problems = [f"上一次输出被截断（正文配额 {out_budget // 2} token 用满，JSON 没写完）。"
+                        "这次直接输出完整 JSON：不要解释、不要省略、不要 Markdown 围栏外文字。"]
+            if attempt > retries:
+                break
+            continue
         # 远端选择"不猜、发问"（只在 ambiguity="ask" 时会被允许）：如实上报，不许当成失败重试
         ask = str((data or {}).get("question") or "").strip()
         if ask:
@@ -225,18 +238,51 @@ def synthesize(requirement: str, task_id: str = "contract", step_index: int | st
 
 
 CONTRACT_FILE = ".sixcoder/contract.txt"
+CONTRACT_META = ".sixcoder/contract.meta.json"
 
 
-def load_locked(ws) -> str:
-    """读仓库里锁存的契约（没有就返回空串）。"""
+def _req_hash(requirement: str) -> str:
+    """需求指纹：契约锁存要按"这次的需求"判，而不是按"这个仓库有没有契约"。"""
+    import hashlib
+    return hashlib.sha1((requirement or "").strip().encode("utf-8")).hexdigest()[:16]
+
+
+def load_locked(ws, requirement: str = "") -> str:
+    """读仓库里锁存的契约（没有就返回空串）。
+
+    **必须带需求指纹**：旧实现只看"仓库里有没有 contract.txt"，
+    于是同一个工作区跑第二轮时会把第一轮的契约原样复用 ——
+    "多轮把项目长到 1 万行"这条路直接断掉（第二轮根本不会合成新契约）。
+    现在只有指纹一致才复用；不一致就重新合成并覆盖锁存。
+    """
     p = Path(ws) / CONTRACT_FILE
-    return p.read_text(encoding="utf-8-sig", errors="replace") if p.exists() else ""
+    if not p.exists():
+        return ""
+    text = p.read_text(encoding="utf-8-sig", errors="replace")
+    meta = Path(ws) / CONTRACT_META
+    try:
+        import json
+        got = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else {}
+    except Exception:                                    # noqa: BLE001
+        got = {}
+    want = _req_hash(requirement)
+    if requirement and got.get("requirement_hash") != want:
+        return ""                                        # 换了需求 → 不复用
+    return text
 
 
-def save_locked(ws, text: str) -> None:
+def save_locked(ws, text: str, requirement: str = "") -> None:
     p = Path(ws) / CONTRACT_FILE
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
+    try:
+        import json
+        meta = Path(ws) / CONTRACT_META
+        meta.write_text(json.dumps({"requirement_hash": _req_hash(requirement),
+                                    "requirement_head": (requirement or "").strip()[:200]},
+                                   ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:                                    # noqa: BLE001
+        pass
 
 
 def load_or_synthesize(ws, requirement: str, step_index: int | str | None = None,
@@ -247,7 +293,7 @@ def load_or_synthesize(ws, requirement: str, step_index: int | str | None = None
     为什么必须锁存（实测）：同一个需求合成两次会得到**不完全一样**的契约（示例细节不同），
     于是"8/8 通过"只对当次那份契约成立 —— 复跑、裁判、回归全都失去可比性。
     """
-    text = load_locked(ws)
+    text = load_locked(ws, requirement)
     if text.strip():
         contracts = contract_mod.parse_requirement(text)
         if contracts:
@@ -256,7 +302,7 @@ def load_or_synthesize(ws, requirement: str, step_index: int | str | None = None
     got = synthesize(requirement, task_id=task_id, step_index=step_index,
                      thinking=thinking, ambiguity=ambiguity, budget=budget)
     if got.get("ok"):
-        save_locked(ws, got["text"])
+        save_locked(ws, got["text"], requirement)
     return got
 
 

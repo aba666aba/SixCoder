@@ -35,11 +35,40 @@ import importlib, json, os, sys
 # 所以把被测仓库根从参数传进来加回 sys.path。
 sys.path.insert(0, sys.argv[3] if len(sys.argv) > 3 else os.getcwd())
 mod_name, checks = sys.argv[1], json.loads(sys.argv[2])
+rel_path = sys.argv[4] if len(sys.argv) > 4 else ""
+ws_root = sys.argv[3] if len(sys.argv) > 3 else os.getcwd()
 results = []
+def _load():
+    """先按模块名 import；失败再**按文件路径**加载。
+
+    为什么必须有回退：`cal/core/numeric.py` 这种嵌套路径，`import numeric` 必然
+    ModuleNotFoundError（仓库根上根本没有叫 numeric 的模块），于是整模块被判红。
+    实测（2026-11-05 自生成第一夜）：模型写对了 5 个函数，判据却 0/5 全红、连空转 6 轮。
+    判据不该依赖"产物恰好把包结构建全"——按路径加载对任何布局都成立。
+    """
+    try:
+        return importlib.import_module(mod_name)
+    except Exception as first_exc:
+        if not rel_path:
+            raise
+        import importlib.util
+        path = os.path.join(ws_root, rel_path.replace("/", os.sep))
+        if not os.path.exists(path):
+            raise
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        if spec is None or spec.loader is None:
+            raise first_exc
+        m = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = m
+        spec.loader.exec_module(m)
+        return m
 try:
-    m = importlib.import_module(mod_name)
+    m = _load()
 except Exception as exc:
-    print(json.dumps({"ok": False, "fails": [{"kind": "import", "got": type(exc).__name__}],
+    msg = f"{type(exc).__name__}: {exc}"
+    print(json.dumps({"ok": False,
+                      "fails": [{"kind": "import", "got": type(exc).__name__,
+                                 "detail": f"被测模块导入失败（{msg}）"}],
                       "passed": 0, "total": len(checks)}))
     raise SystemExit
 passed = 0
@@ -297,19 +326,30 @@ def _probe_literal(num: str, ptype: str) -> str:
     return ""                                   # 类型拿不准 → 不造探针（宁可漏报）
 
 
+def _name_tokens(s: str) -> set[str]:
+    """把函数名/文本切成小写词元，用来做**按词**语义判断。
+
+    不能再用子串（`"date" in func.lower()`）：实测 `validate_name` 里含 "date"，
+    于是被当成日期函数，喂 `"2024-13-01"` 并**要求它抛 ValueError**，实现当然不抛 → 假红。
+    同类隐患：`average` 含 "age"、`update` 含 "date"。一律按词元判。
+    """
+    return set(re.findall(r"[a-z0-9]+", (s or "").lower()))
+
+
 def _invalid_probes(func: str, text: str, ptype: str = "") -> list[str]:
     """按函数/参数的语义生成"该抛错"的非法输入（实测：只给整数探针时，
     parse_date('非法格式')、clean_email('nodomain@') 这类检查永远缺失，
     于是"非法输入应抛错"成了空话，7B 也能蒙过去）。"""
     low = (func or "").lower()
+    toks = _name_tokens(low)
     near = text or ""
-    if "date" in low or "日期" in near[:400] and "date" in low:
+    if "date" in toks or "dates" in toks or ("日期" in near[:400] and ("date" in toks)):
         return ['"2024-13-01"', '"2024-02-30"', '"not-a-date"']
-    if "email" in low:
+    if "email" in toks or "mail" in toks:
         return ['"nodomain@"', '"@nodomain"', '"plain"']
-    if "url" in low:
+    if "url" in toks or "uri" in toks:
         return ['"not a url"', '""']
-    if "age" in low:
+    if "age" in toks:
         out = [_probe_literal("-1", ptype), _probe_literal("151", ptype)]
         return [x for x in out if x]
     # 契约里"空列表/空字符串抛 X"这类话以前完全没法验：探针生成器只认函数名，
@@ -333,8 +373,31 @@ def _invalid_probes(func: str, text: str, ptype: str = "") -> list[str]:
 
 
 
-SAMPLE = {"str": '"abc"', "int": "7", "float": "1.5", "bool": "True",
-          "list": "[1, 2]", "dict": '{"a": 1}', "bytes": 'b"x"',
+# 契约里出现这些词 → 说明它真的规定了"格式/字符集"，此时给 str 参数造一条
+# 明显不合法的串（`"!!!"`）才是真判据；没有这些词就只验空输入，绝不硬造假红。
+_FMT_HINT = ("非法", "无效", "格式", "不能包含", "只允许", "仅允许", "必须是",
+             "长度是奇数", "非十六进制", "校验和", "不合法")
+
+def _exact_format_hint(expect: str) -> str:
+    """这条判据是不是"逐字相等的格式活"？是则返回一句提示，喂回远端。
+
+    为什么需要（2026-11-05 通用性测试）：契约要求 `render_table(...) == 'a | b\\n1 | 2'`，
+    模型自己造了另一种表格样式（`a b\\n- -\\n1 2`）—— 逻辑没错，**格式没照规格**，
+    于是判红、重试、烧钱。这类失败给模型一句"这是精确格式"比给它十行报错都管用，
+    因为报错里只有"得到 X 应为 Y"，模型很容易理解成"反正差不多"。
+    """
+    raw = str(expect or "").strip()
+    inner = raw[1:-1] if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"" else raw
+    if len(inner) < 4:
+        return ""
+    marks = [m for m in ("|", "\\n", "  ", ",", "\t", ":") if m in inner]
+    if not marks:
+        return ""
+    return ("（精确字符串：必须逐字相等，注意分隔符 %s / 换行 / 补空格 —— "
+            "不要换成别的表格样式）" % "、".join(m.replace("\\n", "\\n") for m in marks))
+
+
+SAMPLE = {"str": '"abc"', "int": "7", "float": "1.5", "bool": "True",          "list": "[1, 2]", "dict": '{"a": 1}', "bytes": 'b"x"',
           "list[str]": '["a", "b"]', "list[int]": "[1, 2]",
           "list[dict]": '[{"name": "a", "age": 10, "email": "a@x.com"}]',
           "dict[str, int]": '{"a": 1}'}
@@ -680,9 +743,10 @@ def from_contract(c, skip_exprs: set[str] | None = None) -> list[dict]:
                     break
             checks.append({"kind": "call_eq", "expr": expr, "expect": lit,
                            "hard": not placeholder_conn,
-                           "desc": "%s == %s%s" % (expr, lit,
-                                                   "（连接占位符示例 → 只提示）"
-                                                   if placeholder_conn else "")})
+                           "desc": "%s == %s%s%s" % (expr, lit,
+                                                    "（连接占位符示例 → 只提示）"
+                                                    if placeholder_conn else "",
+                                                    _exact_format_hint(lit))})
         for exc in f.raises:
             ptype = (f.params[0].type if f.params else "")
             # **只在单参数函数上造非法输入探针**：多参数函数只传一个实参等于缺参调用，
@@ -691,11 +755,24 @@ def from_contract(c, skip_exprs: set[str] | None = None) -> list[dict]:
             # 冤判成红，两版正确实现都被打回 → 0/4、0/3 收工。
             probes = (_invalid_probes(f.name, src, ptype) or []) if len(f.params) == 1 else []
             if not probes:
-                # 只在"单参数函数"上造默认探针：多参数函数（如 div(a, b)）里
-                # `m.div(0)` 会变成缺参 TypeError，反而生成一条**坏判据**。
-                # 多参数的情况下契约必须自己给可判示例，否则宁可不判（见 inspect 的提示）。
-                base = ["-1", "0"] if (len(f.params) == 1 and
-                                       f.params[0].type in ("int", "object", "str")) else []
+                # 单参数函数才造默认探针（多参数造出来是缺参 TypeError，坏判据）。
+                #
+                # 数值类型：-1 / 0 是天然的越界输入。
+                # 字符串类型：**只有契约明说"格式/非法字符"时**才造一个明显不合法的串。
+                # 为什么不一刀切给 str 也造探针：`validate_name(name: str)` 的契约是
+                # "空则抛 ValueError"，而 `-1` 是合法名字 —— 硬要求它抛错就是假红
+                # （实测：本地模型写对了 validate_name 仍被判 4/6 不通过）。
+                # 反过来 `from_hex(s: str)` 契约写着"含非十六进制字符抛 ValueError"，
+                # 这时 `"!!!"` 才是一条**真判据**（实测该用例曾因没有探针而漏判）。
+                base: list[str] = []
+                _ptype0 = (f.params[0].type if f.params else "")
+                if len(f.params) == 1:
+                    if _ptype0 in ("int", "float"):
+                        base = ["-1", "0"]
+                    elif _ptype0 in ("str", "text", "string"):
+                        _hint = any(k in (src or "").lower() for k in _FMT_HINT)
+                        if _hint:
+                            base = ['"!!!"']
                 probes = [x for x in (_probe_literal(b, ptype) for b in base) if x]
             for lit in probes:
                 checks.append({"kind": "raises", "expr": "m.%s(%s)" % (f.name, lit),
@@ -1351,7 +1428,7 @@ def run(ws: Path, rel: str, checks: list[dict], timeout: int = 60) -> dict:
         _rmtree_force(scratch)
     scratch.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-B", str(runner), Path(rel).stem,
-           json.dumps(checks, ensure_ascii=False), str(ws)]
+           json.dumps(checks, ensure_ascii=False), str(ws), str(rel).replace("\\", "/")]
     try:
         proc = subprocess.run(cmd, cwd=str(scratch), capture_output=True, text=True,
                               timeout=timeout, encoding="utf-8", errors="replace",

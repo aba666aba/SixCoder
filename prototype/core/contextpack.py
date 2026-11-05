@@ -64,17 +64,51 @@ def _calls_in(node: ast.AST) -> set[str]:
     return out
 
 
+def _function_is_stub(node: ast.AST) -> bool:
+    """这个函数是不是"空桩"（只有 docstring / pass / raise NotImplementedError）。
+
+    为什么要单独判：空桩的源码**没有信息量，还会主动误导**。
+    实测（2026-11-05 自生成第一夜）：把焦点函数的空桩源码当成"现有实现"喂给远端，
+    flash 直接照抄了一份 `raise NotImplementedError` 回来，4 个模块 20 个函数全判红，
+    整夜 0/20 验收 —— 花钱把桩抄了一遍。空桩必须明确告诉模型"这是要你实现的"，而不是给它抄。
+    """
+    body = list(getattr(node, "body", []) or [])
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+            and isinstance(body[0].value.value, str):
+        body = body[1:]                     # 去掉 docstring
+    if not body:
+        return True
+    if len(body) != 1:
+        return False
+    only = body[0]
+    if isinstance(only, ast.Pass):
+        return True
+    if isinstance(only, ast.Expr) and isinstance(only.value, ast.Constant):
+        return True                         # `...` / 字面量占位
+    if isinstance(only, ast.Raise):
+        exc = only.exc
+        name = ""
+        if isinstance(exc, ast.Call) and isinstance(exc.func, ast.Name):
+            name = exc.func.id
+        elif isinstance(exc, ast.Name):
+            name = exc.id
+        if name == "NotImplementedError":
+            return True
+    return False
+
+
 def module_digest(rel: str, src: str, focus: tuple[str, ...] = ()) -> dict:
-    """一个模块的摘要：签名表 + 调用关系 + 焦点函数的完整源码。"""
+    """一个模块的摘要：签名表 + 调用关系 + 焦点函数的完整源码（**空桩不算源码**）。"""
     try:
         tree = ast.parse(src)
     except SyntaxError as exc:
         return {"path": rel, "error": f"语法错误：{exc.msg}", "funcs": [], "callers": {},
-                "full": {}, "lines": len(src.splitlines())}
+                "full": {}, "stubs": [], "lines": len(src.splitlines())}
     imports: list[str] = []
     consts: list[str] = []
     funcs: list[dict] = []
     full: dict[str, str] = {}
+    stubs: list[str] = []
     body = {n.name: n for n in tree.body
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     for n in tree.body:
@@ -87,20 +121,24 @@ def module_digest(rel: str, src: str, focus: tuple[str, ...] = ()) -> dict:
                 isinstance(n.targets[0], ast.Name) and n.targets[0].id.isupper():
             consts.append(n.targets[0].id)
     for name, node in body.items():
+        is_stub = _function_is_stub(node)
+        if is_stub:
+            stubs.append(name)
         funcs.append({
             "name": name,
             "sig": _sig(node),
             "doc": _doc_first_line(node),
             "lines": (getattr(node, "end_lineno", node.lineno) - node.lineno + 1),
             "calls": sorted(c for c in _calls_in(node) if c != name and c in body),
+            "stub": is_stub,
         })
-        if name in focus:
+        if name in focus and not is_stub:
             try:
                 full[name] = ast.get_source_segment(src, node) or ""
             except Exception:                            # noqa: BLE001
                 full[name] = ""
     return {"path": rel, "imports": imports, "consts": consts, "funcs": funcs,
-            "full": full, "lines": len(src.splitlines()), "error": ""}
+            "full": full, "stubs": stubs, "lines": len(src.splitlines()), "error": ""}
 
 
 def callers(modules: list[dict]) -> dict[str, list[str]]:
@@ -187,18 +225,28 @@ def pack(ws: Path, contracts: dict, paths: list[str] | None = None,
     edges = callers(mods)
     sec_edges = [f"- {callee} ← {', '.join(sorted(set(srcs)))}"
                  for callee, srcs in sorted(edges.items()) if len(set(srcs)) > 1]
-    # 3) 焦点函数的完整源码
+    # 3) 焦点函数的完整源码（空桩不算）
     sec_full: list[str] = []
     for m in mods:
         for name, code in (m.get("full") or {}).items():
             if code.strip():
                 sec_full.append(f"### {m['path']}::{name}\n```python\n{_tokens.cut(code.strip(), 6000)}\n```")
+    # 空桩清单：明确告诉远端"这些要你实现"，别照抄
+    sec_stubs: list[str] = []
+    for m in mods:
+        for name in (m.get("stubs") or []):
+            if name in (focus or ()) or m["path"] in (paths or ()):
+                sec_stubs.append(f"- {m['path']}::{name}")
+    sec_stubs = sec_stubs[:30]
 
     def build(include_docs: bool, include_full: bool, include_edges: bool) -> str:
         parts = ["# 契约摘要（判据来源，权威）", *sec_contract, ""]
         if include_edges and sec_edges:
             parts += ["# 跨模块调用关系（架构决策用）", *sec_edges, ""]
         parts += ["# 模块签名表", *sec_mods, ""]
+        if sec_stubs:
+            parts += ["# 这些函数目前是空桩（只有 docstring/raise NotImplementedError）",
+                      "# 它们不是「已有实现」，必须你自己写完整函数体：", *sec_stubs, ""]
         if include_full and sec_full:
             parts += ["# 焦点符号完整源码", *sec_full, ""]
         if tests:

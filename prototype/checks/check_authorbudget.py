@@ -136,6 +136,30 @@ def main() -> int:
     check("放大次数有上限（不会每次都翻倍）", len(calls) <= 4, str([c["max_out"] for c in calls]))
     check("最终还是失败（不会假装成功）", not r.get("ok"), str(r.get("reason"))[:120])
 
+    print("[4] 思考 token 不算'正文被截断'（实测 round-01a 第 7 次栽在这）")
+    calls.clear()
+
+    def fake_think(prompt, **kw):                                 # noqa: ANN001
+        calls.append({"max_out": kw.get("max_out"), "grew": "截断" in prompt})
+        # completion 17 552 里 15 000 是思考，正文只有 2 552 —— 远小于配额，**完全没被截断**。
+        # （测试用例必须让"正文 < 配额"：否则放大是正确行为，测不出归因 bug）
+        return {"ok": True,
+                "answer": '{"files":[{"path":"clean.py","content":'
+                          '"def f():\\n    return 1\\n"}]}',
+                "usage": {"completion_tokens": 17552, "reasoning_tokens": 15000}}
+
+    remote.complete = fake_think                                  # type: ignore[assignment]
+    try:
+        with _sandbox_temp() as td:
+            ws = Path(td)
+            r = author.author_module(ws, "clean.py", _C(CONTRACT), {"clean.py": _C(CONTRACT)})
+    finally:
+        remote.complete = orig                                    # type: ignore[assignment]
+    check("思考多但正文没满 → 不判截断（只调一次）", len(calls) == 1,
+          str([c["max_out"] for c in calls]))
+    check("不因为思考多就放大配额", not any(c["grew"] for c in calls), str(calls))
+    check("这一次照常落盘成功", bool(r.get("ok")), str(r.get("reason"))[:120])
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")

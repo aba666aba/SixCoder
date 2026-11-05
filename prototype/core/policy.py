@@ -57,6 +57,11 @@ class Policy:
     #   ladder   开发者模式：从最低强度往上爬（省钱优先）
     #   max      总是用该模型最深的一档（最贵、最不求人）
     effort_mode: str = "ladder"
+    # 写代码的思考强度上限（"最深档留给规格和诊断，不留给写代码"）。
+    # 实测（2026-11-05 自生成 round-01a）：rounding.py 被升到 max 档，单次思考 22 452 token、
+    # 一次 ¥0.108，5 个函数照样全红 —— 深思考没换来正确率，只换来账单。
+    # 而同一轮里 high 档写的 numeric/compare/interval 全绿。所以默认封顶 high。
+    code_effort_ceiling: str = "high"
     # 规格有歧义时怎么办：decide = 远端自己拍板并把假设写清楚（甲方模式）；
     #                    ask    = 停下来问人，不许猜（开发者模式）
     ambiguity: str = "decide"

@@ -102,12 +102,32 @@ def main() -> int:
         c2 = scale.count_lines(ws)
         check("新增文件按模块增长（目录数没变）", c2["modules"] == 5, str(c2))
 
-    print("[6] lint：包的 __init__.py 里 re-export 星号导入不算问题，其它文件仍算")
-    a = lint.lint_source("from .numeric import *\n", "pkg/__init__.py")
-    b = lint.lint_source("from os import *\n", "pkg/util.py")
-    check("__init__.py 的星号导入不再报", not [x for x in a if x["rule"] == "star_import"],
-          str(a))
-    check("普通模块的星号导入仍然报", any(x["rule"] == "star_import" for x in b), str(b))
+        print("[6] lint：包的 __init__.py 里 re-export 星号导入不算问题，其它文件仍算")
+        a = lint.lint_source("from .numeric import *\n", "pkg/__init__.py")
+        b = lint.lint_source("from os import *\n", "pkg/util.py")
+        check("__init__.py 的星号导入不再报", not [x for x in a if x["rule"] == "star_import"],
+              str(a))
+        check("普通模块的星号导入仍然报", any(x["rule"] == "star_import" for x in b), str(b))
+
+    # ---------------------------------------------------------------- 7 判据的导入
+    print("[7] 判据按路径加载嵌套模块（不然越像真实项目越全红）")
+    from core import author, props
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td2:
+        ws2 = Path(td2)
+        (ws2 / "pkg" / "deep").mkdir(parents=True)        # 故意**不**建 __init__.py
+        (ws2 / "pkg" / "deep" / "calc.py").write_text(
+            "def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+        checks = [{"kind": "call_eq", "expr": "m.add(2, 3)", "expect": "5",
+                   "desc": "add(2, 3) == 5", "hard": True}]
+        r = props.run(ws2, "pkg/deep/calc.py", checks)
+        check("没有 __init__.py 的嵌套模块也能被判据验（旧实现 ModuleNotFoundError 全红）",
+              r.get("ok") is True, str(r)[:200])
+        author._ensure_packages(ws2, "pkg/deep/calc.py")
+        check("写完代码会补齐包的 __init__.py",
+              (ws2 / "pkg" / "__init__.py").exists() and (ws2 / "pkg" / "deep" / "__init__.py").exists())
+        r2 = props.run(ws2, "pkg/deep/calc.py", checks)
+        check("补了包结构之后仍然通过", r2.get("ok") is True, str(r2)[:160])
 
     print()
     if FAILS:

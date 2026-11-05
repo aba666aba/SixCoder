@@ -34,19 +34,19 @@ def _sixcoder(ws: Path) -> Path:
 
 
 def _lines(ws: Path) -> tuple[int, int]:
-    """(产物行数, 含测试的行数)。测试代码不算"产物规模"，但要一起报出来。"""
-    ws = Path(ws)
-    prod = test = 0
-    for p in sorted(ws.glob("*.py")):
-        try:
-            n = len(p.read_text(encoding="utf-8-sig", errors="replace").splitlines())
-        except OSError:
-            continue
-        if p.name.startswith("test_"):
-            test += n
-        else:
-            prod += n
-    return prod, test
+    """(产物行数, 测试行数)。测试代码不算"产物规模"，但要一起报出来。
+
+    旧实现只 `ws.glob("*.py")` —— **只看仓库根目录**，于是 `cal/core/numeric.py`
+    这类包内模块一行都不算。实测（2026-11-05 自生成 round-01a 全部 20/20 通过）：
+    台账记成 `lines: 0`，交付报告写着"本项目 0 行产物"，等于把真实产出抹掉了。
+    现在直接复用 `scale.count_lines()`（那里已经按"一个非 __init__ 文件 = 一个模块"算对）。
+    """
+    try:
+        from . import scale as _scale
+        m = _scale.count_lines(Path(ws))
+        return int(m.get("prod_lines") or 0), int(m.get("test_lines") or 0)
+    except Exception:                                    # noqa: BLE001
+        return 0, 0
 
 
 def _read_jsonl(path: Path) -> list[dict]:

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import contract as contract_mod
-from . import db, iterate, ollama, settings_store, workorder
+from . import db, iterate, ollama, policy, settings_store, workorder
 
 ROLES = {
     "architect": {"model": "remote", "may": ["读证据", "出根因", "下工作单"], "may_not": ["写代码"]},
@@ -276,6 +276,41 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
     model, model_warn = model_policy.enforce(model)
     if model_warn and emit:
         emit("notice", {"message": model_warn})
+    # ---- 语言闸门（自动识别 + 模式切换）----
+    # **必须排在契约合成之前**：能真验证的才放行 —— Java/C/C++ 用真编译器、JS/TS 用 node；
+    # 没工具链的语言"开跑前就拒绝（0 花费）"。
+    # 实测回归（2026-11-05）：把闸门挪到契约合成之后，会让"本机无法验证的语言"
+    # 先花掉一次远端调用再被拒绝，`check_lang` 的"零花费"断言立刻抓住。
+    from . import lang as _lang_mod
+    try:
+        # 用 planner 的那一份正则，别再抄一遍：抄出来的这版把 `c` 排在 `cpp` 前面、
+        # 又没有词尾边界，于是 `stats.cpp` 被判成 C（实测：C++ 任务用 gcc 验的，
+        # 那个"通过"根本不能证明 C++ 正确性）。
+        from .planner import MODULE_RE as _MOD_RE
+        _req_paths = [m.group(1) for m in _MOD_RE.finditer(requirement or "")]
+        _linfo = _lang_mod.detect(requirement or "", _req_paths)
+    except Exception as exc:                             # noqa: BLE001
+        _linfo = {"lang": "python", "name": "Python", "ok": True, "by": "识别失败",
+                  "why": f"{type(exc).__name__}", "install": "", "judge": "full"}
+    if emit:
+        emit("lang_detect", {"lang": _linfo["lang"], "name": _linfo["name"],
+                             "by": _linfo["by"], "ok": _linfo["ok"],
+                             "evidence": _lang_mod.judge_level(_linfo["lang"])})
+    if _linfo["lang"] != "python":
+        if not _linfo["ok"]:
+            _why = (f"识别为 {_linfo['name']}（依据：{_linfo['by']}），但本机**无法验证**它："
+                    f"{_linfo['why']}。\n"
+                    f"装好之后再来：{_linfo['install']}\n"
+                    "在此之前系统不会替你生成「看起来对但没验证过」的代码。")
+            try:
+                write_delivery(ws, requirement, [], [], _why, 0.0,
+                               scope={"level": "S", "lang": _linfo["lang"]})
+            except Exception:                    # noqa: BLE001
+                pass
+            return NightResult(False, rounds=[], reason=_why,
+                               spent_s=round(time.time() - t0, 1))
+        return _night_foreign(ws, requirement, model, _linfo, t0, emit=emit,
+                              max_cny=max_cny)
     locked = ""
     if contract_file:
         try:
@@ -293,6 +328,17 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
         contracts = {}
     if not contracts:
         contracts = contract_mod.parse_requirement(requirement)
+    # 「解析出模块但一个函数都没有」等于没解析：
+    # 实测踩过 —— 需求里用 `1) calc/core/numeric.py：` + `- 行为` 这种形状写，
+    # 会被确定性解析器认成"8 个模块、0 个函数"的契约，于是远端合成被跳过、
+    # 夜班拿着一堆空模块跑完 0/0，还只花 66 秒（**静默零工作量**，最毒的一种失败）。
+    # 现在这种半成品一律当成"没解析出来"，继续往下走远端合成；永远不许悄悄空跑。
+    _nf = _contract_func_count(contracts)
+    if contracts and _nf == 0:
+        if emit:
+            emit("notice", {"message": f"需求里识别出 {len(contracts)} 个模块但 0 个函数签名"
+                                       "（只是文件名清单，还不是契约）→ 交给远端合成契约"})
+        contracts = {}
     if not contracts:
         # 夜班要"机械判据"，就得先有**结构化契约**。但甲方提的需求常常是自然语言
         # （实测："写一个计算器，支持加减乘除、根号、求导、不定积分" → 解析不出任何模块）。
@@ -362,39 +408,12 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
                 "需求里没有解析出模块契约（当前模式下不会让远端替你翻译）。请按这个格式写：\n"
                 "  「1) clean.py：normalize_age(x: str) -> int：……；parse_date(s: str) -> str：……」\n"
                 "也就是：先点名文件（xxx.py），再逐个给函数名、参数类型、返回类型与一句行为要求。"))
-    # ---- 语言闸门（自动识别 + 模式切换）----
-    # 能真验证的才放行：Python 用契约判据；Java/C/C++ 用真编译器；JS/TS 用 node。
-    # 没工具链的语言**开跑前就拒绝**（0 花费），并写清装什么 —— 不许"生成了但没验证"报成功。
-    from . import lang as _lang_mod
-    try:
-        # 用 planner 的那一份正则，别再抄一遍：抄出来的这版把 `c` 排在 `cpp` 前面、
-        # 又没有词尾边界，于是 `stats.cpp` 被判成 C（实测：C++ 任务用 gcc 验的，
-        # 那个"通过"根本不能证明 C++ 正确性）。
-        from .planner import MODULE_RE as _MOD_RE
-        _req_paths = [m.group(1) for m in _MOD_RE.finditer(requirement or "")]
-        _linfo = _lang_mod.detect(requirement or "", _req_paths)
-    except Exception as exc:                             # noqa: BLE001
-        _linfo = {"lang": "python", "name": "Python", "ok": True, "by": "识别失败",
-                  "why": f"{type(exc).__name__}", "install": "", "judge": "full"}
-    if emit:
-        emit("lang_detect", {"lang": _linfo["lang"], "name": _linfo["name"],
-                             "by": _linfo["by"], "ok": _linfo["ok"],
-                             "evidence": _lang_mod.judge_level(_linfo["lang"])})
-    if _linfo["lang"] != "python":
-        if not _linfo["ok"]:
-            _why = (f"识别为 {_linfo['name']}（依据：{_linfo['by']}），但本机**无法验证**它："
-                    f"{_linfo['why']}。\n"
-                    f"装好之后再来：{_linfo['install']}\n"
-                    "在此之前系统不会替你生成「看起来对但没验证过」的代码。")
-            try:
-                write_delivery(ws, requirement, [], [], _why, 0.0,
-                               scope={"level": "S", "lang": _linfo["lang"]})
-            except Exception:                    # noqa: BLE001
-                pass
-            return NightResult(False, rounds=[], reason=_why,
-                               spent_s=round(time.time() - t0, 1))
-        return _night_foreign(ws, requirement, model, _linfo, t0, emit=emit,
-                              max_cny=max_cny)
+    # 兜底：走到这里契约必须**真的有函数**。否则立刻如实失败 ——
+    # 绝不许拿着一堆空模块跑完 0/0（实测踩过：66 秒花 4 次调用、产出 0 行）。
+    if _contract_func_count(contracts) == 0:
+        return NightResult(False, spent_s=round(time.time() - t0, 1), reason=(
+            "契约里 0 个函数：需求里只有模块名/自然语言，没有可判定的函数签名，"
+            "远端合成也没给出可用契约。请补上「函数名(参数: 类型) -> 返回类型：一句行为 + 一条示例」。"))
     # ---- 项目地图（第3层）：跨模块事实源，落盘后供判据与提示词共用 ----
     try:
         from . import project as _proj
@@ -1155,12 +1174,30 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
         _ceil.record_autonomy(ws, _lv_now, verified, total,
                               mode=str(getattr(pol, "mode", "") or ""),
                               human_interventions=_human, cost_cny=_cost,
-                              did_work=any(int(h.get("orders") or 0) > 0
-                                           for h in (hist or [])))
+                              # 「真干了活」不能只看轮次统计里的 orders 字段：
+                              # 实测（round-01a 全部 20/20 通过、写了 4 个模块 226 行）
+                              # 却被记成 did_work=False —— 因为那个字段那一轮没被填。
+                              # 只要这一轮有函数通过机械验收，就说明真的写了代码。
+                              did_work=bool(verified) or any(
+                                  int(h.get("orders") or 0) > 0 for h in (hist or [])))
         ceiling_res = _ceil.probe_all(ws, contracts, level=_lv_now)
         if emit:
             emit("ceiling", {"counts": ceiling_res.get("counts"),
                              "lines": ceiling_res.get("lines")})
+        # 收工时按真实账本校准一次（auto 可关；样本不足的项会自动保持原样）
+        try:
+            from . import calibration as _cal_end
+            _cal_out = _cal_end.recompute(ws)
+            if emit:
+                emit("calibration", {"changed": _cal_out.get("changed") or [],
+                                     "applied": {k: v for k, v in (_cal_out.get("applied") or {}).items()
+                                                 if k in ("reasoning_reserve", "content_floor",
+                                                          "safety_cap", "module_budget_cny",
+                                                          "code_effort_ceiling")},
+                                     "basis": _cal_out.get("basis") or {}})
+        except Exception as exc:                     # noqa: BLE001
+            if emit:
+                emit("notice", {"message": f"校准跳过：{type(exc).__name__}"})
     except Exception as exc:                             # noqa: BLE001
         if emit:
             emit("notice", {"message": f"能力上限台账跳过：{type(exc).__name__}"})
@@ -1465,6 +1502,11 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
             _deps_map = dict(_proj_map.build_map(contracts).get("deps") or {})
     except Exception:                                    # noqa: BLE001
         _deps_map = {}
+    # 本轮的起点：单模块预算只统计**这一轮**的花费（历史账不能拖累新的一轮）
+    try:
+        _round_since = db.now()
+    except Exception:                                    # noqa: BLE001
+        _round_since = ""
 
     def needs_work(path: str) -> bool:
         return needs_work_state(state, path)
@@ -1596,6 +1638,44 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
         rec = _wu(rel)
         used_total = int(rec.get("total") or 0)
         used_tier = int((rec.get("tiers") or {}).get(lvl) or 0)
+        # **单模块预算**：一个模块最多吃这么多钱，超了就停手、把额度留给别的模块。
+        # 数值优先用校准值（按模块花费 p75 × 1.5 算出来的），再受"剩余预算 ÷ 模块数"约束。
+        # 实测（2026-11-05 round-01a 第 3 次）：一次 round 只有 ¥0.6，而 rounding.py 一个模块
+        # 连打 5 次、单次思考 12 096 token（¥0.0637），把预算吃穿 → 后面的 interval 还没轮到
+        # 就被"花费到上限"收工，最终 10/20（比不设上限时的 15/20 更差）。
+        _cal_mod = 0.15
+        _mod_funcs = 0
+        try:
+            _cal_b = __import__("core.calibration", fromlist=["x"])
+            _cal_mod = float(_cal_b.current().get("module_budget_cny") or 0.15)
+        except Exception:                    # noqa: BLE001
+            _cal_mod = 0.15
+        try:
+            _c_now = contracts.get(rel)
+            _mod_funcs = len(list(getattr(_c_now, "funcs", None) or []))
+        except Exception:                    # noqa: BLE001
+            _mod_funcs = 0
+        # 预算按**模块大小**给：1 个函数和 8 个函数不该用同一个数
+        # （实测：csvtool/cli.py 4 个函数 103 行，¥0.15 根本不够，只过 1/4）
+        try:
+            from . import calibration as _cal_c
+            _mod_budget_raw = _cal_c.module_budget_for(_mod_funcs)
+        except Exception:                    # noqa: BLE001
+            _mod_budget_raw = _cal_mod
+        _mod_budget = float((rec.get("budget_cny") or 0) or
+                            max(0.05, min(_mod_budget_raw,
+                                          float(budget_left) / max(1.0, float(max_modules)))))
+        _spent_mod = _module_spend(ws, rel, _round_since)
+        if _spent_mod >= _mod_budget:
+            stats["modules"].append({"path": rel, "ok": False, "tier": lvl + 1, "by": "-",
+                                     "reason": f"单模块预算用完（已花 ¥{_spent_mod:.3f} ≥ "
+                                               f"¥{_mod_budget:.3f}），把额度留给别的模块",
+                                     "applied": []})
+            if emit:
+                emit("module_budget_stop", {"path": rel, "spent_cny": round(_spent_mod, 4),
+                                            "budget_cny": round(_mod_budget, 4),
+                                            "remaining": round(_mod_budget - _spent_mod, 4)})
+            continue
         if used_total >= cap_total or used_tier >= cap_per_tier:
             # 同一档已经写得够多 / 整夜额度用尽 → 不再重写；能升档就升档（升档不占本档额度）
             can_step = used_tier >= cap_per_tier and lvl + 1 < len(steps)
@@ -1780,6 +1860,14 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                                  "reason": str(r.get("reason") or "")[:200],
                                  "attempt": int(r.get("attempt") or 0),
                                  "applied": r.get("applied") or []})
+        # 记一条写作尝试：给"按各档成功率校准封顶"和"按模块大小校准预算"提供证据
+        try:
+            from . import calibration as _cal_rec
+            _cal_rec.record_attempt(ws, path=rel, effort=str(step.get("effort") or "none"),
+                                   ok=bool(ok), funcs=_mod_funcs,
+                                   cost_cny=_module_spend(ws, rel, _round_since))
+        except Exception:                    # noqa: BLE001
+            pass
         # 「一次通过率」是甲方模式唯一的自检指标：**没有重试就全绿**的模块占比。
         # 它比"最终通过率"严格得多——最终通过率可以靠反复刺激刷出来，一次通过率不能。
         _tot = int(stats.get("mod_total") or 0) + 1
@@ -1934,14 +2022,33 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
             stats["ok"] = False
             n = tier_fail.get(rel, 0) + 1
             tier_fail[rel] = n
+            # 思考强度上限：写代码不往最深档升（深档留给规格/诊断）。
+            # 实测：rounding.py 升到 max 后单次思考 22 452 token、一次 ¥0.108，5 个函数照样全红 ——
+            # 深思考没换来正确率，只换来账单；同一轮 high 档写的三个模块全绿。
+            _cap_lvl = lvl
+            try:
+                from . import calibration as _cal, effort as _eff_cap
+                # 封顶优先用**校准值**（按各档成功率算出来的），policy 字段只是兜底默认
+                _ceil_eff = str(_cal.current().get("code_effort_ceiling")
+                                or getattr(policy.current(), "code_effort_ceiling", "high"))
+                _cap_lvl = _eff_cap.pick(steps, _ceil_eff)
+            except Exception:                # noqa: BLE001
+                _cap_lvl = len(steps) - 1
             if n >= escalate_after and lvl + 1 < len(steps):
-                tier_of[rel] = lvl + 1
-                tier_fail[rel] = 0
-                if emit:
-                    nxt = steps[lvl + 1]
-                    emit("escalate", {"order": f"整文件 {rel}", "from": tag,
-                                      "to": f"{nxt.get('profile_id')}:{nxt.get('effort')}",
-                                      "fails": n})
+                if lvl + 1 > _cap_lvl:
+                    if emit:
+                        emit("escalate_capped", {"order": f"整文件 {rel}", "from": tag,
+                                                 "cap": f"{steps[_cap_lvl].get('profile_id')}:"
+                                                        f"{steps[_cap_lvl].get('effort')}",
+                                                 "why": "写代码的思考强度封顶（深档留给规格与诊断）"})
+                else:
+                    tier_of[rel] = lvl + 1
+                    tier_fail[rel] = 0
+                    if emit:
+                        nxt = steps[lvl + 1]
+                        emit("escalate", {"order": f"整文件 {rel}", "from": tag,
+                                          "to": f"{nxt.get('profile_id')}:{nxt.get('effort')}",
+                                          "fails": n})
     return stats
 
 
@@ -2240,6 +2347,32 @@ def write_delivery(ws: Path, requirement: str, state: dict, hist: list[dict],
     p = Path(ws) / "DELIVERY.md"
     p.write_text("\n".join(lines), encoding="utf-8")
     return p
+
+def _module_spend(ws: Path, rel: str, since: str = "") -> float:
+    """这个模块**本轮**已经花掉的远端钱（¥）。
+
+    按远端账本的 node_id 精确匹配 `author:<rel>`，并且**只统计 since 之后的调用**。
+    为什么必须带 since：第一版写成"最近 12 小时"，于是把历史几轮的账也算进来了 ——
+    实测（2026-11-05 round-01a 第 4 次）rounding.py 历史已花 ¥0.92，
+    一进本轮就被判定"超预算"直接跳过，compare/interval 同样被历史账拖累，
+    结果 5/20、¥0.21 就收工，比不设刹车更差。
+    读不到账本就返回 0：宁可少刹车，也不能因为记账故障卡住生产。
+    """
+    try:
+        from . import db
+        stamp = since or db.now()
+        rows = db.query(
+            "SELECT COALESCE(SUM(cost_cny), 0) AS s FROM remote_usage "
+            "WHERE node_id = ? AND created_at >= ?", (f"author:{rel}", stamp))
+        return float((rows[0] or {}).get("s") or 0.0) if rows else 0.0
+    except Exception:                                    # noqa: BLE001
+        return 0.0
+
+
+def _contract_func_count(contracts: dict | None) -> int:
+    """契约里到底有几个函数签名。0 = 这份契约没法验收（只有模块名不算契约）。"""
+    return sum(len(getattr(c, "funcs", None) or []) for c in (contracts or {}).values())
+
 
 def night(repo: Path, requirement: str, model: str, hours: float = 6.0,
           remote_profile: str = "", max_cny: float = 0.0, 

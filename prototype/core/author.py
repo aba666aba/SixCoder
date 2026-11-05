@@ -46,6 +46,8 @@ AUTHOR_PROMPT = """你是资深工程师。按下面的**契约**写出整个文
 9. **机械性内容可以 delegate**（样板/参数校验/日志/适配层）：你只给一句话规格，最多 3 项。
    本地模型会写并过机械判据，不过会把失败原因还给你下一轮自己写。
    核心逻辑必须你自己写，别把"需要你想清楚"的部分委托出去。
+10. **空桩不是实现**：上下文里 `raise NotImplementedError` / 只有 docstring 的函数，
+    是**要你写**的桩，不是已有代码。照抄一遍等于什么都没做，会被判红。
 """
 
 
@@ -506,6 +508,29 @@ def _merge_skeleton(existing: str, funcs, only: list[str]) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _ensure_packages(ws: Path, rel: str) -> list[str]:
+    """给嵌套模块补齐包的 `__init__.py`，返回新建的文件。
+
+    为什么要补：`cal/core/numeric.py` 这种布局，没有 `__init__.py` 就不是包，
+    `import cal.core.numeric` 会失败（判据已改成"按路径加载"兜住，但真实项目
+    仍然需要包结构才能被正常 import / 被 pytest 收集）。这一步是确定性的，不花 token。
+    """
+    made: list[str] = []
+    cur = Path(ws)
+    for part in Path(rel).parts[:-1]:
+        cur = cur / part
+        init = cur / "__init__.py"
+        if init.exists():
+            continue
+        try:
+            cur.mkdir(parents=True, exist_ok=True)
+            init.write_text('"""包。"""\n', encoding="utf-8")
+            made.append(str(init.relative_to(ws)).replace("\\", "/"))
+        except OSError:
+            pass
+    return made
+
+
 def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan: str = "",
                   evidence: str = "", step_index: int = 0, task_id: str = "",
                   emit=None, attempts: int = 2, max_out: int = 0,
@@ -592,9 +617,18 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
         if not r.get("ok"):
             return {"ok": False, "reason": f"远端调用失败：{r.get('error')}"[:200],
                     "by": "", "attempt": attempt, "system_issues": issues, "max_out": max_out}
-        # 被配额截断 ≠ 模型不会写：输出顶到 max_out 就说明配额太小，放大重试一次。
+        # 被配额截断 ≠ 模型不会写：**正文**顶到 max_out 才说明配额太小，放大重试一次。
         # 实测教训（night-v2a）：10/11 次调用恰好停在 1200，全被判成"没给出 files"。
-        used = int((r.get("usage") or {}).get("completion_tokens") or 0)
+        #
+        # 关键修正（2026-11-05 round-01a 第 7 次）：**必须扣掉思考 token 再比**。
+        # completion_tokens 是"思考 + 正文"的总和，开着思考时它会天然超过 max_out：
+        # 实测一条被判"被截断（17552 token 就顶到配额 12000）"的调用里，1.4 万是思考、
+        # 正文只有三千多 —— 完全没被截断。误判的代价是把 max_out 放大 4 倍、白烧一次调用，
+        # 并给模型一句错误的提示（它会以为要删注释重写）。
+        _u = r.get("usage") or {}
+        used_all = int(_u.get("completion_tokens") or 0)
+        used_reason = int(_u.get("reasoning_tokens") or 0)
+        used = max(0, used_all - used_reason)          # 只看正文
         if used >= max(1, int(max_out * 0.98)) and grew < 2:
             grew += 1
             old = max_out
@@ -618,6 +652,7 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
             continue
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
+        _ensure_packages(ws, path)          # 嵌套模块要有包结构才 import 得动
         # 委托：远端把机械输出交给本地模型（省远端输出）。委托失败要打回给远端。
         deleg_report = {"done": [], "failed": []}
         if delegated and local_model:

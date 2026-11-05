@@ -30,6 +30,20 @@ DEFAULTS = {
         "max_prompt_chars": 2000000,
         # 同一档连续失败几次才升到下一档（用户口径："低级模型多次无法解决才调下一层"）
         "escalate_after": 1,
+        # 校准值（可手改）：思考预留 / 正文下限 / 单次上限 / 单模块预算 / 写代码思考封顶。
+        # 这些数字**不该硬编码**——它们随模型与任务规模变化，由 core/calibration.py
+        # 按真实账本自动重算（auto=True 时每轮收工后尝试一次）。
+        "calibration": {
+            "source": "defaults",
+            "reasoning_reserve": {"low": 12000, "high": 24000, "max": 40000},
+            "content_floor": 12000,
+            "safety_cap": 128000,
+            "module_budget_cny": 0.15,
+            "code_effort_ceiling": "high",
+            "auto": True,
+            "min_samples": 20,
+            "updated_at": "",
+        },
         # 开发者模式的远端开关：默认**关**（本地模型自己写）。
         # 甲方模式强制开启；只读模式强制关闭 —— 见 core/policy.py 的 remote_allowed()。
         "dev_remote": False,

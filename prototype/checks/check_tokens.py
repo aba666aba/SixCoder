@@ -88,6 +88,26 @@ def main() -> int:
         tokens._TOK_STATE.clear()
         tokens._TOK_STATE.update({"tried": False, "path": "", "why": ""})
 
+    # 6) 空桩不许当"现有实现"喂给远端
+    print("[6] 空桩源码不进上下文（否则模型会照抄桩）")
+    stub_src = ('"""m。"""\n\n\ndef add(a: int, b: int) -> int:\n    """相加"""\n'
+                '    raise NotImplementedError\n\n\ndef mul(a: int, b: int) -> int:\n'
+                '    """相乘"""\n    return a * b\n')
+    d = contextpack.module_digest("m.py", stub_src, focus=("add", "mul"))
+    check("识别出空桩", d["stubs"] == ["add"], str(d["stubs"]))
+    check("焦点源码里只有真实现（不含桩）", list(d["full"]) == ["mul"], str(list(d["full"])))
+    check("每个函数都带 stub 标记",
+          [(f["name"], f["stub"]) for f in d["funcs"]] == [("add", True), ("mul", False)],
+          str([(f["name"], f["stub"]) for f in d["funcs"]]))
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        Path(td, "m.py").write_text(stub_src, encoding="utf-8")
+        pack = contextpack.pack(Path(td), {}, paths=["m.py"], focus=("add", "mul"))
+    check("包体里有『空桩…必须你自己写』的显式提示", "目前是空桩" in pack)
+    check("桩函数的源码没有被当成『焦点符号完整源码』贴进去",
+          "### m.py::add" not in pack, pack[:200])
+    check("真实现仍然给全文（决策要用）", "### m.py::mul" in pack)
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")

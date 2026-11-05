@@ -212,6 +212,26 @@ def main() -> int:
           policy.for_mode("developer").ambiguity == "ask"
           and policy.for_mode("developer").scope_authority == "human")
 
+    # ---------------------------------------------------------------- 7 空契约
+    print("[7] 『解析出模块但 0 个函数』不许静默空跑")
+    check("_contract_func_count 对空契约返回 0", company._contract_func_count({}) == 0)
+    _zero = contract_mod.parse_requirement(
+        "1) cal/core/numeric.py：\n   - 求和\n   - 安全除法\n")
+    check("只有模块名+行为清单 → 0 个函数（这不算契约）",
+          company._contract_func_count(_zero) == 0,
+          str({k: len(getattr(v, 'funcs', []) or []) for k, v in _zero.items()}))
+    _real = contract_mod.parse_requirement(
+        "1) calc.py：\n   - add(a: int, b: int) -> int：相加\n示例（必须满足）：\nadd(1, 2) == 3\n")
+    check("正常契约 → 计数 > 0", company._contract_func_count(_real) >= 1)
+    # 实现在 _night_inner 里（night() 只是包了一层保证写交付报告的壳）
+    _impl = getattr(company, "_night_inner", None)
+    check("找得到夜班实现（_night_inner）", _impl is not None)
+    _nsrc = inspect.getsource(_impl) if _impl else ""
+    check("夜班把空契约当成『没解析出来』继续走远端合成",
+          "_contract_func_count(contracts)" in _nsrc, _nsrc[:0])
+    check("夜班最后还有一道『0 个函数就如实失败』的兜底",
+          "契约里 0 个函数" in _nsrc, _nsrc[:0])
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")

@@ -25,6 +25,108 @@ from . import db, settings_store
 
 PRICE_PER_M = {"deepseek-flash": (0.27, 1.10), "deepseek-chat": (0.27, 1.10)}  # 每百万 token：输入(未命中)/输出；命中约 1/10
 
+# 单次调用的**安全上限**（max_tokens 的最终取值）。
+#
+# 口径（2026-11-05 用户定的，纠正了我之前的错误）：
+#   `max_tokens` 是**上限不是消费** —— 计费只按实际生成的 token 算，
+#   所以"给大"几乎不花钱，**不该为了省钱去缩它**。
+#   实测单次峰值：输出 26 788 token（¥0.107），离 128K 很远。
+# 那为什么不用官方的 384K？只有一个理由：**跑飞止损**。
+#   模型一旦复读，上限就是唯一的刹车；128K 足够容下任何正常调用（实测峰值的 4.8 倍），
+#   又不至于让它疯跑到 384K。
+# 注意：这个上限**与"一轮要求写几个函数"（剂量）是两件事**，
+#   剂量由 core/dosing 按档案的正文预算与近期一次通过率决定，两者互不影响。
+SAFETY_CAP = 128000
+SAFETY_MIN_CAP = 128000        # 校准值不允许低于这个（宁可多给，也不要截断）
+# 思考强度 → 额外要预留的 reasoning 配额（token）。它**加在正文配额之上**。
+# max_tokens 是"思考 + 正文"的总和，把思考算进正文配额里会出现"想得越深、正文越写不出来"。
+# 数字按实测：flash 在 max 档想过 22 452 token、high 档想过 15 765。
+REASONING_RESERVE = {"none": 0, "low": 12000, "high": 24000, "max": 40000}
+# 没配正文配额却又开了思考时，正文至少留这么多
+CONTENT_FLOOR = 12000
+CONTENT_CEIL = 384000          # 官方单次输出上限（正文部分）
+
+
+def reasoning_reserve(effort: str | None) -> int:
+    """该思考档要预留多少 reasoning 配额 —— **优先用校准值**（core/calibration）。
+
+    内置常量只是兜底：真实值由账本按"该档 reasoning 的 p95 × 1.3"自动算出来，
+    所以换模型/换任务规模时不用改代码，跑几轮它自己就校准过去了。
+    """
+    e = str(effort or "none").lower()
+    if e == "none":
+        return 0
+    try:
+        from . import calibration
+        got = (calibration.current().get("reasoning_reserve") or {}).get(e)
+        if isinstance(got, (int, float)) and got > 0:
+            return int(got)
+    except Exception:                                    # noqa: BLE001
+        pass
+    return REASONING_RESERVE.get(e, 0)
+
+
+def safety_cap() -> int:
+    """单次调用上限（校准值优先；不低于内置 128k）。"""
+    try:
+        from . import calibration
+        got = int(calibration.current().get("safety_cap") or 0)
+        if got > 0:
+            return max(SAFETY_MIN_CAP, got)
+    except Exception:                                    # noqa: BLE001
+        pass
+    return SAFETY_CAP
+
+
+def content_floor() -> int:
+    """正文下限（校准值优先）。"""
+    try:
+        from . import calibration
+        got = int(calibration.current().get("content_floor") or 0)
+        if got > 0:
+            return got
+    except Exception:                                    # noqa: BLE001
+        pass
+    return CONTENT_FLOOR
+
+
+def max_tokens_for(content_budget: int, effort: str | None) -> int:
+    """正文配额 + 思考预留 —— **唯一算法**，`_payload_for` 与 `complete` 都必须用它。
+
+    为什么必须只有一个入口：实测踩过两次。第一次把思考算进正文配额里（正文 0 token），
+    第二次在 `_payload_for` 里加了预留、却被 `complete` 里的 `max_out` 覆盖回 8 000
+    （思考 6 631 + 正文 1 369，JSON 又被截断）。两条路各写一遍 = 必漏一处。
+    """
+    e = str(effort or "none").lower()
+    reserve = reasoning_reserve(e)
+    content = int(content_budget or 0)
+    if content <= 0:
+        content = content_floor() if reserve else 0
+    if not content and not reserve:
+        return 0
+    content = min(content, CONTENT_CEIL)          # 官方单次输出上限 384K（正文部分）
+    desired = max(1, content) + reserve
+    # **一步到位**：正常调用永远不该被上限掐住（实测峰值 26 788 << 128K），
+    # 所以直接把 max_tokens 顶到安全上限，而不是按需算一个小值再往上抬。
+    # 这不是浪费：max_tokens 只是上限，按实际生成计费。
+    return max(desired, safety_cap())
+
+
+def content_truncated(usage: dict | None, content_budget: int) -> bool:
+    """判断"正文是不是被配额截断了"。
+
+    不能直接拿 completion_tokens 比：它含思考。正文 = completion − reasoning，
+    正文顶到配额才说明"没写完"，这时候重试才有意义（加预算），而不是重问。
+    """
+    budget = int(content_budget or 0)
+    if budget <= 0:
+        return False
+    usage = usage or {}
+    used = int(usage.get("completion_tokens") or 0)
+    reason = int(usage.get("reasoning_tokens") or 0)
+    content = max(0, used - reason)
+    return content >= int(budget * 0.98)
+
 
 def _key() -> str:
     r = settings_store.get_remote()
@@ -281,8 +383,13 @@ def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool) -> 
     # 档案里的 max_output_tokens 默认 0 = 不设，只有运维显式配了才用；
     # 以前这里兜了个 8000，等于第二个真相源，会把小任务的配额顶大、大任务顶小。
     cap = int(step.get("max_output_tokens") or r.get("max_output_tokens") or 0)
-    if cap > 0:
-        payload["max_tokens"] = cap
+    # **思考也要占 max_tokens**：官方口径里 max_tokens 是"思考 + 正文"的**总和**。
+    # 实测踩过（2026-11-05 甲方模式第一夜）：flash:max 档 8000 配额被 reasoning 吃满，
+    # 正文 0 token → 契约合成返回空 → 整夜白跑（两次调用各 ¥0.03）。
+    # 所以开思考时必须把 reasoning 的额度**加在正文配额之上**，否则"越想越写不出来"。
+    _mt = max_tokens_for(cap, effort)
+    if _mt:
+        payload["max_tokens"] = _mt
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     if effort == "none":
@@ -464,10 +571,37 @@ def complete(prompt: str, task_id: str = '', node_id: str = 'architect',
         tag = f"{step['profile_id']}:{step['effort']}"
         payload, base, key = _payload_for(step, r, [{'role': 'user', 'content': text}],
                                           json_mode=json_mode)
+        _eff = str(payload.get("reasoning_effort") or "none").lower()
         if max_out:
-            # 整文件/架构设计需要长输出；档位默认 8K 只够一个函数
-            payload['max_tokens'] = max(1024, min(int(max_out), 384000))
-        data, err, ms = _post(payload, base, key)
+            # 整文件/架构设计需要长输出；档位默认 8K 只够一个函数。
+            # 注意：这里也必须走 max_tokens_for，否则会把 _payload_for 算好的思考预留覆盖掉
+            # （实测：只在 _payload_for 加预留时，这条一覆盖，思考又把正文挤成 1 369 token）。
+            payload['max_tokens'] = max_tokens_for(min(int(max_out), CONTENT_CEIL), _eff)
+        # 「配额不够」要归因到配额，不要归因到模型，并且**当场自动放大重试一次**。
+        # 实测（2026-11-05）：high 档预留 8000 时出现过「思考 11 000、正文 0」，
+        # 白烧 ¥0.048；max 档也出现过「思考 22 452、正文 4 336」把正文挤到写不完。
+        # 归因错一次的代价是"重写整个模块"，比多给配额贵得多。
+        for _attempt in range(2):
+            data, err, ms = _post(payload, base, key)
+            if data is None:
+                break
+            choice = (data.get('choices') or [{}])[0]
+            fin = str(choice.get('finish_reason') or '')
+            u = data.get('usage') or {}
+            _ct = int(u.get('completion_tokens') or 0)
+            _rt = int((u.get('completion_tokens_details') or {}).get('reasoning_tokens') or 0)
+            _body = max(0, _ct - _rt)
+            starved = (_ct > 0 and _body <= 32) or fin == 'length'
+            if not starved or _attempt == 1:
+                break
+            # 思考吃光 / 顶到上限 → 直接把配额翻倍（再留一档余量），重发一次
+            cur = int(payload.get('max_tokens') or 0)
+            payload['max_tokens'] = max(cur * 2, cur + 8000, 16000)
+            if emit:
+                emit('budget_grown', {'step': tag, 'from': cur, 'to': payload['max_tokens'],
+                                      'why': 'quota_starved',
+                                      'observed': {'completion': _ct, 'reasoning': _rt,
+                                                   'body': _body, 'finish': fin}})
         if data is None:
             tried.append(f'{tag}失败({err[:40]})')
             if _is_transient(err) and idx + 1 < len(steps):

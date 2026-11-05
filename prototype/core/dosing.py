@@ -27,7 +27,12 @@ _EFFORT_CAPACITY = {"none": 6000, "low": 5000, "high": 4000, "max": 3000}
 
 
 def capacity_tokens(step: dict | None) -> int:
-    """这一档一次最多能吐多少 token（含思考）。档案显式配了就听档案。"""
+    """这一档一次能用多少 token 写**正文**（不含思考的预留）。
+
+    档案显式配了 max_output_tokens 就当正文配额；没配就按档位估。
+    注意：真正发请求时 `remote` 会把 reasoning 的额度**加在这之上**
+    （`REASONING_RESERVE`），否则思考会吃光正文配额 —— 这里算的是"能写多少代码"。
+    """
     step = step or {}
     cap = int(step.get("max_output_tokens") or 0)
     if cap > 0:

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core import company, effort, policy, settings_store  # noqa: E402
+from core import company, contractgen, dosing, effort, policy, settings_store  # noqa: E402
 
 FAILS: list[str] = []
 
@@ -130,8 +130,66 @@ def main() -> int:
     ev = effort.explain("code", 5, "max", four, 3)
     check("explain() 说清为什么用这一档", ev["chosen"] == "max" and ev["why"], str(ev))
 
-    # ---------------------------------------------------------------- 6 接口层
-    print("[6] 接口层对得上（界面/CLI 能真的切换模型）")
+    # ---------------------------------------------------------------- 6 思考配额
+    print("[6] 思考额度加在正文配额之上（不然越想越写不出来）")
+    from core import remote as _remote
+    _msgs = [{"role": "user", "content": "x"}]
+
+    def _mt(effort, cap=8000):
+        step = {"model": "deepseek-flash", "effort": effort, "max_output_tokens": cap}
+        payload, _, _ = _remote._payload_for(step, {}, _msgs, True)
+        return payload.get("max_tokens"), payload.get("thinking")
+
+    mt_none, th_none = _mt("none")
+    mt_max, th_max = _mt("max")
+    check("不思考时也直接给到安全上限（上限不等于消费）",
+          mt_none == _remote.SAFETY_CAP, str(mt_none))
+    check("max 档同样顶到安全上限，不再按需算小值",
+          mt_max == _remote.SAFETY_CAP, str(mt_max))
+    check("安全上限容得下 4 倍实测峰值（26 788 ×4）且小于官方 384K",
+          4 * 26788 <= _remote.SAFETY_CAP < 384000, str(_remote.SAFETY_CAP))
+    check("开档位的 thinking 参数正确", th_max == {"type": "enabled"}
+          and th_none == {"type": "disabled"}, f"{th_max} / {th_none}")
+    mt_floor, _ = _mt("max", cap=0)
+    check("没配正文配额也照样给上限", mt_floor == _remote.SAFETY_CAP, str(mt_floor))
+    check("正文配额（dosing）与上限解耦：capacity 仍是 12 000",
+          dosing.capacity_tokens({"max_output_tokens": 12000, "effort": "max"}) == 12000)
+    # 正文截断判定：必须扣掉思考再比，否则"思考用满"会被误判成"正文用满"
+    check("思考吃满但正文没满 → 不算截断",
+          _remote.content_truncated({"completion_tokens": 16000, "reasoning_tokens": 12815},
+                                    8000) is False)
+    check("正文用满 → 判为截断",
+          _remote.content_truncated({"completion_tokens": 8000, "reasoning_tokens": 0},
+                                    8000) is True)
+    check("没有正文配额 → 不判截断（避免无脑重试）",
+          _remote.content_truncated({"completion_tokens": 16000}, 0) is False)
+    check("契约合成会把正文配额传给远端（否则只能吃档案里的 8000）",
+          "max_out=out_budget" in inspect.getsource(contractgen.synthesize))
+    check("契约合成能识别截断并加预算重试",
+          "content_truncated" in inspect.getsource(contractgen.synthesize))
+    # 唯一的算法入口：complete() 的 max_out 分支也必须带预留，否则会把 _payload_for 的结果覆盖掉
+    check("max_tokens 只有一个算法入口 max_tokens_for",
+          _remote.max_tokens_for(12000, "max") == _remote.SAFETY_CAP
+          and _remote.max_tokens_for(0, "none") == 0)
+    _csrc = inspect.getsource(_remote.complete)
+    check("complete() 的 max_out 分支带上了思考预留",
+          "REASONING_RESERVE.get" in _csrc or "max_tokens_for" in _csrc, _csrc[:0])
+    # 用户口径：一开始就给足，不够就归因配额、当场翻倍重试
+    check("预留按实测给足（high ≥ 实测 15 765、max ≥ 实测 22 452）",
+          _remote.REASONING_RESERVE["high"] >= 15765
+          and _remote.REASONING_RESERVE["max"] >= 22452,
+          str(_remote.REASONING_RESERVE))
+    check("配额不够会当场翻倍重试（归因到配额，不归因到模型）",
+          "budget_grown" in _csrc and "starved" in _csrc, _csrc[:0])
+    check("正文下限给足（不让人再看到『思考吃满、正文 0』）",
+          _remote.CONTENT_FLOOR >= 12000, str(_remote.CONTENT_FLOOR))
+    check("正文部分被夹在官方 384k 以内（思考预留另加）",
+          _remote.max_tokens_for(400000, "max")
+          == 384000 + _remote.reasoning_reserve("max"),
+          str(_remote.max_tokens_for(400000, "max")))
+
+    # ---------------------------------------------------------------- 7 接口层
+    print("[7] 接口层对得上（界面/CLI 能真的切换模型）")
     root = Path(__file__).resolve().parent.parent
     srv = (root / "server.py").read_text(encoding="utf-8", errors="replace")
     check("设置请求体接受 active_model", "active_model: Optional[str]" in srv)
