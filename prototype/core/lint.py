@@ -80,7 +80,12 @@ def lint_source(src: str, rel: str = "<mem>") -> list[dict]:
                 imported[(a.asname or a.name).split(".")[0]] = n.lineno
         elif isinstance(n, ast.ImportFrom):
             if any(a.name == "*" for a in n.names):
-                add("star_import", n.lineno, lines[n.lineno - 1] if n.lineno <= len(lines) else "")
+                # 包的 `__init__.py` 用星号导入做**门面 re-export** 是标准写法
+                # （实测 asyncio/__init__.py:8 `from .base_events import *`）。
+                # 把它当问题只会让 lint 在真实仓库上刷噪音，噪音一多整条规则就没人看了。
+                if Path(rel).name != "__init__.py":
+                    add("star_import", n.lineno,
+                        lines[n.lineno - 1] if n.lineno <= len(lines) else "")
                 continue
             for a in n.names:
                 imported[a.asname or a.name] = n.lineno

@@ -25,7 +25,7 @@ import re
 from pathlib import Path
 
 from . import contract as contract_mod
-from . import remote
+from . import remote, settings_store
 
 PROMPT = """你是需求分析师。把下面这段**甲方需求**翻译成"可机判的契约"，只输出 JSON。
 
@@ -49,9 +49,29 @@ JSON 结构（严格）：
    实在无法机判的，要么限定成可判形式，要么在 module 的 purpose 里写明放弃哪一项、为什么。
 6. 宁可少而可判，不要多而含糊。拿不准就拆成"能做对的那一小步"。
 
+{ambiguity_block}
+
 甲方需求：
 {requirement}
 """
+
+
+def _ambiguity_block(mode: str) -> str:
+    """规格歧义怎么处理 —— 这是两种模式最本质的差别之一。
+
+    甲方模式（decide）：没人可问，所以**远端自己拍板**，但必须把假设写进 purpose，
+    交付报告会把这些假设列出来 —— 事后可以追责，事前不阻塞。
+    开发者模式（ask）：不许猜。只输出 {"question":...,"options":[...]}，系统停下等人回答。
+    """
+    if str(mode).lower() == "ask":
+        return ("7. **有歧义就停下来问**：如果需求里有会影响接口/语义/边界的分歧，"
+                "不要猜、不要自己拍板，只输出：\n"
+                '   {"question":"一句话问题","options":["选项A","选项B"],"why":"为什么必须问"}\n'
+                "   没有歧义才输出 modules。")
+    return ("7. **有歧义自己拍板**：没有人可以问，所以你必须自己做出决定，"
+            "但每个被你拍板的点都要以「假设：……」写进对应模块的 purpose，"
+            "让甲方在交付报告里能一眼看到你替他决定了什么。"
+            "唯一例外：需求在**能力上无法机判**（例如要求通解求导）时，按第 4/5 条限定成可判形式并在 purpose 说明。")
 
 
 def _norm_type(t: str) -> str:
@@ -64,8 +84,13 @@ def _norm_type(t: str) -> str:
     return t if t in ok else ""
 
 
-def render_text(modules: list[dict]) -> str:
-    """把远端给的 JSON 结构渲染成我们自己的契约文本（下游全部复用现有解析与判据）。"""
+def render_text(modules: list[dict], per_module: int = 8) -> str:
+    """把远端给的 JSON 结构渲染成我们自己的契约文本（下游全部复用现有解析与判据）。
+
+    per_module：每个模块最多收几个函数。默认 8 是"什么都没算"时的保守值；
+    调用方应按 `core/dosing` 算出的验收带宽传进来（见 synthesize）。
+    """
+    cap = max(1, int(per_module or 8))
     lines: list[str] = []
     for i, mod in enumerate(modules, 1):
         path = str(mod.get("path") or "").strip()
@@ -73,7 +98,7 @@ def render_text(modules: list[dict]) -> str:
             continue
         purpose = str(mod.get("purpose") or "").strip()
         lines.append(f"{i}) {path}{'：' + purpose if purpose else '：'}")
-        for f in (mod.get("functions") or [])[:8]:
+        for f in (mod.get("functions") or [])[:cap]:
             name = str(f.get("name") or "").strip()
             if not name:
                 continue
@@ -89,7 +114,7 @@ def render_text(modules: list[dict]) -> str:
         lines.append("")
         lines.append("示例（必须满足）：")
         got_example = False
-        for f in (mod.get("functions") or [])[:8]:
+        for f in (mod.get("functions") or [])[:cap]:
             for ex in (f.get("examples") or [])[:2]:
                 ex = str(ex).strip()
                 if ex:
@@ -101,12 +126,21 @@ def render_text(modules: list[dict]) -> str:
     return "\n".join(lines).strip()
 
 
-def validate(modules: list[dict], contracts: dict) -> list[str]:
-    """校验"这份契约真的能机判"。返回问题清单（空 = 通过）。"""
+def validate(modules: list[dict], contracts: dict, limit: int | None = None,
+             why: list[str] | None = None) -> list[str]:
+    """校验"这份契约真的能机判"。返回问题清单（空 = 通过）。
+
+    limit：这一轮允许几个函数（**动态**，由 core/dosing 按验收带宽算）。
+           旧的写死 16 已废弃：16 不是物理上限，只是"一轮能验收多少"的经验值，
+           而它随输出配额、思考强度、依赖数、近期一次通过率变化。
+           why：算这个数的依据（人话），会拼进拒绝信息里，方便追"凭什么"。
+    """
     problems: list[str] = []
     if not contracts:
         return ["契约解析结果为 0 个模块（路径没以 .py 结尾，或没有函数签名）"]
     n_funcs = 0
+    n_examples = 0
+    n_raises = 0
     for path, c in contracts.items():
         for f in c.funcs:
             n_funcs += 1
@@ -116,39 +150,78 @@ def validate(modules: list[dict], contracts: dict) -> list[str]:
                 problems.append(f"{path}::{f.name} 的参数字段缺类型：{', '.join(untyped)}"
                                 f"（没有类型就造不出边界输入、判据跑不起来）")
             exs = list(getattr(f, "examples", None) or [])
+            n_examples += len(exs)
+            n_raises += len(list(getattr(f, "raises", None) or []))
             if not exs:
                 problems.append(f"{path}::{f.name} 没有示例（没有示例就没有 call_eq 判据）")
     if n_funcs == 0:
         problems.append("一个函数都没解析出来")
-    if n_funcs > 16:
-        problems.append(f"函数太多（{n_funcs} 个）：先做能判定的 6~8 个，剩下的下一轮再加")
+    if limit is None:
+        from . import dosing
+        limit, auto_why = dosing.suggest_max_funcs(
+            examples=max(1, n_examples // max(1, n_funcs)),
+            raises=max(0, n_raises // max(1, n_funcs)))
+        why = why if why is not None else auto_why
+    if n_funcs > int(limit):
+        basis = ("；依据：" + "；".join(why[:3])) if why else ""
+        problems.append(
+            f"函数太多（{n_funcs} 个 > 本轮验收带宽 {limit} 个）："
+            f"先做最能判定的 {max(3, int(limit) // 2)}~{limit} 个，剩下的下一轮再加{basis}")
     return problems
 
 
-def synthesize(requirement: str, task_id: str = "contract", step_index: int | None = None,
-               retries: int = 1) -> dict:
-    """需求 → 契约。返回 {ok, contracts, text, by, problems, usage}。"""
+
+def synthesize(requirement: str, task_id: str = "contract", step_index: int | str | None = None,
+               retries: int = 1, thinking: str = "off", ambiguity: str = "decide",
+               budget: dict | None = None) -> dict:
+    """需求 → 契约。返回 {ok, contracts, text, by, problems, usage, allowance}
+    （或 need_human）。
+
+    step_index 可以传 "strongest" → 用阶梯最强档（甲方模式的规格优先）。
+    ambiguity="ask" 时，远端被允许只回一个问题，本函数以 need_human 返回（开发者模式）。
+    budget：这一轮的验收带宽参数（`core/dosing.context_for()` 的产物）；
+            没有就按"什么都没测到"的保守值算，绝不假装知道。
+    """
     problems: list[str] = []
+    from . import dosing as _dosing
     from . import tokens as _tokens
-    prompt = PROMPT.format(requirement=_tokens.cut((requirement or "").strip(), 8000))
+    if isinstance(step_index, str):
+        step_index = settings_store.strongest_step_index() if step_index.lower() in ("strongest", "best") else None
+    allow, allow_why = _dosing.suggest_max_funcs(**(budget or {}))
+    prompt = PROMPT.format(requirement=_tokens.cut((requirement or "").strip(), 8000),
+                           ambiguity_block=_ambiguity_block(ambiguity))
+    prompt += (f"\n\n【本轮可用验收带宽】最多 {allow} 个函数"
+               f"（依据：{'；'.join(allow_why[:2])}）。宁可少而可判，不要多而含糊。")
     for attempt in range(1, retries + 2):
         r = remote.complete(prompt if attempt == 1 else
                             prompt + "\n\n【上一次的问题，必须改掉】\n" + "\n".join(problems[:6]),
                             task_id=task_id, node_id="contract", json_mode=True,
-                            step_index=step_index)
+                            step_index=step_index, thinking=thinking)
         if not r.get("ok"):
             return {"ok": False, "problems": [f"远端调用失败：{r.get('error')}"],
                     "contracts": {}, "text": "", "by": ""}
         data = _parse_json(r.get("answer") or "")
+        # 远端选择"不猜、发问"（只在 ambiguity="ask" 时会被允许）：如实上报，不许当成失败重试
+        ask = str((data or {}).get("question") or "").strip()
+        if ask:
+            # 不在这里截断：问题原文要原样交给人看（questions.ask 自己管展示长度）
+            return {"ok": False, "need_human": True, "question": ask,
+                    "options": list((data or {}).get("options") or [])[:4],
+                    "why": str((data or {}).get("why") or ""),
+                    "problems": [f"规格有歧义需要人拍板：{ask}"],
+                    "contracts": {}, "text": "", "by": r.get("by") or ""}
         modules = (data or {}).get("modules") or []
-        text = render_text(modules)
+        per_mod = _dosing.per_module_cap(allow, len(modules) or 1)
+        text = render_text(modules, per_module=per_mod)
         contracts = contract_mod.parse_requirement(text) if text else {}
-        problems = validate(modules, contracts)
+        problems = validate(modules, contracts, limit=allow, why=allow_why)
         if not problems:
             return {"ok": True, "contracts": contracts, "text": text,
-                    "by": r.get("by") or "", "problems": [], "usage": r.get("usage") or {}}
+                    "by": r.get("by") or "", "problems": [], "usage": r.get("usage") or {},
+                    "allowance": allow, "allowance_why": allow_why}
     return {"ok": False, "problems": problems, "contracts": {}, "text": "",
-            "by": "", "error": "远端给出的契约仍然不能机判"}
+            "by": "", "error": "远端给出的契约仍然不能机判",
+            "allowance": allow, "allowance_why": allow_why}
 
 
 CONTRACT_FILE = ".sixcoder/contract.txt"
@@ -166,8 +239,9 @@ def save_locked(ws, text: str) -> None:
     p.write_text(text, encoding="utf-8")
 
 
-def load_or_synthesize(ws, requirement: str, step_index: int | None = None,
-                       task_id: str = "contract") -> dict:
+def load_or_synthesize(ws, requirement: str, step_index: int | str | None = None,
+                       task_id: str = "contract", thinking: str = "off",
+                       ambiguity: str = "decide", budget: dict | None = None) -> dict:
     """仓库里已有锁存契约就直接用（0 调用）；没有才合成并锁存。
 
     为什么必须锁存（实测）：同一个需求合成两次会得到**不完全一样**的契约（示例细节不同），
@@ -179,7 +253,8 @@ def load_or_synthesize(ws, requirement: str, step_index: int | None = None,
         if contracts:
             return {"ok": True, "contracts": contracts, "text": text, "by": "locked",
                     "problems": []}
-    got = synthesize(requirement, task_id=task_id, step_index=step_index)
+    got = synthesize(requirement, task_id=task_id, step_index=step_index,
+                     thinking=thinking, ambiguity=ambiguity, budget=budget)
     if got.get("ok"):
         save_locked(ws, got["text"])
     return got

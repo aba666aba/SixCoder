@@ -28,6 +28,7 @@ AUTHOR_PROMPT = """你是资深工程师。按下面的**契约**写出整个文
 
 只输出 JSON（不要解释、不要围栏外文字）：
 {{"files":[{{"path":"模块.py","content":"<完整文件内容>"}}],
+ "delegate":[{{"kind":"validation|boilerplate|logging|adapter","target":"函数名","spec":"一句话规格"}}],
  "system_issues":[{{"where":"契约/判据/工具链","issue":"本地的缺陷","suggest":"怎么改"}}]}}
 
 铁律：
@@ -42,6 +43,9 @@ AUTHOR_PROMPT = """你是资深工程师。按下面的**契约**写出整个文
    用提前返回、字典查表、拆小函数来降复杂度。
 8. 如果你发现**契约或本地判据本身有问题**（漏定义字段、判据缺边界、工具链缺陷），
    写进 system_issues；不要因为契约有问题就自己改签名。
+9. **机械性内容可以 delegate**（样板/参数校验/日志/适配层）：你只给一句话规格，最多 3 项。
+   本地模型会写并过机械判据，不过会把失败原因还给你下一轮自己写。
+   核心逻辑必须你自己写，别把"需要你想清楚"的部分委托出去。
 """
 
 
@@ -506,10 +510,13 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
                   evidence: str = "", step_index: int = 0, task_id: str = "",
                   emit=None, attempts: int = 2, max_out: int = 0,
                   context_budget: int = 0, local_model: str = "",
-                  workingset: str = "", verify_fn=None) -> dict:
+                  workingset: str = "", verify_fn=None,
+                  stop_on_repeat: bool = True) -> dict:
     """让远端把**整个文件**写出来：提炼上下文 → 一次生成 → 本地验收 → 窄证据重试。
 
     max_out=0（默认）→ 按"要写的文件多大"自动算输出配额（见 tokens.output_budget）。
+    attempts 是"自愈轮数"（甲方模式默认 4，来自 policy.heal_attempts）；
+    stop_on_repeat=True 时，若新一轮的失败证据与已用过的完全相同就不发这次调用。
     """
     from . import contextpack, protocol, remote, tools
     from . import tokens as _tokens
@@ -560,11 +567,23 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
                                   requirements=req_block)
     last = evidence
     issues: list[dict] = []
+    _seen_evidence: set[str] = set()                # 已用过的失败证据（防止同证据反复刺激）
     grew = 0                                        # 因为"被截断"而放大配额的次数（最多 2 次）
     # 配额放大跨调用要**记住**：以前每次调 author_module 都从 3000 重算，于是同一个模块
     # 每轮都先被截断一次、白烧一次调用（实测 search-index 连输三次）。放大值通过返回值
     # max_out 交给调用方保存（见 company._author_round 的 rec["max_out"]）。
     for attempt in range(1, max(1, attempts) + 1):
+        # 同一个失败证据再问一遍只会白烧钱（远端看到完全相同的输入，答案大概率也一样）。
+        # 自愈轮数放开后这条更关键：它把"反复刺激"限制在"每轮都有新信息"的前提下。
+        _ev = (last or "").strip()
+        if attempt > 1 and stop_on_repeat and _ev and _ev in _seen_evidence:
+            issues.append({"where": "author", "issue": f"连续两轮失败证据完全相同，提前停止自愈（{path}）",
+                           "suggest": "让判据给出更具体的差异（行号/期望值），否则远端没有新信息可用"})
+            if emit:
+                emit("heal_stop", {"path": path, "attempt": attempt,
+                                   "why": "失败证据与上一轮完全相同（无新信息）"})
+            break
+        _seen_evidence.add(_ev)
         body = prompt if attempt == 1 else (
             prompt + "\n\n【上一版被机械判据判红，必须改掉】\n" + _tokens.cut(last or "", 1500))
         r = remote.complete(body, task_id=task_id or "author", node_id=f"author:{path}",
@@ -609,6 +628,15 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
             except Exception as exc:                     # noqa: BLE001
                 deleg_report = {"done": [], "failed": [
                     {"target": str(delegated[:1]), "reason": f"{type(exc).__name__}"}]}
+        # 委托失败必须**回传给远端**（以前只记在返回值里，远端下一轮根本不知道，
+        # 于是它以为那块机械活已经有人做了 —— 结果那个函数一直是错的）。
+        if deleg_report.get("failed"):
+            _dl = "\n".join(f"- {x.get('target')}: {x.get('reason')}"
+                            for x in deleg_report["failed"][:3])
+            last = ((last + "\n") if (last or "").strip() else "") + \
+                "【委托失败：这些机械活本地没做出来，请你自己写】\n" + _dl
+            if emit:
+                emit("delegate_bounced", {"path": path, "failed": len(deleg_report["failed"])})
         # verify_fn 是**语言切换**的钩子：Python 走契约判据（默认），
         # 别的语言走它自己的编译器/运行时（core/lang.py）。两者都返回 {ok, feedback}。
         verdict = (verify_fn(ws, path) if verify_fn

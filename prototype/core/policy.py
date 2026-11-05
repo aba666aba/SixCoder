@@ -45,6 +45,27 @@ class Policy:
     plan_first: bool = False
     # 规划/诊断阶段的思考默认值（远端推理能力是甲方模式的上限，这里该开就开）
     thinking_plan: str = "off"
+    # ------------------------------------------------------------------
+    # 「规格优先」（甲方模式 v1.1，目标：从 0 生产、人不改代码）
+    # 规格（接口/数据形状/错误语义/示例）决定后面每个模块的对错，是最高杠杆的一步。
+    # 旧行为是"从最低档开始生成规格然后固化"——用最弱的算力做最高杠杆的决定，本末倒置。
+    # ------------------------------------------------------------------
+    spec_tier: str = "ladder"          # ladder（从最低档起）| strongest（最强档）
+    spec_thinking: str = "off"         # 生成规格时开不开思考
+    # 写代码从哪一档起（**单模型**下就是"从哪一档思考强度起"）：
+    #   auto     甲方模式：由 core/effort.py 按需求/难度自动选强度（本次运行只用一个模型）
+    #   ladder   开发者模式：从最低强度往上爬（省钱优先）
+    #   max      总是用该模型最深的一档（最贵、最不求人）
+    effort_mode: str = "ladder"
+    # 规格有歧义时怎么办：decide = 远端自己拍板并把假设写清楚（甲方模式）；
+    #                    ask    = 停下来问人，不许猜（开发者模式）
+    ambiguity: str = "decide"
+    # 模块划分 / 范围由谁定：remote（甲方模式，远端拆分）| human（开发者模式）
+    scope_authority: str = "human"
+    # 单个模块的"自愈"轮数：AI 内部反复改到判据全绿，中间不需要人介入
+    heal_attempts: int = 2
+    # 新一轮的失败证据与上一轮完全相同 → 立刻停（同一个提示词再问一遍只是白烧钱）
+    heal_stop_on_repeat: bool = True
 
     @property
     def remote_decides(self) -> bool:
@@ -63,18 +84,26 @@ POLICIES: dict[str, Policy] = {
     "client": Policy(
         mode="client", name="甲方模式", arbiter="remote", code_escalation=FIRST_RED,
         plan_authority="remote", remote_code_budget=0,
-        code_author="remote", plan_first=False, thinking_plan="off",
+        code_author="remote", plan_first=True, thinking_plan="on",
+        spec_tier="strongest", spec_thinking="on", ambiguity="decide",
+        scope_authority="remote", heal_attempts=4, heal_stop_on_repeat=True,
+        effort_mode="auto",
         notes=("甲方模式就是夜班：提需求 → 系统自己做完 → 早上看交付报告",
-               "代码由远端整文件写；档位阶梯 flash:none → low → high → max（pro 默认关）",
-               "同一档连续失败到阈值才升下一档；偶发失败（限流/超时）不算，不白花钱",
-               "开局方案也走阶梯，从最低档开始；方案定了之后所有单都照它做",
+               "**规格优先**：接口/数据形状/错误语义/示例由最强档 + 思考全开产出（一次几毛钱，"
+               "却决定后面每个模块的对错）",
+               "规格有歧义时远端自己拍板并把假设写进交付报告，不回头问人、不猜着往下走",
+               "模块拆分与范围也由远端定（scope=remote），系统只提供确定性兜底",
+               "代码由远端整文件写；单个模块允许 4 轮内部自愈，人不介入",
                "每一次落盘仍要过全部机械判据：远端强不等于必然对"),
     ),
     "developer": Policy(
         mode="developer", name="开发者模式", arbiter="human", code_escalation=ON_APPROVAL,
         plan_authority="human", remote_code_budget=0,
         code_author="local", plan_first=False, thinking_plan="off",
+        spec_tier="ladder", spec_thinking="off", ambiguity="ask",
+        scope_authority="human", heal_attempts=2, heal_stop_on_repeat=True,
         notes=("实现方案由人给，系统照着做，不许自行改架构",
+               "规格有歧义时停下来问人（ambiguity=ask），由人做这个决定",
                "本地模型按方案打字；远端写代码属于关键节点，必须人批准",
                "需要架构决策但没有方案时抛 needhuman，不替人拍板",
                "每次决策与审批都留在审计日志里"),
@@ -169,4 +198,9 @@ def describe(pol: Policy | None = None) -> str:
               "local": "，代码由本地按方案写", "none": ""}.get(pol.code_author, "")
     budget = (f"，远端写代码上限 {pol.remote_code_budget} 次/夜"
               if pol.remote_code_budget else "，远端写代码不设次数上限（由时间预算兜）")
-    return f"{pol.name}：{arb}｜{esc}｜{plan}{author}{budget}"
+    spec = {"strongest": "，规格由最强档生成" if pol.spec_thinking == "on" else "，规格由最强档生成（不思考）",
+            "ladder": "，规格从最低档起" if pol.spec_thinking != "on" else "，规格走阶梯（思考开）",
+            "off": "，不单独生成规格"}.get(pol.spec_tier, "")
+    amb = "，歧义自己拍板" if pol.ambiguity == "decide" else "，歧义停下来问人"
+    heal = f"，单模块自愈 {pol.heal_attempts} 轮"
+    return f"{pol.name}：{arb}｜{esc}｜{plan}{author}{spec}{amb}{heal}{budget}"

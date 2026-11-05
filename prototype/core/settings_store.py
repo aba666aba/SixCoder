@@ -239,28 +239,97 @@ def save_models(profiles: list[dict]) -> list[dict]:
     return clean
 
 
-def ladder() -> list[dict]:
-    """把档案摊成**阶梯**：按 priority 升序，每个档案内部再按 efforts 升序。
+def active_model() -> dict | None:
+    """运行期**唯一**使用的模型档案（单模型）。
 
-    默认就是用户指定的八档：
-        flash:none → flash:low → flash:high → flash:max
-        → pro:none → pro:low → pro:high → pro:max
+    解析顺序（都可解释，绝不抛错）：
+      1. `remote.active_model` 填的档案 id；
+      2. 档案表里 `model` 字段等于平铺字段 `remote.model` 的那条
+         （界面只填 base_url / api_key / model 三个框，所以这条是主路径）；
+      3. 第一个 enabled 的档案；
+      4. 都没有 → 用平铺字段临时合成一条（保持"只填链接参数就能用"）。
+    返回 None 表示"一个可用的远端模型都没有"。
+    """
+    r = get_remote()
+    profs = models()
+    want_id = str(r.get("active_model") or "").strip()
+    if want_id:
+        for p in profs:
+            # 显式 pin 的档案**不看 enabled**：enabled 只用于"自动解析"时挑选，
+            # 用户明确点了"用这个"就该用它（否则会在界面上出现"点了没反应"）。
+            if p["id"] == want_id:
+                return p
+    flat_model = str(r.get("model") or "").strip()
+    if flat_model:
+        for p in profs:
+            if p.get("model") == flat_model and p.get("enabled", True):
+                return p
+    for p in profs:
+        if p.get("enabled", True):
+            return p
+    if flat_model or str(r.get("base_url") or "").strip() or str(r.get("api_key") or "").strip():
+        return _norm_model_profile({"id": flat_model or "flat", "label": flat_model or "平铺配置",
+                                    "model": flat_model or "deepseek-flash",
+                                    "base_url": r.get("base_url") or "",
+                                    "api_key": r.get("api_key") or "",
+                                    "enabled": True})
+    return None
+
+
+def ladder() -> list[dict]:
+    """阶梯 = **当前这一个模型**的思考强度序列（none → low → high → max）。
+
+    2026-11-05 用户口径：远端是"**单模型 + 自动切思考强度**"，不是"多模型 × 多强度"。
+    所以其它档案虽然可以保存（各自带 base_url / api_key / model，方便随时切换），
+    **不参与阶梯**：一次运行只用一个模型，只在这个模型内部换思考强度。
+
+    `local_first=True` 时第 0 档仍是本地模型（它也是"一个模型"，同样不构成多模型）。
     """
     steps: list[dict] = []
     if get_remote().get("local_first", True):
-        # 第 0 档 = 本地模型（0 token）。本地连续失败到阈值才上远端八档。
+        # 第 0 档 = 本地模型（0 token）。本地连续失败到阈值才上远端。
         steps.append({"profile_id": "local", "label": "本地模型", "model": "",
                       "effort": "-", "max_output_tokens": 0, "temperature": 0.2,
                       "base_url": "", "api_key": "", "pricing": None})
-    for p in models():
-        if not p.get("enabled", True):
-            continue
-        for eff in p.get("efforts") or ["none"]:
-            steps.append({"profile_id": p["id"], "label": p["label"], "model": p["model"],
-                          "effort": eff, "max_output_tokens": p["max_output_tokens"],
-                          "temperature": p["temperature"], "base_url": p["base_url"],
-                          "api_key": p["api_key"], "pricing": p["pricing"]})
+    p = active_model()
+    if not p:
+        return steps
+    for eff in p.get("efforts") or ["none"]:
+        steps.append({"profile_id": p["id"], "label": p["label"], "model": p["model"],
+                      "effort": eff, "max_output_tokens": p["max_output_tokens"],
+                      "temperature": p["temperature"], "base_url": p["base_url"],
+                      "api_key": p["api_key"], "pricing": p["pricing"]})
     return steps
+
+
+def ladder_step(idx: int) -> dict | None:
+    """取阶梯里第 idx 档（越界返回 None）。
+
+    住在 settings_store 而不是调用方：阶梯是**设置层**的概念，
+    规格合成（contractgen）与夜班编排（company）都只是它的使用者。
+    （2026-11-05 从 contractgen 搬过来 —— 那边管契约，不该管阶梯。）
+    """
+    try:
+        steps = ladder()
+    except Exception:                                    # noqa: BLE001
+        return None
+    i = int(idx or 0)
+    return steps[i] if 0 <= i < len(steps) else None
+
+
+def strongest_step_index() -> int:
+    """阶梯里**最强的那一档**的下标：规格应该由它生成。
+
+    为什么不是第 0 档：规格（接口/数据形状/错误语义/示例）决定后面每个模块的对错，
+    是整条链上最高杠杆的一步；用最便宜的档位生成规格再固化，
+    等于用最弱的算力做最重要的决定（旧行为，2026-11-05 改掉）。
+    """
+    try:
+        steps = ladder()
+    except Exception:                                    # noqa: BLE001
+        return 0
+    idx = [i for i, s in enumerate(steps) if str(s.get("model") or "").strip()]
+    return idx[-1] if idx else 0
 
 
 def update_remote(patch: dict) -> tuple[dict, list[str]]:
@@ -291,6 +360,11 @@ def update_remote(patch: dict) -> tuple[dict, list[str]]:
                 continue
         elif k == "api_key":
             v = str(v or "").strip()
+        elif k == "active_model":
+            # 空 = 自动（按平铺 model / 第一个 enabled 解析）；填了就必须是存在的档案 id
+            v = str(v or "").strip()
+            if v and not any(p["id"] == v for p in models()):
+                continue                              # 不存在的 id 直接忽略，别把配置写坏
         elif k == "pricing":
             v = _norm_pricing(v)
             if not v:
@@ -352,6 +426,8 @@ def public_remote(reveal: bool = False) -> dict:
         "max_prompt_chars": int(r.get("max_prompt_chars", 2000000)),
         "max_prompt_tokens": int(r.get("max_prompt_tokens", 950000)),
         "escalate_after": int(r.get("escalate_after", 2)),
+        "active_model": str((active_model() or {}).get("id") or ""),
+        "active_model_pinned": str(r.get("active_model") or ""),
         "local_first": bool(r.get("local_first", True)),
         "dev_remote": bool(r.get("dev_remote", False)),
         "configured_at": r.get("configured_at", ""),

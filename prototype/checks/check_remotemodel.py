@@ -42,7 +42,7 @@ def main() -> int:
     check("只 pro（未启用）→ 空，不偷偷回退到 flash", pro == [], str(pro))
     check("不存在的档案 → 空", remote.ladder("nonexistent") == [])
 
-    print("[3] 启用 pro 之后，两档可分别指定")
+    print("[3] 单模型语义：档案都能存，但阶梯只认 active_model")
     try:
         profs = settings_store.models()
         for p in profs:
@@ -50,16 +50,19 @@ def main() -> int:
                 p["enabled"] = True
         settings_store.save_models(profs)
         all2 = [f"{x['profile_id']}:{x['effort']}" for x in remote.ladder()]
-        flash2 = [f"{x['profile_id']}:{x['effort']}" for x in remote.ladder("flash")]
         pro2 = [f"{x['profile_id']}:{x['effort']}" for x in remote.ladder("pro")]
-        print(f"     整条 {len(all2)} 档｜flash {len(flash2)}｜pro {len(pro2)}")
-        check("整条包含两档", any(x.startswith("flash") for x in all2)
-              and any(x.startswith("pro") for x in all2))
-        check("只 flash → 4 档且不含 pro", len(flash2) == 4 and all(x.startswith("flash")
-                                                              for x in flash2))
-        check("只 pro → 4 档且不含 flash", len(pro2) == 4 and all(x.startswith("pro") for x in pro2))
-        check("两个子集加起来等于整条", len(flash2) + len(pro2) == len(all2))
+        print(f"     整条 {len(all2)} 档：{all2}")
+        check("打开 pro 也不会变成两条并排（仍然只有当前那一个模型）",
+              len(all2) == 4 and all(x.startswith("flash") for x in all2), str(all2))
+        check("按档案过滤：pro 未激活 → 空（不偷偷回退）", pro2 == [], str(pro2))
+        settings_store.update_remote({"active_model": "pro"})
+        all3 = [f"{x['profile_id']}:{x['effort']}" for x in remote.ladder()]
+        check("切 active_model=pro → 整条阶梯换成 pro 的四档",
+              len(all3) == 4 and all(x.startswith("pro") for x in all3), str(all3))
+        check("切过去之后 flash 反而查不到", remote.ladder("flash") == [],
+              str(remote.ladder("flash")))
     finally:
+        settings_store.update_remote({"active_model": ""})
         settings_store.save_models(orig)          # 一定还原，别把用户配置改坏
 
     print("[4] 还原后配置没被改动")

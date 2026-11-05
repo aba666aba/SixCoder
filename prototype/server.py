@@ -320,6 +320,7 @@ class RemoteSettingsReq(BaseModel):
     escalate_after: Optional[int] = None    # 同一档连续失败几次才升下一档
     dev_remote: Optional[bool] = None       # 开发者模式是否允许调用远端（甲方强制开、只读强制关）
     local_first: Optional[bool] = None       # 阶梯第 0 档是否用本地模型（省钱）
+    active_model: Optional[str] = None      # 当前使用的那**一个**模型档案 id（空 = 自动解析）
     pricing: Optional[dict] = None          # 旧价目表（美元）；新逻辑用 models[].pricing
     offpeak_window: Optional[dict] = None   # 旧字段，保留兼容
     models: Optional[list] = None           # 模型档案整表（增/删/改都走这里）
@@ -342,7 +343,11 @@ class ModelProfileReq(BaseModel):
 
 @app.get("/v1/settings/remote/models")
 def get_model_profiles():
-    """模型档案 + 由它摊出来的执行阶梯（八档）。界面直接用这两块渲染。"""
+    """模型档案 + 由它摊出来的执行阶梯。
+
+    阶梯是**当前这一个模型**的思考强度序列（none→low→high→max），不是多模型并排：
+    一次运行只用一个模型，强度由 core/effort.py 按需求/难度自动切。
+    """
     from core import settings_store
     return {"models": settings_store.models(), "ladder": settings_store.ladder(),
             "escalate_after": int(settings_store.get_remote().get("escalate_after") or 2),
@@ -437,6 +442,10 @@ def set_remote_settings(req: RemoteSettingsReq):
         if k == "api_key":
             if str(v).strip():
                 patch["api_key"] = str(v).strip()
+            continue
+        if k == "active_model":
+            # 空串 = 回到"自动解析"（按平铺 model / 第一个启用的档案），所以这里要允许清空
+            patch["active_model"] = str(v or "").strip()
             continue
         if isinstance(v, str) and not v.strip():
             continue

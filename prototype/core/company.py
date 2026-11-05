@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import contract as contract_mod
-from . import db, iterate, ollama, workorder
+from . import db, iterate, ollama, settings_store, workorder
 
 ROLES = {
     "architect": {"model": "remote", "may": ["读证据", "出根因", "下工作单"], "may_not": ["写代码"]},
@@ -307,7 +307,44 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
             from . import contractgen
             if emit:
                 emit("contract_synth", {"phase": "start", "requirement": requirement[:200]})
-            gen = contractgen.load_or_synthesize(ws, requirement)
+                # 规格的档位/思考/歧义策略单独记一条事件（不动上面那条已裁决的展示字段）
+                emit("spec_policy", {"tier": pol.spec_tier, "thinking": pol.spec_thinking,
+                                     "ambiguity": pol.ambiguity,
+                                     "why": "规格是全链最高杠杆的一步：用最强档+思考产出，"
+                                            "之后每个模块都照它做"})
+            # 规格优先：甲方模式用**最强档 + 思考开**产出规格（这是全链最高杠杆的一步）；
+            # 开发者模式走阶梯默认，且歧义会停下来问人而不是自己拍板。
+            # 一轮写多少**不是常数 16**：按这一档的输出配额、依赖数、近期一次通过率算（core/dosing）。
+            from . import dosing as _dosing
+            _spec_step = None
+            try:
+                _idx = settings_store.strongest_step_index() \
+                    if pol.spec_tier == "strongest" else 0
+                _spec_step = settings_store.ladder_step(_idx)
+            except Exception:                    # noqa: BLE001
+                _spec_step = None
+            _budget = _dosing.context_for(ws, _spec_step)
+            if emit:
+                _n, _why = _dosing.suggest_max_funcs(**_budget)
+                emit("dosing", {"round_allowance": _n, "why": _why,
+                                "capacity_tokens": _budget["capacity"],
+                                "first_pass": _budget["first_pass"]})
+            gen = contractgen.load_or_synthesize(
+                ws, requirement,
+                step_index="strongest" if pol.spec_tier == "strongest" else None,
+                thinking=pol.spec_thinking, ambiguity=pol.ambiguity, budget=_budget)
+            if gen.get("need_human"):
+                # 规格歧义 → 停下来问人（只会在 developer 的 ambiguity="ask" 时发生）
+                try:
+                    from . import questions as _qs
+                    _qs.ask(ws, gen.get("question") or "规格有歧义", gen.get("options"),
+                            gen.get("why") or "", emit=emit)
+                except Exception:                    # noqa: BLE001
+                    pass
+                return NightResult(False, spent_s=round(time.time() - t0, 1), reason=(
+                    "规格有歧义，已停下等人拍板（不会猜着往下写）：\n- "
+                    + (gen.get("question") or "")
+                    + (f"\n可选：{' / '.join(gen.get('options') or [])}" if gen.get("options") else "")))
             if gen.get("ok"):
                 contracts = gen["contracts"]
                 # 后续所有提示词都用"翻译出来的契约"作为需求原文，语义不会跑偏
@@ -466,8 +503,7 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
     if emit and use_remote:
         emit("remote_model", {"profile": remote_profile or "（自动：整条阶梯）",
                                "steps": [f"{x['profile_id']}:{x['effort']}" for x in steps]})
-    from . import settings_store as _ss
-    escalate_after = max(1, int(_ss.get_remote().get("escalate_after") or 1))  # 唯一真相源：settings（默认 1）
+    escalate_after = max(1, int(settings_store.get_remote().get("escalate_after") or 1))  # 唯一真相源：settings（默认 1）
     dec_used: dict[str, dict] = {}      # 模块 → {动作: 已用次数}（决策表预算，跨轮累计）
     # 整夜同一模块的重写次数预算（默认 3）。模块级、跨轮累计、成功清零。
     write_used: dict[str, int] = {}
@@ -509,21 +545,30 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
 
     if pol.plan_first and use_remote and _remote_available():
         try:
-            # 方案也走阶梯：从最低档开始（flash:none 便宜），它做不出方案才升档。
-            plan_step = 0
+            # 方案/规格的档位策略由 policy 决定：
+            #   甲方模式（spec_tier="strongest"）→ **先用最强档**再思考开：方案定了之后
+            #   每一张单都照它做，用最低档定方案等于用最弱的算力做最高的决定；
+            #   开发者模式（spec_tier="ladder"）→ 仍从最低档起（人会给方案，这里只是兜底）。
+            _strong = settings_store.strongest_step_index()
+            if pol.spec_tier == "strongest" and _strong > 0:
+                _order = [_strong, 0]        # 最强档顶不住（欠费/限流）再退到最低档，别整夜起不来
+            else:
+                _order = list(range(max(1, len(steps))))
+            plan_step = _order[0]
             auto_plan = ""
-            while plan_step < max(1, len(steps)):
+            _po: list[dict] = []
+            for plan_step in _order:
                 auto_plan, _po = iterate.ask_architect(
                     ws, task_id, contracts, iterate.inspect(ws, contracts), requirement,
                     thinking=pol.thinking_plan, plan="", want_plan=True,
                     step_index=plan_step)
                 if (auto_plan or "").strip() or _po:
                     break
-                plan_step += 1
             if emit:
                 emit("plan", {"by": (steps[plan_step].get("profile_id") + ":" +
                                      steps[plan_step].get("effort")) if steps else "remote",
                               "step": plan_step + 1, "of": len(steps),
+                              "tier_policy": pol.spec_tier, "thinking": pol.thinking_plan,
                               "text": (auto_plan or "")[:600],
                               "orders": len(_po)})
         except Exception as exc:                         # noqa: BLE001
@@ -760,13 +805,22 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
             # 旧路径（逐符号本地写 + 远端救单）已废弃：把最弱的一环放在写代码的位置上，
             # 再用远端反复返工，既慢又贵。这里整体交给远端写整文件，本地只做机械验收。
             if use_remote and _remote_available() and pol.code_author in ("remote", "ladder"):
+                _cst = _code_start_tier(pol, steps)
+                if emit:
+                    emit("code_tier", {"mode": getattr(pol, "effort_mode", "ladder"),
+                                       "start": _cst, "of": len(steps),
+                                       "model": (steps[_cst].get("profile_id") if steps else "?"),
+                                       "why": ("单模型：思考强度由系统按需求/难度自动选"
+                                               if getattr(pol, "effort_mode", "") == "auto"
+                                               else "从最低强度起，逐档升")})
                 stats = _author_round(ws, contracts, state, effective_plan, steps,
                                       tier_of, tier_fail, escalate_after, task_id,
                                       emit=emit, local_model=worker_model,
                                       budget_left=budget_s - (time.time() - t0),
                                       dec_used=dec_used, write_used=write_used,
                                       write_per_tier=write_per_tier,
-                                      requirement=requirement)
+                                      requirement=requirement, start_tier=_cst,
+                                      effort_mode=str(getattr(pol, "effort_mode", "ladder")))
                 remote_code_used += sum(1 for m in stats["modules"] if m.get("ok"))
                 if stats.get("isolate_degraded"):
                     iso_degraded.extend(stats["isolate_degraded"])
@@ -1351,12 +1405,49 @@ def needs_work_state(state: dict, path: str) -> bool:
             or int(st.get("verified") or 0) < int(st.get("funcs") or 0))
 
 
+def _auto_effort(contracts: dict, deps_map: dict, rel: str, fails: int = 0,
+                 stub: bool = False, lines: int = 0) -> tuple[str, int]:
+    """按"这次要写什么、有多难"给出思考强度（单模型下的自动挡）。
+
+    只吃确定性事实：依赖数（项目地图）、函数数、契约示例数、历史失败次数、是不是桩、文件行数。
+    返回 (想要哪一档, 难度分)，由 `effort.pick()` 在当前模型支持的那几档里落地。
+    """
+    from . import effort as _eff
+    c = contracts.get(rel)
+    fs = list(getattr(c, "funcs", None) or [])
+    score = _eff.difficulty(
+        deps=len((deps_map or {}).get(rel) or []),
+        funcs=len(fs),
+        examples=sum(len(getattr(f, "examples", None) or []) for f in fs),
+        fails=int(fails or 0), stub=bool(stub), lines=int(lines or 0))
+    return _eff.route("code", score), score
+
+
+def _code_start_tier(pol, steps: list[dict]) -> int:
+    """代码从哪一档起（**单模型**：就是"从哪一档思考强度起"）。
+
+    `effort_mode="auto"`（甲方模式）→ 规格/方案走最深、代码按难度路由（见 _auto_effort）；
+    `"ladder"`（开发者模式）→ 第 0 档（最省）；
+    `"max"` → 该模型最深的一档。
+    """
+    try:
+        mode = str(getattr(pol, "effort_mode", "ladder"))
+        if not steps:
+            return 0
+        if mode == "max":
+            return max(0, len(steps) - 1)
+        return 0
+    except Exception:                                    # noqa: BLE001
+        return 0
+
+
 def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list[dict],
                   tier_of: dict, tier_fail: dict, escalate_after: int, task_id: str,
                   emit=None, local_model: str = "", max_modules: int = 3,
                   budget_left: float = 600.0, dec_used: dict | None = None,
                   write_used: dict | None = None, write_per_tier: int = 0,
-                  requirement: str = "") -> dict:
+                  requirement: str = "", start_tier: int = 0,
+                  effort_mode: str = "ladder") -> dict:
     """**新路径（唯一）**：按模块整文件生成 → 本地全判据验收 → 窄证据重试 → 失败升档。
 
     旧路径（逐符号本地写 + 远端救单）已废弃：它把最弱的一环放在写代码的位置上，
@@ -1365,6 +1456,15 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
     from . import author as _author
     from . import scale as _scale_mod      # 分级参数（阈值/档位/上限）
     import os as _osr                     # 环境变量覆盖（round/隔离后端）
+
+    # 依赖图（只读一次）：思考强度路由要按"这个模块有几个依赖"判断难度
+    try:
+        from . import project as _proj_map
+        _deps_map = dict((_proj_map.load_map(ws) or {}).get("deps") or {})
+        if not _deps_map:
+            _deps_map = dict(_proj_map.build_map(contracts).get("deps") or {})
+    except Exception:                                    # noqa: BLE001
+        _deps_map = {}
 
     def needs_work(path: str) -> bool:
         return needs_work_state(state, path)
@@ -1468,7 +1568,31 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
         if hit and emit:
             emit("protected_zone", {"path": rel, "action": "警告",
                                     "message": f"{_scale_mod.resolve('', ws)['level']} 级只警告不阻断"})
-        lvl = min(tier_of.get(rel, 0), max(0, len(steps) - 1))
+        # 单模型的"自动挡"：按这次要写的模块有多难，决定从哪一档思考强度起。
+        # 只在首轮生效（之后仍然按失败逐档升强度），所以它只是"起点更聪明"，不改升级语义。
+        if str(effort_mode) == "auto" and steps:
+            try:
+                from . import effort as _eff_m
+                _c = contracts.get(rel)
+                _fails = int((_wu(rel).get("total") or 0))
+                try:
+                    _src_txt = (ws / rel).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    _src_txt = ""
+                _want, _score = _auto_effort(contracts, _deps_map, rel, _fails,
+                                             stub=(not _src_txt.strip()
+                                                   or "raise NotImplementedError" in _src_txt),
+                                             lines=len(_src_txt.splitlines()))
+                _lvl0 = _eff_m.pick(steps, _want)
+                tier_of.setdefault(rel, _lvl0)
+                if emit:
+                    _ev = _eff_m.explain("code", _score, _want, steps, _lvl0)
+                    _ev["path"] = rel
+                    emit("effort_route", _ev)
+            except Exception as _exc:                # noqa: BLE001
+                if emit:
+                    emit("notice", {"message": f"思考强度路由跳过：{type(_exc).__name__}"})
+        lvl = min(tier_of.get(rel, start_tier), max(0, len(steps) - 1))
         rec = _wu(rel)
         used_total = int(rec.get("total") or 0)
         used_tier = int((rec.get("tiers") or {}).get(lvl) or 0)
@@ -1568,22 +1692,32 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
             emit("notice", {"message": f"粒度被环境变量覆盖：{granular}（自动判断是 {auto}）"})
         # 输出配额记忆：这个模块被截断过一次，下一轮直接从放大后的值开始，
         # 不再"每轮从 3000 重算、再被截断一次"（实测 search-index 因此连输三次）。
+        # 自愈轮数由 policy 决定（甲方模式 4 轮：AI 内部改到判据全绿，人不在中间）；
+        # stop_on_repeat 保证"反复刺激"只在有新证据时才发生，不白烧调用。
+        try:
+            from . import policy as _pol_h
+            _heal = max(1, int(_pol_h.current().heal_attempts))
+            _stop_rep = bool(_pol_h.current().heal_stop_on_repeat)
+        except Exception:                                # noqa: BLE001
+            _heal, _stop_rep = 2, True
         _mo_hint = int((_wu(rel).get("max_out") or 0))
         if granular in ("bodies", "line", "patch"):
             r = _author.author_bodies(ws, rel, contracts.get(rel), contracts, model_plan=plan,
                                       step_index=lvl, task_id=task_id, emit=emit,
                                       local_model=local_model, workingset=ws_text,
-                                      max_out=_mo_hint)
+                                      max_out=_mo_hint, attempts=_heal)
             if not r.get("ok") and not (ws / rel).exists():
                 r = _author.author_module(ws, rel, contracts.get(rel), contracts,
                                           model_plan=plan, step_index=lvl, task_id=task_id,
                                           emit=emit, local_model=local_model,
-                                          workingset=ws_text, max_out=_mo_hint)
+                                          workingset=ws_text, max_out=_mo_hint,
+                                          attempts=_heal, stop_on_repeat=_stop_rep)
         else:
             r = _author.author_module(ws, rel, contracts.get(rel), contracts, model_plan=plan,
                                       step_index=lvl, task_id=task_id, emit=emit,
                                       local_model=local_model, workingset=ws_text,
-                                      max_out=_mo_hint)
+                                      max_out=_mo_hint, attempts=_heal,
+                                      stop_on_repeat=_stop_rep)
         _mo_used = int(r.get("max_out") or 0)
         if _mo_used > _mo_hint:
             _wu(rel)["max_out"] = _mo_used
@@ -1644,7 +1778,16 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
         workorder.close(oid, ok, str(r.get("reason") or "")[:400])
         stats["modules"].append({"path": rel, "ok": ok, "tier": lvl + 1, "by": tag,
                                  "reason": str(r.get("reason") or "")[:200],
+                                 "attempt": int(r.get("attempt") or 0),
                                  "applied": r.get("applied") or []})
+        # 「一次通过率」是甲方模式唯一的自检指标：**没有重试就全绿**的模块占比。
+        # 它比"最终通过率"严格得多——最终通过率可以靠反复刺激刷出来，一次通过率不能。
+        _tot = int(stats.get("mod_total") or 0) + 1
+        _first = int(stats.get("mod_first_pass") or 0) + (
+            1 if (ok and int(r.get("attempt") or 1) <= 1) else 0)
+        stats["mod_total"] = _tot
+        stats["mod_first_pass"] = _first
+        stats["first_pass_rate"] = round(_first / max(1, _tot), 3)
         if emit:
             emit("order_done" if ok else "order_failed",
                  {"round": 0, "order": f"整文件 {rel}",

@@ -79,8 +79,8 @@ def main() -> int:
         check("负数 → 0 = 自动（不再兜一个固定 8000 的第二真相源）",
               w and w["max_output_tokens"] == 0, str(w))
 
-        # 5) 增删改都能反映到阶梯
-        profs = settings_store.save_models(
+        # 5) 增删改都能反映到档案表；但**阶梯只认当前那一个模型**（单模型语义）
+        settings_store.save_models(
             [p for p in settings_store.models() if p["id"] != "weird"])
         check("删除后阶梯恢复 4 档（flash 四档）", len(settings_store.ladder()) == 4,
               str(len(settings_store.ladder())))
@@ -89,27 +89,34 @@ def main() -> int:
                       "efforts": ["low"], "max_output_tokens": 8000})
         settings_store.save_models(profs)
         got = [(s["profile_id"], s["effort"]) for s in settings_store.ladder()]
-        check("新增档案插进优先级位置（15 在 flash 10 与 pro 20 之间）",
-              got[4] == ("flash2", "low"), str(got))
+        check("新增的档案**不会**挤进阶梯（单模型：一次只用一个）",
+              all(p == "flash" for p, _ in got), str(got))
+        settings_store.update_remote({"active_model": "flash2"})
+        check("切成 flash2 后阶梯就是它的单档 low",
+              [(s["profile_id"], s["effort"]) for s in settings_store.ladder()] == [("flash2", "low")],
+              str([(s["profile_id"], s["effort"]) for s in settings_store.ladder()]))
+        settings_store.update_remote({"active_model": ""})
         settings_store.save_models([p for p in settings_store.models() if p["id"] != "flash2"])
 
-        # 6) 优先级可用来"选优先模型"：改成最小值的排最前
+        # 6) 换模型 = 换 active_model（不再是"多模型并排成阶梯"）
         profs = settings_store.models()
         for p in profs:
-            p["priority"] = 0 if p["id"] == "pro" else 50
+            if p["id"] == "pro":
+                p["enabled"] = True
         settings_store.save_models(profs)
-        ladder = settings_store.ladder()
-        pro_on = [p for p in settings_store.models() if p["id"] == "pro"]
-        if pro_on:                       # pro 默认关闭，这里显式打开再验优先级
-            profs2 = settings_store.models()
-            for p2 in profs2:
-                if p2["id"] == "pro":
-                    p2["enabled"] = True
-            settings_store.save_models(profs2)
-        ladder = settings_store.ladder()
-        check("打开 pro 后它按优先级插到最前（优先级 0）",
-              ladder[0]["profile_id"] == "pro",
-              str([(x["profile_id"], x["effort"]) for x in ladder[:3]]))
+        check("打开 pro **不会**自动接管（仍是单模型：flash）",
+              all(s["profile_id"] == "flash" for s in settings_store.ladder()),
+              str([(s["profile_id"], s["effort"]) for s in settings_store.ladder()]))
+        settings_store.update_remote({"active_model": "pro"})
+        pro_ladder = [(s["profile_id"], s["effort"]) for s in settings_store.ladder()]
+        check("显式切到 pro → 阶梯整条换成 pro 的四档",
+              pro_ladder == [("pro", "none"), ("pro", "low"), ("pro", "high"), ("pro", "max")],
+              str(pro_ladder))
+        settings_store.update_remote({"active_model": "不存在的档案"})
+        check("不存在的 active_model 被忽略（配置不被写坏）",
+              all(s["profile_id"] == "pro" for s in settings_store.ladder()),
+              str([(s["profile_id"], s["effort"]) for s in settings_store.ladder()]))
+        settings_store.update_remote({"active_model": ""})
 
         db.execute("DELETE FROM remote_usage WHERE task_id=?", (tag,))
     finally:

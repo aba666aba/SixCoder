@@ -415,7 +415,8 @@ def complete(prompt: str, task_id: str = '', node_id: str = 'architect',
              max_out: int | None = None) -> dict:
     """发一段自由文本提示，返回 {ok, answer, usage}。
 
-    走**八档阶梯**（core/settings_store.ladder）：档位 = 模型 + 思考强度。
+    走**单模型 + 思考强度阶梯**（core/settings_store.ladder）：一次运行只用一个模型，
+    在这个模型内部按 none → low → high → max 切思考强度（强度由 core/effort.py 按需求选）。
       · step_index=None → 从第 0 档（flash:none）开始；
       · thinking="on"/"off" 是老接口，映射成档位过滤（on→跳过 none 档）；
       · 限流/网络抖动会自动升一档重试；"答得不对"不在这里重试（由夜班按阈值升档）。

@@ -33,6 +33,33 @@ TEST_PAT = re.compile(r"(^|/)test_.*\.py$|.*_test\.py$")
 CONFIG_FILES = {"pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "conftest.py"}
 TRIVIAL_ASSERT = re.compile(r"^\s*assert\s+(True|1|0\s*==\s*0)\s*$")
 SKIP_MARK = re.compile(r"@pytest\.mark\.skip|pytest\.skip\(|self\.skipTest|@unittest\.skip")
+# 故意的空实现（回调占位）：名字带 noop/nop 的不算桩。真实代码里这是常见写法，
+# 判成桩会让闸门在真实仓库上永久假红（实测 asyncio 的 _sighandler_noop）。
+_NOOP_NAME = re.compile(r"(?:^|_)(?:noop|nop)(?:_|$)", re.I)
+
+# 平台条件模块：真实仓库里普遍存在（asyncio 的 unix_events/windows_events、posixpath/ntpath）。
+# 导入闸门如果不认这件事，仓库在**别的平台**上必然假红 —— 实测 asyncio 在 Windows 上
+# 就因 unix_events.py 抛 "ImportError: Signals are not really supported" 整仓判红。
+_PLATFORM_TOKENS = {
+    "win32": {"windows", "win32", "nt", "msvcrt"},
+    "linux": {"linux", "posix", "unix"},
+    "darwin": {"darwin", "macos", "posix", "unix"},
+}
+_TOKEN_SPLIT = re.compile(r"[\W_]+")
+
+
+def _platform_skip(rel: str) -> str:
+    """这个文件是不是"只在别的平台上能导入"的平台条件模块？是则返回理由，否则空串。"""
+    tokens = {t.lower() for t in _TOKEN_SPLIT.split(Path(rel).stem) if t}
+    if not tokens:
+        return ""
+    known = set().union(*_PLATFORM_TOKENS.values())
+    mine = next((k for k in _PLATFORM_TOKENS if sys.platform.startswith(k)), "")
+    want = _PLATFORM_TOKENS.get(mine, set())
+    hinted = tokens & known
+    if hinted and not (hinted & want):
+        return f"平台条件模块（{('/'.join(sorted(hinted)))} 与当前 {sys.platform} 不匹配）"
+    return ""
 
 # 「因错误原因而红」：测试自己写错了（缺依赖 import、语法错、fixture 未定义）—— 不算有效的红。
 # 注意：`ImportError: cannot import name 'divide' from 'calc'` 恰恰是**有效的红**（被测功能还没实现），
@@ -333,7 +360,14 @@ def gate_signature(ws: Path, paths: list[str], contract: str) -> GateResult:
 
 
 def _is_stub(fn: ast.AST) -> str:
-    """判断函数体是不是"什么都没做"：`pass` / `...` / 只有 docstring / 只 raise NotImplementedError。"""
+    """判断函数体是不是"什么都没做"：`pass` / `...` / 只有 docstring / 只 raise NotImplementedError。
+
+    例外：名字里带 noop / nop 的**故意的空实现**不算桩。实测真实代码（asyncio 的
+    `_sighandler_noop`）是注册给 signal 的空回调，函数体就是 docstring + pass；
+    把它判成桩会让"桩闸门"在真实仓库上永久假红，闸门一旦假红就没人信它了。
+    """
+    if _NOOP_NAME.search(str(getattr(fn, "name", "") or "")):
+        return ""
     body = [n for n in getattr(fn, "body", [])]
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
             and isinstance(body[0].value.value, str):
@@ -1122,6 +1156,33 @@ def gate_duplicates(ws: Path, paths: list[str]) -> GateResult:
                       "；".join(findings[:3]), int((time.time() - t0) * 1000))
 
 
+def _import_name(ws: Path, rel: str) -> tuple[str, Path]:
+    """把相对路径换成"能真的 import 的名字"：返回 (模块名, cwd)。
+
+    旧实现用 `p.stem` 直接 `import <文件名>`，在**包结构**下必然失败：
+      · `cal/core/numeric.py` → `import numeric`（丢掉了 cal.core 前缀）
+      · `cal/__init__.py`    → `import __init__`（Python 里根本没有这个名字）
+    实测一个 90 文件的可信仓库被这道闸门 **全部判红**，原因是假的 —— 假红比漏报更毒：
+    夜班会以为仓库坏了，然后带着错误结论去改代码。
+    """
+    p = Path(rel)
+    parts = list(p.with_suffix("").parts)
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]                    # 包自身：cal/core/__init__.py → cal.core
+    # 逐级检查祖先目录是不是包（有 __init__.py）；断了就退回"平铺 import 文件名"
+    cwd = Path(ws)
+    ok_pkg = True
+    for depth in range(1, len(parts)):
+        d = Path(ws).joinpath(*parts[:depth])
+        if not (d / "__init__.py").exists():
+            ok_pkg = False
+            break
+    if ok_pkg and parts:
+        return ".".join(parts), cwd
+    # 不是包（脚本 / 松散目录）：到文件所在目录里按文件名导入
+    return p.stem, Path(ws) / p.parent
+
+
 def gate_import_ok(ws: Path, paths: list[str], timeout: int = 60) -> GateResult:
     """导入闸门：这个模块**真的能被 import 吗**（跑一句 python -c，确定性）。
 
@@ -1133,24 +1194,32 @@ def gate_import_ok(ws: Path, paths: list[str], timeout: int = 60) -> GateResult:
     t0 = time.time()
     findings: list[str] = []
     checked = 0
+    skipped: list[str] = []
     for rel in paths:
         p = Path(ws) / rel
         if not rel.endswith(".py") or not p.exists() or p.name.startswith("test_"):
             continue
+        why_skip = _platform_skip(rel)
+        if why_skip:
+            skipped.append(f"{rel}：{why_skip}")
+            continue
         checked += 1
-        mod = p.stem
-        proc = subprocess.run([sys.executable, "-c", f"import {mod}"], cwd=str(ws),
+        mod, cwd = _import_name(ws, rel)
+        proc = subprocess.run([sys.executable, "-c", f"import {mod}"], cwd=str(cwd),
                               capture_output=True, text=True, timeout=timeout,
                               encoding="utf-8", errors="replace",
                               env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                                   "PYTHONPATH": str(Path(ws).resolve()),
                                    "PYTHONDONTWRITEBYTECODE": "1"})
         if proc.returncode != 0:
             err = (proc.stderr or "").strip().splitlines()
             tail = next((ln for ln in reversed(err) if ln.strip()), "")
-            findings.append(f"{rel} 导入失败：{tail[:160]}")
+            findings.append(f"{rel}（import {mod}）导入失败：{tail[:160]}")
     if not findings:
+        extra = (f"；另有 {len(skipped)} 个平台条件模块跳过（{skipped[0].split('：')[0]} 等）"
+                 if skipped else "")
         return GateResult("import_ok", True, "exit_code", f"ok/{checked}",
-                          f"{checked} 个模块都能干净导入", int((time.time() - t0) * 1000))
+                          f"{checked} 个模块都能干净导入{extra}", int((time.time() - t0) * 1000))
     return GateResult("import_ok", False, "exit_code", f"{len(findings)} 处",
                       "；".join(findings[:3]), int((time.time() - t0) * 1000))
 

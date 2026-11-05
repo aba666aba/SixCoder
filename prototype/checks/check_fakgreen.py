@@ -90,6 +90,18 @@ def main() -> int:
         encoding="utf-8")
     r4 = gates.gate_stub(tmp, ["c.py"])
     ok &= check("抽象方法不误报", r4.ok, r4.detail)
+
+    # 误报防护：故意的空实现（回调占位）。真实代码里 asyncio 的 _sighandler_noop 就是 docstring+pass，
+    # 旧逻辑判成桩 → 桩闸门在真实仓库上永久假红（假红一多就没人看闸门了）。
+    (tmp / "d.py").write_text(
+        'def _sighandler_noop(signum, frame):\n    """不做任何事（注册给 signal 的占位回调）。"""\n    pass\n',
+        encoding="utf-8")
+    r6 = gates.gate_stub(tmp, ["d.py"])
+    ok &= check("名字带 noop 的空实现不误报", r6.ok, r6.detail)
+    (tmp / "e.py").write_text(
+        "def really_unimplemented(x):\n    pass\n", encoding="utf-8")
+    r7 = gates.gate_stub(tmp, ["e.py"])
+    ok &= check("普通空函数仍被拦（豁免只认名字里的 noop/nop）", not r7.ok, r7.detail)
     r5 = gates.gate_signature(tmp, ["c.py"], "随便写点需求，没有接口签名")
     ok &= check("无契约签名时跳过不误报", r5.ok and r5.evidence_ref == "no-contract", r5.detail)
 

@@ -314,28 +314,105 @@ _LOCAL_HINT = {"m", "calc", "clean", "store", "report", "main", "app", "utils", 
 
 
 # ------------------------------------------------------------------ XL 健康度
+def _module_index(ws: Path) -> dict[str, Path]:
+    """点分模块名 → 文件。`pkg/__init__.py` 记成包名本身。
+
+    为什么不能像以前那样只用 `p.stem` 当节点名：包结构下会丢两类依赖 ——
+      · `from cal.core import numeric`（点分绝对导入）：head 是 "cal"，而 stem 表里没有 "cal" → 无边
+      · `from . import base_events`（`ImportFrom.module is None`）→ 以前直接跳过
+    实测一个 90 文件的包式仓库被判成 `edges=0`（看起来"没有依赖"，实际跨包 import 一大堆）；
+    而 `asyncio` 这种相对导入密集的包只认出一半的边。依赖图错了，环/深度/密度就全是错的。
+    """
+    idx: dict[str, Path] = {}
+    for p in _py_files(ws):
+        try:
+            rel = p.relative_to(ws)
+        except ValueError:
+            continue
+        parts = list(rel.with_suffix("").parts)
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        if not parts:
+            continue
+        idx[".".join(parts)] = p
+    return idx
+
+
+def _resolve(name: str, idx: dict[str, Path]) -> str:
+    """把导入名落到仓库里的模块（取最长可命中的前缀）；落不到返回空串。"""
+    cur = name
+    while cur:
+        if cur in idx:
+            return cur
+        cur = cur.rsplit(".", 1)[0] if "." in cur else ""
+    return ""
+
+
+def _import_targets(node: ast.AST, me: str, idx: dict[str, Path]) -> set[str]:
+    """一条 import 语句指向仓库里的哪些模块（点分名）。"""
+    out: set[str] = set()
+    pkg = me.rsplit(".", 1)[0] if "." in me else ""
+    if isinstance(node, ast.Import):
+        for a in node.names:
+            hit = _resolve(a.name, idx)
+            if hit:
+                out.add(hit)
+        return out
+    if not isinstance(node, ast.ImportFrom):
+        return out
+    level = int(getattr(node, "level", 0) or 0)
+    base = str(getattr(node, "module", "") or "")
+    if level:                                   # 相对导入：回到当前包的对应层
+        parts = pkg.split(".") if pkg else []
+        drop = level - 1
+        if drop > len(parts):
+            return out
+        parts = parts[:len(parts) - drop] if drop else parts
+        base = ".".join([*parts, *([base] if base else [])])
+    if base:
+        pass
+    hits: set[str] = set()
+    for a in node.names:                        # from pkg import mod → pkg.mod（落到最深模块）
+        if a.name == "*":
+            continue
+        cand = f"{base}.{a.name}" if base else a.name
+        hit = _resolve(cand, idx)
+        if hit:
+            hits.add(hit)
+    if hits:
+        out |= hits
+    elif base:
+        # 只有"名字没落到模块"时才算对包本身的依赖（例如 from .utils import helper）。
+        # 为什么不能无条件加包节点：`from . import x` 会让每个子模块都连到包 __init__，
+        # 而包 __init__ 通常又 import 子模块 → 任何"包 re-export 风格"的仓库都会凭空长出环，
+        # 依赖密度也被灌水（实测 asyncio：加包节点后 edges=133、无环=False、密度 0.126；
+        # 只保留最深模块后环消失、密度回到正常量级）。
+        hit = _resolve(base, idx)
+        if hit:
+            out.add(hit)
+    out.discard(me)
+    return out
+
+
 def health_metrics(ws: Path) -> dict:
     """持续架构健康度（XL 级）：模块度、无环性、最大依赖深度、重复 import 密度。
 
     全部静态可算，不依赖任何第三方工具——这一级唯一的约束力来源就是"能持续算出漂移"。
+    节点名用**点分模块名**（`cal.core.numeric`），不再用文件 stem：stem 会把不同包里
+    同名模块混成一个节点，也认不出包式导入。
     """
+    idx = _module_index(ws)
     graph: dict[str, set[str]] = {}
-    modules = {p.stem: p for p in _py_files(ws)}
-    for stem, p in modules.items():
-        deps: set[str] = set()
+    for name, p in idx.items():
         try:
             tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
         except SyntaxError:
-            graph[stem] = set()
+            graph[name] = set()
             continue
+        deps: set[str] = set()
         for n in ast.walk(tree):
-            if isinstance(n, ast.Import):
-                deps |= {a.name.split(".")[0] for a in n.names if a.name.split(".")[0] in modules}
-            elif isinstance(n, ast.ImportFrom) and n.module:
-                head = n.module.split(".")[0]
-                if head in modules:
-                    deps.add(head)
-        graph[stem] = deps
+            deps |= _import_targets(n, name, idx)
+        graph[name] = deps
 
     def _cycle(node: str, seen: set[str], stack: set[str]) -> bool:
         if node in stack:

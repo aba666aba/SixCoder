@@ -142,7 +142,14 @@ _SKIP_DIRS = {".git", ".sixcoder", "__pycache__", "node_modules", ".venv", "venv
 
 
 def count_lines(ws: Path, tests: bool = True) -> dict:
-    """量代码规模：生产代码行数、测试行数、模块数与文件数（确定性，无第三方）。"""
+    """量代码规模：生产代码行数、测试行数、**模块数**与文件数（确定性，无第三方）。
+
+    「模块数」的口径是**真的模块**：一个非 `__init__.py` 的生产文件算一个模块。
+    旧实现数的是 `rel.parent`（= 目录数），于是 `cal/core/numeric.py` 这种**包内模块
+    一个都不算** —— 实测一个 90 文件 / 80 模块的仓库只被数出 `modules=10`
+    （8 个子包目录 + 根 + `.`），而模块数是 S/M 档"该不该升档"的判据之一，
+    数错会直接把规模判断带偏。
+    """
     prod_lines = test_lines = files = 0
     modules: set[str] = set()
     for p in Path(ws).rglob("*.py"):
@@ -155,14 +162,16 @@ def count_lines(ws: Path, tests: bool = True) -> dict:
             continue
         n = sum(1 for ln in text.splitlines() if ln.strip())
         name = p.name
-        if name.startswith("test_") or name.endswith("_test.py") or "tests" in rel.parts:
+        is_test = name.startswith("test_") or name.endswith("_test.py") or "tests" in rel.parts
+        if is_test:
             test_lines += n
             if not tests:
                 continue
         else:
             prod_lines += n
+            if name != "__init__.py":          # 包的定义文件不是一个"模块"
+                modules.add(str(rel.with_suffix("")).replace("\\", "/"))
         files += 1
-        modules.add(str(rel.parent))
     return {"prod_lines": prod_lines, "test_lines": test_lines, "files": files,
             "modules": len(modules)}
 

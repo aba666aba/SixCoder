@@ -63,6 +63,21 @@ def main() -> int:
         c = scale.count_lines(ws)
         check("生产/测试分别计数", c["prod_lines"] == 5000 and c["test_lines"] == 1000, str(c))
         check("小仓库 → S 级", scale.from_lines(c["prod_lines"] + c["test_lines"]) == "S")
+        check("平铺文件 → 1 个模块（去掉 test_ 与 __init__）",
+              c["modules"] == 1, str(c))
+    # 包结构：一个非 __init__ 文件 = 一个模块。旧实现数的是目录数，
+    # 于是 `pkg/sub/mod.py` 这类包内模块**一个都不算**（实测 90 文件/80 模块被数成 10）。
+    with _sandbox_temp() as td:
+        ws = Path(td)
+        for pkg in ("a", "b"):
+            for sub in ("x", "y"):
+                d = ws / pkg / sub
+                d.mkdir(parents=True)
+                (d / "__init__.py").write_text("", encoding="utf-8")
+                (d / "m1.py").write_text("V = 1\n", encoding="utf-8")
+                (d / "m2.py").write_text("V = 2\n", encoding="utf-8")
+        cp = scale.count_lines(ws)
+        check("包结构：8 个模块（不是 4 个目录、也不含 __init__）", cp["modules"] == 8, str(cp))
     check("10 万行 → M", scale.from_lines(100_000) == "M")
     check("50 万行 → L", scale.from_lines(500_000) == "L")
     check("100 万行 → XL", scale.from_lines(1_000_000) == "XL")

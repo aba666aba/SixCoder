@@ -175,7 +175,7 @@ async function loadRemote(reveal = false) {
     remoteForm.base_url = d.remote?.base_url || ''
     if (reveal) remoteForm.api_key = d.remote?.key_plain || ''
     loadPricing(d)
-    loadProfiles()        // 模型档案与八档阶梯一起刷新（改了立刻能看到新阶梯）
+    loadProfiles()        // 模型档案与"单模型思考强度阶梯"一起刷新（改了立刻能看到新阶梯）
   } catch (e) { errMsg.value = '[FAIL] 读取远端设置失败：' + e.message }
 }
 
@@ -211,46 +211,42 @@ async function clearRemoteKey() {
   } catch (e) { errMsg.value = '[FAIL] ' + e.message }
 }
 
-/* 价目表（可随时按官方调价修改） */
-const pricingForm = ref({})
+/* 价目表：改成跟着模型档案走（价格在档案里，人民币口径），这里只留闲时窗口 */
 const windowForm = reactive({ start: '00:30', end: '08:30', tz: 'UTC' })
-const newModel = reactive({ id: '', in_miss: 0.28, in_hit: 0.028, out: 0.42, offpeak_ratio: 0.5 })
 
 function loadPricing(d) {
-  const src = (d && d.remote && d.remote.pricing) || {}
-  const copy = {}
-  for (const [k, v] of Object.entries(src)) copy[k] = { ...v }
-  pricingForm.value = copy
   const w = (d && d.remote && d.remote.offpeak_window) || {}
   windowForm.start = w.start || '00:30'
   windowForm.end = w.end || '08:30'
   windowForm.tz = w.tz || 'UTC'
 }
 
-function addPricingRow() {
-  const id = String(newModel.id || '').trim()
-  if (!id) { errMsg.value = '请先填写模型名（如 deepseek-flash）'; return }
-  pricingForm.value = { ...pricingForm.value, [id]: {
-    in_miss: Number(newModel.in_miss) || 0, in_hit: Number(newModel.in_hit) || 0,
-    out: Number(newModel.out) || 0, offpeak_ratio: Number(newModel.offpeak_ratio) || 1,
-  } }
-  newModel.id = ''
+/* 当前模型的三个连接参数一起保存（模型名 / 接口 / key） */
+async function saveCurrentModel() {
+  const patch = { model: remoteForm.model, base_url: remoteForm.base_url }
+  if (remoteForm.api_key) patch.api_key = remoteForm.api_key
+  await saveRemote(patch)
+  await loadRemote()
 }
 
-async function savePricing() {
-  const pricing = {}
-  for (const [k, v] of Object.entries(pricingForm.value)) {
-    pricing[k] = { in_miss: Number(v.in_miss) || 0, in_hit: Number(v.in_hit) || 0,
-                   out: Number(v.out) || 0,
-                   offpeak_ratio: v.offpeak_ratio === '' ? 1 : Number(v.offpeak_ratio) }
-  }
-  if (!Object.keys(pricing).length) { errMsg.value = '价目表是空的，未保存'; return }
+/* 切换当前模型（单模型：切换 = 整条阶梯换成它） */
+async function useProfile(p) {
   try {
     const d = await api('/v1/settings/remote', { method: 'POST',
-      body: JSON.stringify({ pricing, offpeak_window: { ...windowForm } }) })
+      body: JSON.stringify({ active_model: p.id }) })
+    remote.value = d
+    await loadRemote()
+    errMsg.value = `当前模型已切换为 ${p.id}（思考强度仍由系统自动选）`
+  } catch (e) { errMsg.value = '[FAIL] ' + e.message }
+}
+
+async function savePricingWindow() {
+  try {
+    const d = await api('/v1/settings/remote', { method: 'POST',
+      body: JSON.stringify({ offpeak_window: { ...windowForm } }) })
     remote.value = d
     loadPricing(d)
-    errMsg.value = '价目表已保存（changed=' + (d.changed || []).join(',') + '）'
+    errMsg.value = '闲时窗口已保存'
   } catch (e) { errMsg.value = '[FAIL] ' + e.message }
 }
 
@@ -1593,27 +1589,47 @@ onUnmounted(() => {
         </div>
         <div class="modal-body">
           <div class="dim" style="font-size:12px;margin-bottom:10px">
-            本地模型卡住时可以把"出方案"交给远端：远端只回符号级编辑，本地用确定性渲染器落盘并重跑全部闸门，
-            远端声明不算数。key 只存在本机设置文件，界面只显示掩码。
+            <b>一次只用这一个模型。</b>下面是它的连接参数；思考强度不用你填 —— 系统按需求自动挑。
+            key 只存本机设置文件，界面只显示掩码。
           </div>
-          <table>
-            <tr><td class="dim" style="width:130px">状态</td>
-                <td><span class="badge" :class="remote.available ? 'b-ok' : 'b-dim'">
-                  {{ remote.available ? '可用' : '未配置' }}</span>
-                  <span v-if="remote.reason" class="dim" style="margin-left:8px;font-size:11.5px">{{ remote.reason }}</span>
-                </td></tr>
-            <tr><td class="dim">当前 key</td>
-                <td class="mono">{{ remote.remote?.key_masked || '—' }}
-                  <span class="dim" style="font-size:11px">（来源：{{ remote.remote?.key_source || '无' }}）</span></td></tr>
-          </table>
 
-          <div class="panel-title" style="margin-top:12px">更新密钥（sk-...）</div>
-          <div class="row" style="gap:8px;align-items:center">
+          <!-- ① 当前模型：唯一的连接参数填写处 -->
+          <div class="panel-title">当前模型</div>
+          <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
+            <span class="dim" style="font-size:11px;width:64px">模型名</span>
+            <input v-model="remoteForm.model" placeholder="deepseek-flash" style="width:190px" />
+            <span class="dim" style="font-size:11px;width:48px">接口</span>
+            <input v-model="remoteForm.base_url" placeholder="https://api.deepseek.com" style="flex:1" />
+          </div>
+          <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
+            <span class="dim" style="font-size:11px;width:64px">API key</span>
             <input v-model="remoteForm.api_key" type="password" placeholder="sk-...（留空则不修改）"
-                   style="flex:1" @keyup.enter="remoteForm.api_key && saveRemote({api_key: remoteForm.api_key})" />
-            <button class="ghost tiny" @click="remoteForm.api_key && saveRemote({api_key: remoteForm.api_key})">保存 key</button>
+                   style="flex:1" @keyup.enter="saveCurrentModel()" />
             <button class="ghost tiny" @click="revealRemoteKey()">{{ remoteForm.api_key ? '隐藏' : '显示' }}</button>
             <button class="ghost tiny" @click="clearRemoteKey()">清除</button>
+          </div>
+          <div class="row" style="gap:8px;align-items:center">
+            <button class="primary tiny" @click="saveCurrentModel()">保存当前模型</button>
+            <span class="badge" :class="remote.available ? 'b-ok' : 'b-dim'">
+              {{ remote.available ? '可用' : '未配置' }}</span>
+            <span v-if="remote.reason" class="dim" style="font-size:11.5px">{{ remote.reason }}</span>
+            <span class="spacer"></span>
+            <span class="dim mono" style="font-size:11px">
+              key：{{ remote.remote?.key_masked || '—' }}（{{ remote.remote?.key_source || '无' }}）
+            </span>
+          </div>
+
+          <!-- ② 思考强度：只读，系统自动选 -->
+          <div class="panel-title" style="margin-top:14px">思考强度（系统自动，无需填写）</div>
+          <div class="dim" style="font-size:11.5px;line-height:1.7">
+            当前模型支持的档位：<span class="mono">
+              {{ (remoteLadder || []).map(x => x.effort).join(' → ') || '（未配置）' }}</span><br />
+            选档规则：<b>规格/方案 → 最深一档</b>（决定后面每个模块的对错）；<b>样板/校验/日志/适配 → 不思考</b>；
+            <b>写代码 → 按难度自动挑</b>（依据：依赖数、函数数、契约示例数、历史失败次数、是否还是空桩）。<br />
+            失败时只在<b>同一个模型</b>内升档；升到最深还不过，就是"这个模型到极限了"，换模型由你决定。
+          </div>
+          <div class="dim mono" style="font-size:11px;margin-top:4px">
+            完整阶梯：{{ (remoteLadder || []).map(x => x.profile_id + ':' + x.effort).join(' → ') || '（空）' }}
           </div>
 
           <div v-if="currentMode?.id === 'developer'" class="row" style="gap:8px;align-items:center;margin-top:10px">
@@ -1624,69 +1640,13 @@ onUnmounted(() => {
             </label>
           </div>
           <div v-if="currentMode?.id === 'client'" class="dim" style="font-size:11px;margin-top:10px">
-            甲方模式（= 夜班）：远端**强制开启**，上限就是远端能力，没有开关。
+            甲方模式（= 夜班）：远端<b>强制开启</b>，没有开关 —— 上限就是远端能力。
           </div>
           <div v-if="currentMode?.id === 'readonly'" class="dim" style="font-size:11px;margin-top:10px">
-            只读模式：远端**强制关闭**。
+            只读模式：远端<b>强制关闭</b>。
           </div>
 
-          <div class="panel-title" style="margin-top:12px">模型档案（阶梯，可增删改）</div>
-          <div class="dim" style="font-size:11.5px;margin-bottom:6px">
-            夜班按<b>优先级</b>升序、每个档案内部再按<b>思考强度</b>（none→low→high→max）逐级升；
-            同一档连续失败到阈值才升下一档。价格决定用量怎么算钱（人民币/百万 token，
-            空闲时段是高峰的一半）。DeepSeek 以后改价或换连接参数，改这里就行。
-          </div>
-          <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
-            <label class="dim" style="font-size:11px">升档阈值
-              <input type="number" min="1" max="9" v-model.number="escalateAfter"
-                     style="width:56px" @change="saveRemote({escalate_after: escalateAfter})" />
-              次 </label>
-            <span class="dim" style="font-size:11px">当前阶梯：</span>
-            <span class="mono" style="font-size:11px">
-              {{ (remoteLadder || []).map(x => x.profile_id + ':' + x.effort).join(' → ') || '（空）' }}
-            </span>
-            <span class="spacer"></span>
-            <button class="ghost tiny" @click="addProfile()">＋ 新增模型</button>
-          </div>
-          <div class="table-wrap" style="max-height:320px">
-            <table>
-              <tr><th>id</th><th>模型名</th><th style="width:52px">优先</th>
-                  <th style="width:150px">思考档位</th><th style="width:66px">max_out</th>
-                  <th style="width:96px">价(未命中/出)</th><th style="width:44px">启用</th><th></th></tr>
-              <tr v-for="p in remoteModels" :key="p.id">
-                <td class="mono">{{ p.id }}</td>
-                <td><input v-model="p.model" style="width:150px"
-                           @change="saveProfile(p)" /></td>
-                <td><input type="number" v-model.number="p.priority" style="width:46px"
-                           @change="saveProfile(p)" /></td>
-                <td><input v-model="p.effortsText" style="width:140px"
-                           title="用逗号分隔：none,low,high,max"
-                           @change="p.efforts = p.effortsText.split(',').map(s => s.trim()).filter(Boolean); saveProfile(p)" /></td>
-                <td><input type="number" v-model.number="p.max_output_tokens" style="width:60px"
-                           @change="saveProfile(p)" /></td>
-                <td class="mono dim" style="font-size:10.5px">
-                  <input type="number" step="0.01" v-model.number="p.pricing.offpeak.in_miss"
-                         style="width:44px" @change="saveProfile(p)" /> /
-                  <input type="number" step="0.01" v-model.number="p.pricing.offpeak.out"
-                         style="width:44px" @change="saveProfile(p)" />
-                </td>
-                <td><input type="checkbox" v-model="p.enabled" style="width:auto"
-                           @change="saveProfile(p)" /></td>
-                <td>
-                  <button class="ghost tiny" @click="deleteProfile(p.id)" title="删掉这个档案">删除</button>
-                </td>
-              </tr>
-            </table>
-          </div>
-
-          <div class="panel-title" style="margin-top:12px">连接参数（默认值；档案里可单独覆盖）</div>
-          <div class="row" style="gap:8px;align-items:center">
-            <input v-model="remoteForm.model" placeholder="deepseek-flash" style="width:170px" />
-            <input v-model="remoteForm.base_url" placeholder="https://api.deepseek.com" style="flex:1" />
-            <button class="ghost tiny"
-                    @click="saveRemote({model: remoteForm.model, base_url: remoteForm.base_url})">保存</button>
-          </div>
-
+          <!-- ③ 用量与花费：只读 -->
           <div class="panel-title" style="margin-top:14px">用量与花费（人民币）</div>
           <table>
             <tr><td class="dim" style="width:130px">调用次数</td><td class="mono">{{ remote.usage?.calls ?? 0 }}</td></tr>
@@ -1706,77 +1666,125 @@ onUnmounted(() => {
                 <td class="mono">{{ (remote.usage?.window?.ranges || []).join('、') || '09:00-12:00、14:00-18:00' }}
                   （北京时间工作日；其余含周末半价）</td></tr>
           </table>
-          <table v-if="remote.usage?.by_model && Object.keys(remote.usage.by_model).length" style="margin-top:6px">
-            <tr><th>按模型</th><th>次数</th><th>输入</th><th>输出</th><th>花费</th></tr>
-            <tr v-for="(v, k) in remote.usage.by_model" :key="k">
-              <td class="mono">{{ k }}</td><td class="mono">{{ v.calls }}</td>
-              <td class="mono">{{ v.prompt_tokens }}</td><td class="mono">{{ v.completion_tokens }}</td>
-              <td class="mono">¥{{ (v.cost_cny ?? 0).toFixed(4) }}</td>
-            </tr>
-          </table>
-          <table v-if="remote.usage?.by_effort && Object.keys(remote.usage.by_effort).length" style="margin-top:6px">
-            <tr><th>按思考档位</th><th>次数</th><th>reasoning</th><th>花费</th></tr>
-            <tr v-for="(v, k) in remote.usage.by_effort" :key="k">
-              <td class="mono">{{ k }}</td><td class="mono">{{ v.calls }}</td>
-              <td class="mono">{{ v.reasoning_tokens }}</td>
-              <td class="mono">¥{{ (v.cost_cny ?? 0).toFixed(4) }}</td>
-            </tr>
-          </table>
-          <div class="panel-title" style="margin-top:14px">
-            回归用例库（{{ regressions.length }} 组）
-            <span class="dim" style="font-size:11px;font-weight:normal">
-              —— 远端成功过的判据，同一需求每次运行都会强制检查</span>
-          </div>
-          <table v-if="regressions.length">
-            <tr><th style="width:60px">id</th><th>模块</th><th>来源</th><th>登记时间</th><th style="width:70px"></th></tr>
-            <tr v-for="r in regressions" :key="r.id">
-              <td class="mono">#{{ r.id }}</td>
-              <td class="mono">{{ r.module }}</td>
-              <td class="dim">{{ r.source }}</td>
-              <td class="dim" style="font-size:11.5px">{{ r.created_at }}</td>
-              <td><button class="ghost tiny" @click="deleteRegression(r.id)">删除</button></td>
-            </tr>
-          </table>
-          <div v-else class="dim" style="font-size:11.5px">
-            还没有回归用例。远端协助成功一次后会自动登记；登记后同类错误不会再静默通过。
-          </div>
-          <div class="row" style="gap:8px;margin-top:8px" v-if="regressions.length">
-            <button class="ghost tiny" @click="loadRegressions()">刷新</button>
-            <button class="ghost tiny" @click="clearRegressions()">清空全部</button>
-          </div>
+          <details style="margin-top:6px">
+            <summary class="dim" style="font-size:11.5px;cursor:pointer">按模型 / 按思考档位拆账</summary>
+            <table v-if="remote.usage?.by_model && Object.keys(remote.usage.by_model).length" style="margin-top:6px">
+              <tr><th>按模型</th><th>次数</th><th>输入</th><th>输出</th><th>花费</th></tr>
+              <tr v-for="(v, k) in remote.usage.by_model" :key="k">
+                <td class="mono">{{ k }}</td><td class="mono">{{ v.calls }}</td>
+                <td class="mono">{{ v.prompt_tokens }}</td><td class="mono">{{ v.completion_tokens }}</td>
+                <td class="mono">¥{{ (v.cost_cny ?? 0).toFixed(4) }}</td>
+              </tr>
+            </table>
+            <table v-if="remote.usage?.by_effort && Object.keys(remote.usage.by_effort).length" style="margin-top:6px">
+              <tr><th>按思考档位</th><th>次数</th><th>reasoning</th><th>花费</th></tr>
+              <tr v-for="(v, k) in remote.usage.by_effort" :key="k">
+                <td class="mono">{{ k }}</td><td class="mono">{{ v.calls }}</td>
+                <td class="mono">{{ v.reasoning_tokens }}</td>
+                <td class="mono">¥{{ (v.cost_cny ?? 0).toFixed(4) }}</td>
+              </tr>
+            </table>
+          </details>
 
-          <div class="panel-title" style="margin-top:14px">价目表（可编辑，随官方调价调整）</div>
-          <div class="dim" style="font-size:11.5px;margin-bottom:6px">
-            单位：美元 / 每百万 token。in_miss=未命中输入，in_hit=缓存命中输入，out=输出，
-            offpeak_ratio=闲时折扣（0.5 表示五折）。改完点保存，成本统计立即按新价重算。
-          </div>
-          <table>
-            <tr><th>模型</th><th>未命中输入</th><th>命中输入</th><th>输出</th><th>闲时折扣</th></tr>
-            <tr v-for="(v, k) in pricingForm" :key="k">
-              <td class="mono">{{ k }}</td>
-              <td><input v-model.number="v.in_miss" type="number" step="0.001" style="width:88px" /></td>
-              <td><input v-model.number="v.in_hit" type="number" step="0.001" style="width:88px" /></td>
-              <td><input v-model.number="v.out" type="number" step="0.001" style="width:88px" /></td>
-              <td><input v-model.number="v.offpeak_ratio" type="number" step="0.05" min="0" max="1" style="width:70px" /></td>
-            </tr>
-          </table>
-          <div class="row" style="gap:8px;align-items:center;margin-top:8px">
-            <input v-model="newModel.id" placeholder="新增模型名，如 deepseek-v4" style="width:200px" />
-            <input v-model.number="newModel.in_miss" type="number" step="0.001" placeholder="未命中" style="width:90px" />
-            <input v-model.number="newModel.in_hit" type="number" step="0.001" placeholder="命中" style="width:80px" />
-            <input v-model.number="newModel.out" type="number" step="0.001" placeholder="输出" style="width:80px" />
-            <button class="ghost tiny" @click="addPricingRow()">添加</button>
-          </div>
-          <div class="panel-title" style="margin-top:12px">闲时窗口</div>
-          <div class="row" style="gap:8px;align-items:center">
-            <input v-model="windowForm.start" placeholder="00:30" style="width:90px" />
-            <span class="dim">–</span>
-            <input v-model="windowForm.end" placeholder="08:30" style="width:90px" />
-            <input v-model="windowForm.tz" placeholder="UTC" style="width:80px" />
-            <button class="ghost tiny" @click="savePricing()">保存价目表与窗口</button>
-          </div>
+          <!-- ④ 其它模型 + 价格：都折叠，默认不干扰 -->
+          <details style="margin-top:14px">
+            <summary class="dim" style="font-size:12px;cursor:pointer;font-weight:600">
+              其它模型（可存多个，一次仍只用一个）　〔{{ (remoteModels || []).length }} 个〕
+            </summary>
+            <div class="dim" style="font-size:11.5px;margin:6px 0">
+              每个模型各自带自己的接口地址 / key / 档位。点「用这个」= 切换当前模型；
+              没点的那几个只是保存着，不参与运行。
+            </div>
+            <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
+              <button class="ghost tiny" @click="addProfile()">＋ 新增模型</button>
+              <span class="dim" style="font-size:11px">升档阈值</span>
+              <input type="number" min="1" max="9" v-model.number="escalateAfter"
+                     style="width:56px" @change="saveRemote({escalate_after: escalateAfter})" />
+              <span class="dim" style="font-size:11px">次（同一档连续失败几次才升思考强度）</span>
+            </div>
+            <div class="table-wrap" style="max-height:260px">
+              <table>
+                <tr><th>id</th><th>模型名</th><th style="width:130px">思考档位</th>
+                    <th style="width:44px">启用</th><th style="width:62px"></th><th style="width:44px"></th></tr>
+                <tr v-for="p in remoteModels" :key="p.id">
+                  <td class="mono">{{ p.id }}
+                    <span v-if="(remote.remote?.active_model || '') === p.id" class="badge b-ok"
+                          style="margin-left:4px">当前</span></td>
+                  <td><input v-model="p.model" style="width:150px" @change="saveProfile(p)" /></td>
+                  <td><input v-model="p.effortsText" style="width:120px"
+                             title="用逗号分隔：none,low,high,max"
+                             @change="p.efforts = p.effortsText.split(',').map(s => s.trim()).filter(Boolean); saveProfile(p)" /></td>
+                  <td><input type="checkbox" v-model="p.enabled" style="width:auto"
+                             @change="saveProfile(p)" /></td>
+                  <td><button class="ghost tiny" @click="useProfile(p)"
+                              :disabled="(remote.remote?.active_model || '') === p.id">用这个</button></td>
+                  <td><button class="ghost tiny" @click="deleteProfile(p.id)" title="删掉这个档案">删除</button></td>
+                </tr>
+              </table>
+            </div>
+            <div class="dim" style="font-size:11px;margin-top:6px">
+              不填价格就用内置价目估算费用；价格只在"算钱"时用，不影响调用。
+            </div>
+          </details>
 
-          <div class="dim" style="font-size:11.5px;margin-top:8px">
+          <details style="margin-top:10px">
+            <summary class="dim" style="font-size:12px;cursor:pointer;font-weight:600">
+              价格与闲时窗口（可选）
+            </summary>
+            <div class="dim" style="font-size:11.5px;margin:6px 0">
+              单位：<b>人民币 / 每百万 token</b>。高峰价 = 闲时价 × 2；改价只影响"花费"怎么算。
+            </div>
+            <table>
+              <tr><th>模型</th><th style="width:92px">未命中输入</th><th style="width:80px">命中输入</th>
+                  <th style="width:70px">输出</th><th style="width:70px">闲时</th></tr>
+              <tr v-for="p in remoteModels" :key="'pz' + p.id">
+                <td class="mono">{{ p.id }}</td>
+                <td><input type="number" step="0.01" v-model.number="p.pricing.offpeak.in_miss"
+                           style="width:80px" @change="saveProfile(p)" /></td>
+                <td><input type="number" step="0.01" v-model.number="p.pricing.offpeak.in_hit"
+                           style="width:70px" @change="saveProfile(p)" /></td>
+                <td><input type="number" step="0.01" v-model.number="p.pricing.offpeak.out"
+                           style="width:60px" @change="saveProfile(p)" /></td>
+                <td class="dim mono" style="font-size:10.5px">高峰 ×2</td>
+              </tr>
+            </table>
+            <div class="row" style="gap:8px;align-items:center;margin-top:8px">
+              <span class="dim" style="font-size:11px">闲时窗口</span>
+              <input v-model="windowForm.start" placeholder="00:30" style="width:80px" />
+              <span class="dim">–</span>
+              <input v-model="windowForm.end" placeholder="08:30" style="width:80px" />
+              <input v-model="windowForm.tz" placeholder="UTC" style="width:70px" />
+              <button class="ghost tiny" @click="savePricingWindow()">保存闲时窗口</button>
+            </div>
+          </details>
+
+          <details style="margin-top:10px">
+            <summary class="dim" style="font-size:12px;cursor:pointer;font-weight:600">
+              回归用例库（{{ regressions.length }} 组）
+            </summary>
+            <div class="dim" style="font-size:11.5px;margin:6px 0">
+              远端成功过的判据，同一需求每次运行都会强制检查 —— 登记后同类错误不会再静默通过。
+            </div>
+            <table v-if="regressions.length">
+              <tr><th style="width:60px">id</th><th>模块</th><th>来源</th><th>登记时间</th><th style="width:70px"></th></tr>
+              <tr v-for="r in regressions" :key="r.id">
+                <td class="mono">#{{ r.id }}</td>
+                <td class="mono">{{ r.module }}</td>
+                <td class="dim">{{ r.source }}</td>
+                <td class="dim" style="font-size:11.5px">{{ r.created_at }}</td>
+                <td><button class="ghost tiny" @click="deleteRegression(r.id)">删除</button></td>
+              </tr>
+            </table>
+            <div v-else class="dim" style="font-size:11.5px">
+              还没有回归用例。远端协助成功一次后会自动登记。
+            </div>
+            <div class="row" style="gap:8px;margin-top:8px" v-if="regressions.length">
+              <button class="ghost tiny" @click="loadRegressions()">刷新</button>
+              <button class="ghost tiny" @click="clearRegressions()">清空全部</button>
+            </div>
+          </details>
+
+          <div class="dim" style="font-size:11.5px;margin-top:10px">
             命令行等价：<code>python cli.py remote --key sk-...</code>　|　交接：<code>python cli.py handoff &lt;task&gt; --node N --remote --apply</code>
           </div>
         </div>
@@ -1830,13 +1838,33 @@ onUnmounted(() => {
         <div class="modal-body">
           <!-- 需求帮助 -->
           <template v-if="settingsTab === 'help'">
-            <div class="panel-title">需求写法</div>
+            <!-- ① 先给一句话：这套系统怎么用 -->
+            <div class="panel-title">三步开始（先看这个）</div>
+            <ol class="help-list">
+              <li><b>写需求</b>：说清要什么、写进哪个文件名、函数长什么样（细节见下面「需求怎么写」）。</li>
+              <li><b>选规模</b>：S / M / L / XL 决定这一夜上多少约束（细节见「目标代码规模怎么选」）。</li>
+              <li><b>点「开始夜班」</b>：系统自己生成规格 → 写代码 → 跑机械判据 → 交付报告；你不用守着。</li>
+            </ol>
+            <div class="dim" style="font-size:11.5px;margin-top:6px">
+              关键点：<b>验收权在本地</b>。远端（或本地模型）写出来的东西，必须过完机械判据才算数；
+              过不了就带着失败证据自己改，改到全绿为止（甲方模式最多 4 轮），不需要你中途插手。
+            </div>
+
+            <!-- ② 需求怎么写 -->
+            <div class="panel-title" style="margin-top:16px">需求怎么写</div>
             <ul class="help-list">
               <li v-for="(p, i) in HELP_POINTS" :key="i">{{ p }}</li>
             </ul>
 
-            <!-- 目标代码规模：界面上的下拉只显示档名，具体管什么全写在这里 -->
-            <div class="panel-title" style="margin-top:14px">目标代码规模怎么选（约束按规模分级）</div>
+            <div class="panel-title" style="margin-top:14px">目标文件写在哪</div>
+            <ul class="help-list">
+              <li>界面上没有单独的「目标文件」框：<b>在需求里写清文件名即可</b>（如「写进 clean.py」）。</li>
+              <li>写了文件名 → 只改那个文件；没写 → 系统按需求里的函数签名自己决定放哪，并在报告里说明。</li>
+              <li>要新建文件就直说「新建 store.py，包含 create_table / upsert / fetch_all」。</li>
+            </ul>
+
+            <!-- ③ 规模 -->
+            <div class="panel-title" style="margin-top:16px">目标代码规模怎么选（约束按规模分级）</div>
             <div class="dim" style="font-size:11.5px;margin-bottom:6px">
               规模不同，该上的约束完全不同：小项目上重约束是过度工程化，大项目上轻约束等于没有约束。
               选错档 = 这一夜的验收标准错了，所以必须自己选，系统不会替你猜。
@@ -1855,14 +1883,21 @@ onUnmounted(() => {
                 默认预算（S 0.5h → L 6h）、以及要不要跑架构测试/覆盖率/变异测试。</li>
             </ul>
 
-            <div class="panel-title" style="margin-top:14px">目标文件写在哪</div>
+            <!-- ④ 模型与思考强度（单模型机制的说明） -->
+            <div class="panel-title" style="margin-top:16px">模型与思考强度（为什么只有一个模型）</div>
             <ul class="help-list">
-              <li>界面上没有单独的「目标文件」框了：<b>在需求里写清文件名即可</b>（如「写进 clean.py」）。</li>
-              <li>写了文件名 → 只改那个文件；没写 → 系统按需求里的函数签名自己决定放哪，并在报告里说明。</li>
-              <li>要新建文件就直说「新建 store.py，包含 create_table / upsert / fetch_all」。</li>
+              <li><b>一次运行只用一个模型</b>：你在「远端模型」里填的接口地址 / 模型名 / key 就是它。</li>
+              <li><b>思考强度由系统自动挑</b>，不需要你填：
+                规格与方案 → 最深一档（它决定后面每个模块的对错）；
+                样板/校验/日志/适配 → 不思考；写代码 → 按难度（依赖数、函数数、示例数、历史失败次数）。</li>
+              <li>失败只在<b>同一个模型内</b>升思考强度；升到最深还不过 = 这个模型到极限了，
+                换模型由你决定（「其他模型」里点「用这个」）。</li>
+              <li>想同时存好几个模型（比如便宜的和贵的）：在「其他模型」里各存一条、各填各的链接参数，
+                但一次只会用其中一个。</li>
             </ul>
 
-            <div class="panel-title" style="margin-top:14px">示例（点「填入」写进需求框）</div>
+            <!-- ⑤ 示例 -->
+            <div class="panel-title" style="margin-top:16px">示例（点「填入」写进需求框）</div>
             <div v-for="(ex, i) in HELP_EXAMPLES" :key="i" class="help-item">
               <div class="ev-head">
                 <strong>{{ ex.title }}</strong>
