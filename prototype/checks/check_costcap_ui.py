@@ -27,12 +27,12 @@ def main() -> int:
     print("花费上限自检（界面 → 服务端 → 夜班）")
 
     print("[1] 界面：上限输入存在且随请求提交")
-    js = sorted((ROOT / "web" / "dist" / "assets").glob("*.js"))
-    txt = js[-1].read_text(encoding="utf-8", errors="replace") if js else ""
-    check("控件标签有「上限」「元」", "上限" in txt and "元" in txt)
-    check("请求体字段 max_cny", "max_cny" in txt)
-    check("状态里有 maxCny（可自己填）", "maxCny" in txt)
+    # 断言读**源码**（src/App.vue）而不是构建产物：dist 不入库，干净检出（CI）里根本没有，
+    # 以前读 dist 会让这条自检在 CI 上必红。dist 内容的校验归 check_ui_build.py。
     vue = (ROOT / "web" / "src" / "App.vue").read_text(encoding="utf-8")
+    check("控件标签有「上限」「元」", "上限" in vue and "元" in vue)
+    check("请求体字段 max_cny", "max_cny" in vue)
+    check("状态里有 maxCny（可自己填）", "maxCny" in vue)
     check("默认值存在（默认 1 元）", "maxCny: 1" in vue, "找不到默认值")
     check("提交时转成数字", "max_cny: Number(night.maxCny)" in vue)
 

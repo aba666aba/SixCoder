@@ -1,6 +1,6 @@
 name: CI
 
-# 为什么要有这个：这台机器上的 40+ 个判据/闸门/自检，过去全靠人工记得跑。
+# 为什么要有这个：这台机器上的 72 项自检/闸门，过去全靠人工记得跑。
 # 现在任何 push 与 PR 都会自动跑：自检（含反例）、前端构建、文档链接、密钥扫描。
 # 判据是硬门——绿了才算改对，和 docs/16 的"证据说话"是同一套原则。
 
@@ -37,26 +37,39 @@ jobs:
             prototype/requirements.txt
             prototype/requirements-dev.txt
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: prototype/web/package-lock.json
+
       - name: 安装依赖（锁定版本）
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r prototype/requirements.txt -r prototype/requirements-dev.txt
 
+      # 前端产物不入库（dist/ 在 .gitignore 里），而 check_ui_build 要读 dist/assets。
+      # 所以自检前必须在**同一个作业**里先构建，否则干净检出跑自检必红（CI 首次就是这么红的）。
+      - name: 构建前端产物（自检要用 dist）
+        working-directory: prototype/web
+        run: |
+          npm ci || npm install --no-audit --no-fund
+          npm run build
+          test -f dist/index.html || (echo "dist/index.html 缺失" && exit 1)
+
       - name: 语法编译（全仓 Python）
         run: python -m compileall -q prototype
 
-      - name: 自检套件（19 个脚本，含反例）
+      - name: 自检套件（72 项脚本，含反例）
         working-directory: prototype
         env:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: "1"
         run: python checks/run_all.py
 
-      - name: 独立验收（与引擎不共享代码）
-        env:
-          PYTHONIOENCODING: utf-8
-        run: python prototype/tools/hq_verify.py projects/night3
-
+      # 独立验收（hq_verify）需要一个真实工作区；工作区是生成产物、不入库，
+      # 因此这一步改到"README 里写的用法"上（跑生成出来的项目时手动执行），
+      # CI 不再引用仓库里不存在的 projects/*。
       - name: 依赖卫生（必须锁死版本，且没有已知漏洞）
         working-directory: prototype
         env:
@@ -128,7 +141,7 @@ jobs:
           echo "密钥扫描通过"
       - name: 不该入库的文件
         run: |
-          bad=$(git ls-files | grep -E 'prototype/data/(settings\.json|proto\.db|api_index\.db)|llm-config\.yml|node_modules/|__pycache__/' || true)
+          bad=$(git ls-files | grep -E 'prototype/data/(settings\.json|proto\.db|api_index\.db)|llm-config\.yml|node_modules/|__pycache__/|\.sixcoder/' || true)
           if [ -n "$bad" ]; then echo "$bad"; exit 1; fi
           echo "索引干净"
       - name: 文档链接

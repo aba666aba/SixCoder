@@ -120,10 +120,29 @@ def now() -> str:
     return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
+_SCHEMA_READY = False
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """按需建表（幂等）。
+
+    为什么必须在这里做：干净检出（CI / 新机器）没有 `data/proto.db`，
+    而 events / nodes / gate_runs 这些表是 `execute()` 的前提。
+    以前只有显式 `init()` 才建表，于是自检在干净仓库里第一个 `db.execute` 就炸
+    `no such table: gate_runs`——CI 在 ubuntu 与 windows 上都是这么红的。
+    """
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    conn.executescript(SCHEMA)
+    _SCHEMA_READY = True
+
+
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    _ensure_schema(conn)
     return conn
 
 

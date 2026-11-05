@@ -15,8 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import company, contract as cm, iterate  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACT = ROOT.parent / "projects" / "ab_contract.txt"
 FAILS: list[str] = []
+
+# 夹具必须自包含：以前读的是 `projects/ab_contract.txt`，而 `projects/` 已移出仓库
+# （生成产物不入库）→ 干净检出跑自检直接 FileNotFoundError（CI 就是这么红的）。
+CONTRACT_TEXT = """代码规模：S
+
+1) clean.py：
+   - clean_row(row: dict) -> dict：清理一行，返回 {"name": 去掉首尾空白后的名字}
+2) store.py：
+   - save_all(conn: object, rows: list[dict]) -> int：整体写入并返回写入条数
+   - load_rows(conn: object) -> list[dict]：读回全部行
+3) report.py：
+   - summarize(rows: list[dict]) -> dict：返回 {"count": 行数}
+"""
 
 
 def _sandbox_temp():
@@ -34,7 +46,7 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 
 def main() -> int:
     print("缺失函数假绿自检")
-    contracts = cm.parse_requirement(CONTRACT.read_text(encoding="utf-8"))
+    contracts = cm.parse_requirement(CONTRACT_TEXT)
 
     print("[1] 契约函数整段消失 → 仍要干活")
     with _sandbox_temp() as td:
