@@ -15,14 +15,23 @@ const net = require('net')
 const fs = require('fs')
 
 const PORT = Number(process.env.SIXCODER_PORT || 8760)
-const BACKEND_DIR = process.env.SIXCODER_BACKEND
-  || path.join(__dirname, '..', 'prototype')
 
-// Python 解释器：显式环境变量 → 本机已知安装位置 → PATH 里的 python
+// 打包后（安装版）资源在 process.resourcesPath 下：
+//   resources/python/python.exe     ← 随包附带的便携式 Python（用户不需要自己装）
+//   resources/prototype/            ← 后端源码
+// 开发态仍然用仓库里的 ../prototype + 本机 Python。
+const IS_PACKED = app.isPackaged
+const RES = process.resourcesPath || path.join(__dirname, '..')
+const BACKEND_DIR = process.env.SIXCODER_BACKEND
+  || (IS_PACKED ? path.join(RES, 'prototype') : path.join(__dirname, '..', 'prototype'))
+
+// Python 解释器：显式环境变量 → 包内自带（安装版）→ 本机已知位置 → PATH 里的 python
 function pickPython() {
   if (process.env.SIXCODER_PYTHON && fs.existsSync(process.env.SIXCODER_PYTHON)) {
     return process.env.SIXCODER_PYTHON
   }
+  const bundled = path.join(RES, 'python', 'python.exe')
+  if (fs.existsSync(bundled)) return bundled
   const guesses = ['D:\\Python\\python.exe', 'C:\\Python312\\python.exe', 'C:\\Python311\\python.exe']
   for (const g of guesses) { if (fs.existsSync(g)) return g }
   return 'python'

@@ -84,3 +84,9 @@ projects/*
 # 本地 git 内部目录的备份（绝不入库）
 .git.corrupt-*
 .git.bak*
+
+# 打包工具链（只在本机构建安装包用，不进仓库、不上 GitHub）
+/packaging/
+/shell/resources/
+/dist-installer/
+/.cache/
