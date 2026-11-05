@@ -1,0 +1,5 @@
+# 自检依赖（开发/CI 用，不进运行时）
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+pytest==9.0.3
+mypy==2.4.1

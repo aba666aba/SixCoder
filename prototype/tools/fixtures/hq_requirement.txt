@@ -1,0 +1,23 @@
+用 Python 从零实现「CSV 数据清洗与入库」工具，模块放仓库根目录：
+
+1) clean.py：
+   - normalize_age(x: str) -> int：去掉首尾空格转整数；范围 0..150，越界抛 ValueError；无法转整数抛 ValueError。
+   - parse_date(s: str) -> str：接受 "2024-01-02" 或 "2024/01/02"，统一返回 "YYYY-MM-DD"；非法格式抛 ValueError。
+   - clean_email(s: str) -> str：去空格并转小写；必须含 "@" 且 "@" 前后都非空，否则抛 ValueError。
+   - clean_row(row: dict) -> dict：对 age/date/email 三个字段调用上面三个函数并返回新字典。
+
+2) store.py：
+   - create_table(conn) -> None：建表 people(id INTEGER PRIMARY KEY, name TEXT, age INTEGER, email TEXT, birth TEXT)。
+   - upsert(conn, rows: list[dict]) -> int：按 id 覆盖写入，返回写入条数。
+   - fetch_all(conn) -> list[dict]：按 id 升序返回全部行。
+
+3) report.py：
+   - summarize(rows: list[dict]) -> dict：返回 {"count": 人数, "avg_age": 平均年龄(保留1位小数), "domains": 邮箱域名计数字典}。
+
+示例（必须满足）：
+normalize_age(" 42 ") == 42
+parse_date("2024/01/02") == "2024-01-02"
+clean_email(" Foo@Bar.COM ") == "foo@bar.com"
+summarize([{"age": 10, "email": "a@x.com"}]) == {"count": 1, "avg_age": 10.0, "domains": {"x.com": 1}}
+
+每个模块都要有 pytest 测试，覆盖正常与异常路径。

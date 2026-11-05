@@ -1,0 +1,47 @@
+DB_URL: jdbc:mysql://localhost:3306/sixcoder?createDatabaseIfNotExist=true&useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+DB_USER: root
+DB_PASS: 你的数据库密码
+
+llm:
+  max-tokens: 4096
+  agents:
+    orchestrator:
+      provider: deepseek
+      api-key: 你的API密钥
+      base-url: https://api.deepseek.com
+      model: deepseek-v4-pro
+    architect:
+      provider: deepseek
+      api-key: 你的API密钥
+      base-url: https://api.deepseek.com
+      model: deepseek-v4-pro
+    coder:
+      provider: deepseek
+      api-key: 你的API密钥
+      base-url: https://api.deepseek.com
+      model: deepseek-v4-pro
+    reviewer:
+      provider: deepseek
+      api-key: 你的API密钥
+      base-url: https://api.deepseek.com
+      model: deepseek-v4-pro
+    tester:
+      provider: deepseek
+      api-key: 你的API密钥
+      base-url: https://api.deepseek.com
+      model: deepseek-v4-pro
+    deployer:
+      provider: deepseek
+      api-key: 你的API密钥
+      base-url: https://api.deepseek.com
+      model: deepseek-chat
+  providers:
+    deepseek:
+      base-url: https://api.deepseek.com
+      model: deepseek-chat
+    qwen:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode
+      model: qwen-plus
+    openai:
+      base-url: https://api.openai.com
+      model: gpt-4o

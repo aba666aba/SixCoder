@@ -1,0 +1,70 @@
+#!/bin/sh
+# git pre-push 守卫：**阻止把密钥/运行期产物推到远端**
+#
+# 为什么需要它（真实教训）：本仓库历史里曾经提交过 `prototype/data/settings.json`，
+# 里面有明文 DeepSeek API Key。只要有人 `git push`，密钥就上了 GitHub。
+# 与其依赖"记得别提交"，不如让 push 直接失败。
+#
+# 安装（仓库根执行一次）：
+#   cp tools/git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#
+# 紧急绕行（确认无密钥时）：git push --no-verify
+
+set -e
+
+# 已轮换作废的密钥所在提交（见同目录 .known-old-secrets）：登记过的只提醒不拦
+ALLOW_FILE="$(dirname "$0")/.known-old-secrets"
+[ -f "$ALLOW_FILE" ] || ALLOW_FILE="tools/git-hooks/.known-old-secrets"
+is_allowed() {
+    [ -f "$ALLOW_FILE" ] || return 1
+    while read -r sha _; do
+        case "$sha" in ''|'#'*) continue ;; esac
+        case "$1" in "$sha"*) return 0 ;; esac
+    done < "$ALLOW_FILE"
+    return 1
+}
+
+# 1) 待推送的提交里有没有明文密钥形态
+KEY_RE='sk-[0-9a-f]{20,}'
+RANGE=$(git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null || true)
+if [ -n "$RANGE" ]; then
+    DIFF="$(git log --pretty=format:%h "$RANGE"..HEAD 2>/dev/null || true)"
+else
+    # 没有上游 = 首次推送，整段历史都会上去 → 全量扫
+    DIFF="$(git log --pretty=format:%h 2>/dev/null || true)"
+fi
+
+if [ -n "$DIFF" ]; then
+    for c in $DIFF; do
+        # 只看"新增的行"：删除密钥的提交不该被自己的历史拦住
+        if git show --no-color "$c" 2>/dev/null | grep -E '^\+' | grep -Eq "$KEY_RE"; then
+            if is_allowed "$c"; then
+                echo "· 提交 $c 含已轮换作废的旧 Key（登记在 .known-old-secrets，放行）" >&2
+                continue
+            fi
+            echo "" >&2
+            echo "✗ push 被拦下：提交 $c 里出现了疑似 API Key（$KEY_RE）" >&2
+            echo "" >&2
+            echo "  处理办法：" >&2
+            echo "   1) 先把密钥从提交里去掉（改文件 + 新提交），或清洗历史" >&2
+            echo "   2) 到控制台**轮换那把 Key**（已进过历史的 Key 一律视为泄露）" >&2
+            echo "   3) 若该 Key 已轮换作废：把提交 SHA 加进 tools/git-hooks/.known-old-secrets" >&2
+            echo "   4) 确认无误确实要推：git push --no-verify" >&2
+            echo "" >&2
+            exit 1
+        fi
+    done
+fi
+
+# 2) 禁止推送运行期/密钥文件本身
+FORBIDDEN='prototype/data/settings\.json|prototype/data/proto\.db|prototype/data/api_index\.db|llm-config\.yml|node_modules/|/\.sixcoder/'
+if git ls-files | grep -Eq "$FORBIDDEN"; then
+    echo "" >&2
+    echo "✗ push 被拦下：仓库索引里有不该入库的文件：" >&2
+    git ls-files | grep -E "$FORBIDDEN" | sed 's/^/    /' >&2
+    echo "" >&2
+    echo "  处理：git rm --cached <路径> 并确认 .gitignore 已覆盖" >&2
+    exit 1
+fi
+
+exit 0

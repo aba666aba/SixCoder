@@ -1,0 +1,86 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+build/
+target/
+release/
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 运行期产物（均可重建）
+_logs/
+prototype/workspaces/
+prototype/data/proto.db*
+prototype/data/api_index.db
+
+# 研究用的大体积索引库（用 graft_demo/bench_scale.py 重新生成）
+graft_demo/work/*.db
+
+# 历史实验工作区（有证据价值的两三个目录单独保留，其余不入库）
+projects/exp_*
+projects/hq_*
+projects/iter*
+# 压测产地：每次 bench 都会新生成一批，属于可重建产物，不入库
+projects/bench-*
+projects/night_mode*/
+projects/night_remote*/
+projects/night_ladder*/
+# 判据跑测试时引擎自己写的临时脚本（每次运行都会重写）
+projects/**/_props_run.py
+projects/**/.sixcoder/
+projects/**/__pycache__/
+
+# 本地配置与密钥（绝对不入库）
+llm-config.yml
+.env
+prototype/data/settings.json
+
+# 工具/编辑器杂项
+.qwen/
+.vscode/
+.idea/
+*.log
+*.bak
+*.bak2
+
+# 演示仓库：由 core/demo.py 自动生成（内含自己的 .git，绝不能当 gitlink 提交）
+prototype/demo-repo/
+projects/author_fresh*/
+projects/calc*/
+projects/night_localfirst*/
+projects/ui_q_demo/
+
+# 自检用的临时目录（每次跑都会重建，绝不入库）
+prototype/.tmp/
+
+# 引擎运行期状态：审计留痕 / 健康度 / 规模与自主实证台账（可重建，且含本机绝对路径）
+.sixcoder/
+
+# 覆盖率产物（gate_coverage 会把 .coverage 指到 .sixcoder/tmp，这里兜底）
+.coverage
+.coverage.*
+htmlcov/
+
+# 夜班/对照实验的证据工作区（每次运行重建，证据另存 _logs/runs）
+projects/night-v*/
+projects/night-bodies*/
+projects/ab_*/
+projects/run-*/
+projects/_replay_tmp/
+
+# 开发交接文档（本地保存，不上传云端；对外说明请看 README.md）
+开发文档.md
+
+# 夜班/实验生成的工作区（可重建，且含本机绝对路径）
+projects/*
+!projects/README.md
+# 本地 git 内部目录的备份（绝不入库）
+.git.corrupt-*
+.git.bak*

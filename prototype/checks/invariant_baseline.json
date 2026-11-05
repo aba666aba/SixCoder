@@ -1,0 +1,2186 @@
+{
+  "agent.py|截断长度|12|6151178d": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "allowed_txt = \"、\".join(sorted(allowed)[:12]) or \"（未限定，用契约里出现的名字）\"",
+    "依据": "展示/日志截断：长度 12 用于展示或摘要，不影响判据"
+  },
+  "agent.py|截断长度|40|94307915": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "+ (f\" # {s.doc}\" if s.doc else \"\") for s in syms[:40])",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "agent.py|禁令|测试节点不得用符号替换改写既有测试；请用 add + after 追加|c8ee0580": {
+    "file": "agent.py",
+    "kind": "禁令",
+    "value": "测试节点不得用符号替换改写既有测试；请用 add + after 追加",
+    "snip": "raise tools.ToolError(\"测试节点不得用符号替换改写既有测试；请用 add + after 追加\")",
+    "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "agent.py|禁令|测试节点只允许用 append_code 追加新测试函数；不得修改或替换既有测试|cc09a15f": {
+    "file": "agent.py",
+    "kind": "禁令",
+    "value": "测试节点只允许用 append_code 追加新测试函数；不得修改或替换既有测试",
+    "snip": "\"测试节点只允许用 append_code 追加新测试函数；不得修改或替换既有测试。\"",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "agent.py|截断长度|300|e854ef62": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"evidence_kind\": \"static_rule\", \"detail\": feedback[:300], \"ms\": 0})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|400|7fb21e35": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"detail\": str(ar.get(\"reason\") or \"\")[:400],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|200|9fde15fc": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "emit(\"notice\", {\"message\": escalation_note[:200]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|160|33e49d21": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "emit(\"notice\", {\"message\": f\"测试规格返工失败（规约不完整）：{regen['error'][:160]}；\"",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "approval.py|截断长度|4000|228e4117": {
+    "file": "approval.py",
+    "kind": "截断长度",
+    "value": "4000",
+    "snip": "ticket = {\"id\": ticket_id, \"node\": node, \"title\": title, \"detail\": (detail or \"\")[:4000],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "approval.py|截断长度|12|57042eb0": {
+    "file": "approval.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "return \"\\n\".join(prefix + ln for ln in str(text).splitlines()[:12])",
+    "依据": "展示/日志截断：长度 12 用于展示或摘要，不影响判据"
+  },
+  "author.py|禁令|\\n\\n【其它模块的签名参考（只读，不要改）】\\n|29087aa5": {
+    "file": "author.py",
+    "kind": "禁令",
+    "value": "\\n\\n【其它模块的签名参考（只读，不要改）】\\n",
+    "snip": "prompt += \"\\n\\n【其它模块的签名参考（只读，不要改）】\\n\" + _tokens.cut(ctx, 8000)",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "author.py|禁令|请只输出完整 JSON（不要解释、不要省略），必要时删掉非必要注释。|b5e1f34c": {
+    "file": "author.py",
+    "kind": "禁令",
+    "value": "请只输出完整 JSON（不要解释、不要省略），必要时删掉非必要注释。",
+    "snip": "\"请只输出完整 JSON（不要解释、不要省略），必要时删掉非必要注释。\")",
+    "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "author.py|截断长度|120|ee3df582": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "f\"- {x['target']}：{x['reason'][:120]}\" for x in deleg_report[\"failed\"]))",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "briefing.py|禁令|证据原文里的一句（必须逐字取自下面给出的证据，不要改写）|203c7116": {
+    "file": "briefing.py",
+    "kind": "禁令",
+    "value": "证据原文里的一句（必须逐字取自下面给出的证据，不要改写）",
+    "snip": "\"evidence\": [\"证据原文里的一句（必须逐字取自下面给出的证据，不要改写）\"],",
+    "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "briefing.py|截断长度|40|377a04cb": {
+    "file": "briefing.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "return False, f\"evidence 不是原文子串（可能是编的）：{s[:40]}\"",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "company.py|截断长度|80|cc2a58b1": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "desc = tail.split(\"：\", 1)[1].split(\"；\")[0].strip()[:80]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|60|f49fdcef": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "emit(\"tier\", {\"order\": workorder.describe(o)[:60],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|60|942d1dee": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "\"order\": workorder.describe(o)[:60],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|60|b42320ce": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "emit(\"tier_reset\", {\"order\": workorder.describe(o)[:60],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|160|f7c314cd": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"reason\": reason_txt, \"detail\": str(o.get(\"detail\") or \"\")[:160],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|150|f29be358": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "150",
+    "snip": "f\"{(detail[0] if detail else '见 TRACE.md')[:150]} |\")",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|200|8089ae4b": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "f\"单函数≤{lim['lines']} 行）：{qm.detail[:200]}\",",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|禁令|它们是交付物的一部分，但**不要拿它们当「这个函数对」的证据**。|c834a17e": {
+    "file": "company.py",
+    "kind": "禁令",
+    "value": "它们是交付物的一部分，但**不要拿它们当「这个函数对」的证据**。",
+    "snip": "\"它们是交付物的一部分，但**不要拿它们当「这个函数对」的证据**。\"]",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "company.py|禁令|受保护区：这类文件不允许自动改（L 级以上策略）|f9922d47": {
+    "file": "company.py",
+    "kind": "禁令",
+    "value": "受保护区：这类文件不允许自动改（L 级以上策略）",
+    "snip": "\"reason\": \"受保护区：这类文件不允许自动改（L 级以上策略）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "company.py|截断长度|10|642b5a2a": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "10",
+    "snip": "+ \"\\n\".join(f\"- {a} → {b}\" for a, b in rev[:10]))",
+    "依据": "展示/日志截断：长度 10 用于展示或摘要，不影响判据"
+  },
+  "company.py|截断长度|300|4af1f22e": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"reason\": f\"结构体检不过（已回滚）：{sg.detail}\"[:300],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|600|f4a3a194": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"feedback\": f\"结构体检：{sg.detail}\"[:600]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|300|07c8402d": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "emit(\"structure_gate\", {\"path\": rel, \"ok\": False, \"detail\": sg.detail[:300]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|120|9cccce34": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "emit(\"structure_gate\", {\"path\": rel, \"ok\": True, \"detail\": sg.detail[:120]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|160|ba2ae32e": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "lines.append(f\"- 安全：{'通过' if se.ok else '**未通过**'} — {se.detail[:160]}\")",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|160|03a82473": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "lines.append(f\"- 依赖：{'通过' if dp.ok else '**需处理**'} — {dp.detail[:160]}\")",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|220|202ae595": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "220",
+    "snip": "lines.append(f\"- **待甲方确认的歧义**：{fm.detail[:220]}\")",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|200|6c185396": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "lines.append(f\"- {g.gate}：{mark} — {g.detail[:200]}\")",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|1500|fb551b8e": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "1500",
+    "snip": "\"```\", \"\", \"## 需求原文\", \"\", \"```\", (requirement or \"\")[:1500], \"```\", \"\"]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "context.py|截断长度|60|387f597c": {
+    "file": "context.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "keep = [l for l in lines[:60] if re.match(r\"^\\s*(import|from)\\s\", l)]",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "contextpack.py|截断长度|60|b342af4e": {
+    "file": "contextpack.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "head = doc[0][:60] if doc else \"\"",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "contractcheck.py|截断长度|60|47f05962": {
+    "file": "contractcheck.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "f\"（{raw[:60]}）\")",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "contractcheck.py|截断长度|60|c51a44da": {
+    "file": "contractcheck.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "f\"{getattr(p, 'type', '')} 不符（{raw[:60]}）\")",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "contractcheck.py|截断长度|60|f07f8e2f": {
+    "file": "contractcheck.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "f\"却拿字面量 {type(v).__name__} 当示例（{raw[:60]}）——\"",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "contractcheck.py|截断长度|12|5c5aec9b": {
+    "file": "contractcheck.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "return {\"ok\": not hard, \"hard\": hard[:12], \"advisory\": advisory[:8],",
+    "依据": "展示/日志截断：长度 12 用于展示或摘要，不影响判据"
+  },
+  "db.py|截断长度|2000|14cc70d5": {
+    "file": "db.py",
+    "kind": "截断长度",
+    "value": "2000",
+    "snip": "evidence_ref, detail[:2000], elapsed_ms, now()),",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "decision.py|截断长度|100|f98284d8": {
+    "file": "decision.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "return f\"[{self.precision}] {where} — {self.kind}：{self.detail[:100]}\"",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "decision.py|截断长度|160|bb2baa77": {
+    "file": "decision.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "add(Finding(file=path, kind=\"traceback\", detail=text.strip().splitlines()[-1][:160]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "decision.py|截断长度|160|d61b66dc": {
+    "file": "decision.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "add(Finding(file=m.group(\"f\"), kind=\"gate\", detail=text[:160],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "decision.py|截断长度|160|9135d5c2": {
+    "file": "decision.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "add(Finding(file=path, kind=\"static\", detail=text[:160], function=fn, line=line,",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "decision.py|截断长度|160|a736df10": {
+    "file": "decision.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "add(Finding(file=rel, kind=\"function\", detail=text[:160], function=name,",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "decision.py|截断长度|160|0d2ecde2": {
+    "file": "decision.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "add(Finding(file=rel or \"?\", kind=\"meta\", detail=text[:160], source=\"meta\"))",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "decision.py|截断长度|160|3e652c1c": {
+    "file": "decision.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "add(Finding(file=rel or \"?\", kind=\"module\", detail=text[:160], source=\"unknown\"))",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "dictfill.py|禁令|)` 取，不要用 `d[|2bf309c0": {
+    "file": "dictfill.py",
+    "kind": "禁令",
+    "value": ")` 取，不要用 `d[",
+    "snip": "tips.append(f\"缺键 {m.group(1)}：用 `d.get('{m.group(1)}')` 取，不要用 `d['{m.group(1)}']`\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "e2e.py|截断长度|200|728f5169": {
+    "file": "e2e.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "why = gates.narrow_feedback(tr.detail or \"\") or (tr.detail or \"\")[:200]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "gates.py|禁令|{norm}: 实现节点不得修改测试文件|7b72fe91": {
+    "file": "gates.py",
+    "kind": "禁令",
+    "value": "{norm}: 实现节点不得修改测试文件",
+    "snip": "problems.append(f\"{norm}: 实现节点不得修改测试文件\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "gates.py|截断长度|60|a38e58e5": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "problems.append(f\"{norm}: 新增跳过标记 `{l.strip()[:60]}`\")",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "gates.py|截断长度|24|f3c14ecb": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "24",
+    "snip": "findings.append(f\"{rel}:{line} 疑似硬编码密钥（{m.group(0)[:24]}…）\")",
+    "依据": "展示/日志截断：长度 24 用于展示或摘要，不影响判据"
+  },
+  "gates.py|截断长度|60|ed77f189": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "f\"{(item.get('issue_text') or '')[:60]}\")",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "gates.py|截断长度|40|7e2e746f": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "issues.append(f\"{name}:{i} 未锁版本（{line[:40]}）→ 换台机器可能装出不同结果\")",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "gates.py|截断长度|40|1d5e5d9a": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "issues.append(f\"{name}:{i} 只有范围约束（{line[:40]}）→ 建议锁到具体版本\")",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "gitops.py|截断长度|500|b65db790": {
+    "file": "gitops.py",
+    "kind": "截断长度",
+    "value": "500",
+    "snip": "\"ok\": ok, \"detail\": detail[:500]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "gitops.py|截断长度|1500|a96d1513": {
+    "file": "gitops.py",
+    "kind": "截断长度",
+    "value": "1500",
+    "snip": "return {\"ok\": rc == 0, \"detail\": out[:1500], \"conflicts\": conflicts}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "governance.py|禁令|不许把密钥/凭证写进代码或提交（`OPENAI_API_KEY=...`、私钥、|ea572f24": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "不许把密钥/凭证写进代码或提交（`OPENAI_API_KEY=...`、私钥、",
+    "snip": "\"不许把密钥/凭证写进代码或提交（`OPENAI_API_KEY=...`、私钥、数据库口令）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|禁令|不许删除或跳过测试来让流水线变绿（`pytest.skip` / 删 asser|416b0603": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "不许删除或跳过测试来让流水线变绿（`pytest.skip` / 删 asser",
+    "snip": "\"不许删除或跳过测试来让流水线变绿（`pytest.skip` / 删 assert / 改期望值都算）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|禁令|不许引入未经说明的新依赖（标准库优先；第三方要在 PR 里写清用途与替代方案）|66e60ffb": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "不许引入未经说明的新依赖（标准库优先；第三方要在 PR 里写清用途与替代方案）",
+    "snip": "\"不许引入未经说明的新依赖（标准库优先；第三方要在 PR 里写清用途与替代方案）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|禁令|不许把校验逻辑用 `except Exception: pass` 吞掉（宁可抛|2d2919ec": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "不许把校验逻辑用 `except Exception: pass` 吞掉（宁可抛",
+    "snip": "\"不许把校验逻辑用 `except Exception: pass` 吞掉（宁可抛出，也不要静默）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|禁令|> 治理文件（本文件、`mission.md`、`factory-rules.m|3d388538": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "> 治理文件（本文件、`mission.md`、`factory-rules.m",
+    "snip": "\"> 治理文件（本文件、`mission.md`、`factory-rules.md`）Agent 不得修改。\", \"\"]",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|禁令|## 1. 逐字命令（照抄执行，不要自创）|3883d3a4": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "## 1. 逐字命令（照抄执行，不要自创）",
+    "snip": "out += [\"## 1. 逐字命令（照抄执行，不要自创）\", \"\"]",
+    "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "governance.py|禁令|## 3. 硬性禁令（任何一级都不许破）|8009720e": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "## 3. 硬性禁令（任何一级都不许破）",
+    "snip": "out += [\"## 3. 硬性禁令（任何一级都不许破）\", \"\"]",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|禁令|- 领域指南放 `docs/`，每篇 ≤300 行，按需加载，不要全量塞进上下文|a793b2d1": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "- 领域指南放 `docs/`，每篇 ≤300 行，按需加载，不要全量塞进上下文",
+    "snip": "\"- 领域指南放 `docs/`，每篇 ≤300 行，按需加载，不要全量塞进上下文\"]",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|截断长度|12|467d12c2": {
+    "file": "governance.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "for p in sorted(contracts or {})][:12]",
+    "依据": "展示/日志截断：长度 12 用于展示或摘要，不影响判据"
+  },
+  "governance.py|禁令|1. **根文件硬性禁令全局生效**：见仓库根的 `{GOVERNANCE_FI|c76e0d67": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "1. **根文件硬性禁令全局生效**：见仓库根的 `{GOVERNANCE_FI",
+    "snip": "f\"1. **根文件硬性禁令全局生效**：见仓库根的 `{GOVERNANCE_FILE}`，不得覆盖。\\n\"",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|禁令|2. 本目录只放这一层的约定（数据形态、对外接口、不要碰的文件）。\\n|bf3d0d15": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "2. 本目录只放这一层的约定（数据形态、对外接口、不要碰的文件）。\\n",
+    "snip": "f\"2. 本目录只放这一层的约定（数据形态、对外接口、不要碰的文件）。\\n\"",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|禁令|- 跨层调用必须经过下一层的公开接口，不许直接摸对方的内部函数。\\n|7bf2f4f7": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "- 跨层调用必须经过下一层的公开接口，不许直接摸对方的内部函数。\\n",
+    "snip": "\"- 跨层调用必须经过下一层的公开接口，不许直接摸对方的内部函数。\\n\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|截断长度|20|7da46520": {
+    "file": "governance.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "return {\"changed\": files, \"tests\": tests, \"interfaces\": ifaces[:20],",
+    "依据": "展示/日志截断：长度 20 用于展示或摘要，不影响判据"
+  },
+  "governance.py|禁令|- 超出这个范围 = 停下来写进报告，不要顺手改|90625246": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "- 超出这个范围 = 停下来写进报告，不要顺手改",
+    "snip": "lines.append(\"- 超出这个范围 = 停下来写进报告，不要顺手改\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|截断长度|16|12632bda": {
+    "file": "governance.py",
+    "kind": "截断长度",
+    "value": "16",
+    "snip": "return hashlib.sha256(path.read_bytes()).hexdigest()[:16]",
+    "依据": "展示/日志截断：长度 16 用于展示或摘要，不影响判据"
+  },
+  "governance.py|截断长度|20|bd92b906": {
+    "file": "governance.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "for i, group in enumerate(chunks[:20]):",
+    "依据": "展示/日志截断：长度 20 用于展示或摘要，不影响判据"
+  },
+  "governance.py|禁令|> 按需加载：只在改这个模块时读，不要全量塞进上下文。|8e7de5bc": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "> 按需加载：只在改这个模块时读，不要全量塞进上下文。",
+    "snip": "\"> 按需加载：只在改这个模块时读，不要全量塞进上下文。\", \"\"]",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "handoff.py|截断长度|300|5a0c2b20": {
+    "file": "handoff.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "f\"- 第 {e['attempt']} 次 · {e['gate']} FAIL（{e['evidence_kind']}）：{str(e['detail'])[:300]}\"",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "handoff.py|截断长度|300|649214fa": {
+    "file": "handoff.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "reason = (f\"测试未转绿：{tr.detail[:300]}\" if not test_ok",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "handoff.py|截断长度|300|77422db4": {
+    "file": "handoff.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "else (f\"引擎判据未通过：{props_detail[:300]}\" if not props_ok else \"\"))",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "handoff.py|截断长度|300|660a23f4": {
+    "file": "handoff.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"reason\": \"\" if ok else f\"测试未转绿：{tr.detail[:300]}\"}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "iterate.py|禁令|# 实现方案（人给的，必须照它派工，不许另起架构）|3d025184": {
+    "file": "iterate.py",
+    "kind": "禁令",
+    "value": "# 实现方案（人给的，必须照它派工，不许另起架构）",
+    "snip": "lines.append(\"# 实现方案（人给的，必须照它派工，不许另起架构）\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "iterate.py|禁令|plan 要短到能直接照着写代码，不要复述需求。|930b70d8": {
+    "file": "iterate.py",
+    "kind": "禁令",
+    "value": "plan 要短到能直接照着写代码，不要复述需求。",
+    "snip": "lines.append(\"plan 要短到能直接照着写代码，不要复述需求。\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "iterate.py|截断长度|60|b02bc161": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "bad = \"；\".join(f'{k} = {str(v)[:60]}' for k, v in (fields or {}).items())[:300]",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "iterate.py|截断长度|60|b31fa684": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "\"fields\": {k: str(v)[:60] for k, v in fields.items()}})",
+    "依据": "展示/日志截断：长度 60 用于展示或摘要，不影响判据"
+  },
+  "iterate.py|禁令|\\n【人工已确认（必须照此实现，不要再问）】\\n|e5990879": {
+    "file": "iterate.py",
+    "kind": "禁令",
+    "value": "\\n【人工已确认（必须照此实现，不要再问）】\\n",
+    "snip": "extra += (\"\\n【人工已确认（必须照此实现，不要再问）】\\n\"",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "iterate.py|截断长度|300|cb29f42e": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "return {\"ok\": False, \"reason\": f\"引擎测试未通过：{tr.detail}\"[:300]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "layout.py|截断长度|16|de2ab1ec": {
+    "file": "layout.py",
+    "kind": "截断长度",
+    "value": "16",
+    "snip": "return hashlib.sha1(stable_prefix(chunks).encode(\"utf-8\")).hexdigest()[:16]",
+    "依据": "展示/日志截断：长度 16 用于展示或摘要，不影响判据"
+  },
+  "oracle.py|截断长度|200|288499b7": {
+    "file": "oracle.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\" print('RAISED::' + type(_e).__name__ + '::' + str(_e)[:200])\\n\"",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "oscillation.py|截断长度|16|591bb321": {
+    "file": "oscillation.py",
+    "kind": "截断长度",
+    "value": "16",
+    "snip": "return hashlib.sha256(blob.encode(\"utf-8\")).hexdigest()[:16]",
+    "依据": "展示/日志截断：长度 16 用于展示或摘要，不影响判据"
+  },
+  "patch.py|截断长度|40|0d56896a": {
+    "file": "patch.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "rejected.append(f\"第 {n} 行原文对不上：期望 {old.strip()[:40]!r}，\"",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "patch.py|截断长度|40|d9638dbb": {
+    "file": "patch.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "f\"实际 {cur.strip()[:40]!r}\")",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "patch.py|禁令|     | …（文件共 {len(rows)} 行，其余行未显示；不要改未显示|4beb6d35": {
+    "file": "patch.py",
+    "kind": "禁令",
+    "value": "     | …（文件共 {len(rows)} 行，其余行未显示；不要改未显示",
+    "snip": "want.append(f\" | …（文件共 {len(rows)} 行，其余行未显示；不要改未显示的行，\"",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "permissions.py|禁令|当前模式「{mode.name}」不允许该操作：{CAPS.get(cap, c|79a45511": {
+    "file": "permissions.py",
+    "kind": "禁令",
+    "value": "当前模式「{mode.name}」不允许该操作：{CAPS.get(cap, c",
+    "snip": "f\"当前模式「{mode.name}」不允许该操作：{CAPS.get(cap, cap)}\\n\"",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "policy.py|禁令|实现方案由人给，系统照着做，不许自行改架构|edd7ddbc": {
+    "file": "policy.py",
+    "kind": "禁令",
+    "value": "实现方案由人给，系统照着做，不许自行改架构",
+    "snip": "notes=(\"实现方案由人给，系统照着做，不许自行改架构\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "policy.py|禁令|\\n（不要自行更换架构、改模块划分或换数据流；方案里没写到的细节，|b2263dba": {
+    "file": "policy.py",
+    "kind": "禁令",
+    "value": "\\n（不要自行更换架构、改模块划分或换数据流；方案里没写到的细节，",
+    "snip": "+ \"\\n（不要自行更换架构、改模块划分或换数据流；方案里没写到的细节，\" +",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "policy.py|禁令|留空并在结果里说明，不要猜|52b2e2f8": {
+    "file": "policy.py",
+    "kind": "禁令",
+    "value": "留空并在结果里说明，不要猜",
+    "snip": "else \"留空并在结果里说明，不要猜\") + \"）\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "props.py|截断长度|300|4d865e57": {
+    "file": "props.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"fails\": [{\"kind\": \"parse\", \"detail\": lines[-1][:300]}]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "protocol.py|禁令|在信息不足时**明确说出缺什么**，不要猜（甲方模式：说出来就让本地去查证据）|53c5d503": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "在信息不足时**明确说出缺什么**，不要猜（甲方模式：说出来就让本地去查证据）",
+    "snip": "\"在信息不足时**明确说出缺什么**，不要猜（甲方模式：说出来就让本地去查证据）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "protocol.py|禁令|不要写 pytest 测试（本地按契约渲染，你写的测试更弱）|454a7068": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "不要写 pytest 测试（本地按契约渲染，你写的测试更弱）",
+    "snip": "\"不要写 pytest 测试（本地按契约渲染，你写的测试更弱）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "protocol.py|禁令|不要写验收报告/交付说明/追溯矩阵（本地生成）|ac976244": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "不要写验收报告/交付说明/追溯矩阵（本地生成）",
+    "snip": "\"不要写验收报告/交付说明/追溯矩阵（本地生成）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "protocol.py|禁令|不要解释你的代码，不要输出步骤、表格、思考过程|20347e9e": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "不要解释你的代码，不要输出步骤、表格、思考过程",
+    "snip": "\"不要解释你的代码，不要输出步骤、表格、思考过程\",",
+    "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "protocol.py|禁令|不要跑命令、不要假设能执行代码（你只能回文本）|1a4c9f99": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "不要跑命令、不要假设能执行代码（你只能回文本）",
+    "snip": "\"不要跑命令、不要假设能执行代码（你只能回文本）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "protocol.py|禁令|不要改契约规定的签名/异常类型|b2061246": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "不要改契约规定的签名/异常类型",
+    "snip": "\"不要改契约规定的签名/异常类型\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "protocol.py|禁令|【本地工具（已具备，你不要重复做）】|5c1e38c2": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "【本地工具（已具备，你不要重复做）】",
+    "snip": "lines = [\"【本地工具（已具备，你不要重复做）】\"]",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "protocol.py|禁令|【你不许做的】|03c28a70": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "【你不许做的】",
+    "snip": "lines.append(\"【你不许做的】\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "protocol.py|禁令|content 必须是完整文件（含 import），不是片段、不是 diff、不|2c21d0d2": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "content 必须是完整文件（含 import），不是片段、不是 diff、不",
+    "snip": "\"content 必须是完整文件（含 import），不是片段、不是 diff、不要围栏外文字。\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "protocol.py|禁令|如果你判断信息不足以下结论，**不要猜**，只输出 JSON：|a3cabc17": {
+    "file": "protocol.py",
+    "kind": "禁令",
+    "value": "如果你判断信息不足以下结论，**不要猜**，只输出 JSON：",
+    "snip": "return ('如果你判断信息不足以下结论，**不要猜**，只输出 JSON：'",
+    "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "questions.py|截断长度|12|c50ae97b": {
+    "file": "questions.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "return hashlib.sha1((question or \"\").strip().encode(\"utf-8\")).hexdigest()[:12]",
+    "依据": "展示/日志截断：长度 12 用于展示或摘要，不影响判据"
+  },
+  "remote.py|禁令|你是代码修复顾问。只输出 JSON 符号级编辑，不要解释、不要围栏以外的文字。\\|7a10d29d": {
+    "file": "remote.py",
+    "kind": "禁令",
+    "value": "你是代码修复顾问。只输出 JSON 符号级编辑，不要解释、不要围栏以外的文字。\\",
+    "snip": "\"你是代码修复顾问。只输出 JSON 符号级编辑，不要解释、不要围栏以外的文字。\\n\"",
+    "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "remote.py|禁令|硬性要求：code 必须含 def/class 行；类方法写 Cls.metho|04432e13": {
+    "file": "remote.py",
+    "kind": "禁令",
+    "value": "硬性要求：code 必须含 def/class 行；类方法写 Cls.metho",
+    "snip": "\"硬性要求：code 必须含 def/class 行；类方法写 Cls.method；不要输出整文件；\"",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "remote.py|禁令|不要改与被测行为无关的接口；不确定就少改。\\n|10715bc0": {
+    "file": "remote.py",
+    "kind": "禁令",
+    "value": "不要改与被测行为无关的接口；不确定就少改。\\n",
+    "snip": "\"不要改与被测行为无关的接口；不确定就少改。\\n\"",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "remote.py|截断长度|40|44773228": {
+    "file": "remote.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "tried.append(f\"{tag}失败({err[:40]})\")",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "remote.py|截断长度|200|0144b101": {
+    "file": "remote.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "detail = (exc.read() or b\"\").decode(\"utf-8\", \"replace\")[:200]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "remote.py|截断长度|40|2db802df": {
+    "file": "remote.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "tried.append(f'{tag}失败({err[:40]})')",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "review.py|截断长度|120|9db67d0f": {
+    "file": "review.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "title=str(f.get(\"title\") or \"\")[:120],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "sandbox.py|禁令|沙箱处于只读模式，禁止写入|dbf4c051": {
+    "file": "sandbox.py",
+    "kind": "禁令",
+    "value": "沙箱处于只读模式，禁止写入",
+    "snip": "raise SandboxError(\"沙箱处于只读模式，禁止写入\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "sandbox.py|禁令|沙箱禁止访问敏感路径：{rel}|8a431a97": {
+    "file": "sandbox.py",
+    "kind": "禁令",
+    "value": "沙箱禁止访问敏感路径：{rel}",
+    "snip": "raise SandboxError(f\"沙箱禁止访问敏感路径：{rel}\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "sandbox.py|截断长度|500|b65db790": {
+    "file": "sandbox.py",
+    "kind": "截断长度",
+    "value": "500",
+    "snip": "\"ok\": ok, \"detail\": detail[:500]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "scale.py|比较阈值|10|e5ffcd61": {
+    "file": "scale.py",
+    "kind": "比较阈值",
+    "value": "10",
+    "snip": "id=\"S\", label=\"< 10 万行（原型 / 单一团队）\", max_lines=100_000,",
+    "依据": "展示/日志截断：长度 10 用于展示或摘要，不影响判据"
+  },
+  "scale.py|默认上限|max_lines=1|2bf45caf": {
+    "file": "scale.py",
+    "kind": "默认上限",
+    "value": "1",
+    "snip": "id=\"L\", label=\"50–100 万行（大型系统 / 多团队 / 受控自主）\", max_lines=1_000_000,",
+    "依据": "展示/日志截断：长度 1 用于展示或摘要，不影响判据"
+  },
+  "scale.py|禁令|~100 行目录 + 按需加载；治理三文件与代码分离，Agent 不得修改治理文|a8a20f12": {
+    "file": "scale.py",
+    "kind": "禁令",
+    "value": "~100 行目录 + 按需加载；治理三文件与代码分离，Agent 不得修改治理文",
+    "snip": "agents_md=\"~100 行目录 + 按需加载；治理三文件与代码分离，Agent 不得修改治理文件\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "settings_store.py|截断长度|64|8f33487c": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "64",
+    "snip": "out[str(model)[:64]] = row",
+    "依据": "展示/日志截断：长度 64 用于展示或摘要，不影响判据"
+  },
+  "settings_store.py|截断长度|16|b39a618f": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "16",
+    "snip": "\"tz\": str(raw.get(\"tz\") or \"UTC\")[:16]}",
+    "依据": "展示/日志截断：长度 16 用于展示或摘要，不影响判据"
+  },
+  "settings_store.py|截断长度|32|6807fee9": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "mid = str(raw.get(\"id\") or \"\").strip()[:32]",
+    "依据": "展示/日志截断：长度 32 用于展示或摘要，不影响判据"
+  },
+  "settings_store.py|截断长度|64|0cd5b41d": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "64",
+    "snip": "model = str(raw.get(\"model\") or \"\").strip()[:64]",
+    "依据": "展示/日志截断：长度 64 用于展示或摘要，不影响判据"
+  },
+  "settings_store.py|截断长度|48|efd1591a": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "48",
+    "snip": "\"label\": str(raw.get(\"label\") or mid or model)[:48],",
+    "依据": "展示/日志截断：长度 48 用于展示或摘要，不影响判据"
+  },
+  "style.py|禁令|- 不使用 print 输出调试信息；异常不要裸 except/pass 吞掉\\|826907c7": {
+    "file": "style.py",
+    "kind": "禁令",
+    "value": "- 不使用 print 输出调试信息；异常不要裸 except/pass 吞掉\\",
+    "snip": "f\"- 不使用 print 输出调试信息；异常不要裸 except/pass 吞掉\\n\"",
+    "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "symedit.py|截断长度|40|786cda92": {
+    "file": "symedit.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "return ast.unparse(node)[:40]",
+    "依据": "展示/日志截断：长度 40 用于展示或摘要，不影响判据"
+  },
+  "tools.py|截断长度|30|a077b486": {
+    "file": "tools.py",
+    "kind": "截断长度",
+    "value": "30",
+    "snip": "head = \"\\n\".join(text.splitlines()[:30])",
+    "依据": "展示/日志截断：长度 30 用于展示或摘要，不影响判据"
+  },
+  "trace.py|禁令|不得|5db34bd1": {
+    "file": "trace.py",
+    "kind": "禁令",
+    "value": "不得",
+    "snip": "EVIDENCE_WORDS = (\"应\", \"必须\", \"返回\", \"需要\", \"支持\", \"不得\", \"至少\", \"要求\")",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "trace.py|截断长度|12|4feb22fc": {
+    "file": "trace.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "lines += [f\"- {x}\" for x in orphan[:12]]",
+    "依据": "展示/日志截断：长度 12 用于展示或摘要，不影响判据"
+  },
+  "trace.py|截断长度|12|f036727f": {
+    "file": "trace.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "lines += [f\"- `{p}::{f}`\" for p, f in untested[:12]]",
+    "依据": "展示/日志截断：长度 12 用于展示或摘要，不影响判据"
+  },
+  "workorder.py|截断长度|600|c107667a": {
+    "file": "workorder.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": str(o.get(\"detail\") or \"\")[:600]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|200|3e7d015f": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"error\": (res.get(\"error\") or \"\")[:200]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|400|ad2819d1": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"feedback\": feedback[:400]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|1200|8cf30c52": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "emit(\"rendered_test\", {\"node\": node[\"nid\"], \"code\": new_text[:1200],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|1200|2045327b": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "emit(\"rendered_test\", {\"node\": node[\"nid\"], \"code\": rendered.strip()[:1200]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|500|084654ca": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "500",
+    "snip": "db.execute(\"UPDATE nodes SET last_error=? WHERE id=?\", (feedback[:500], node[\"nid\"]))",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|20000|3d7046a3": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "20000",
+    "snip": "db.execute(\"UPDATE nodes SET patch=? WHERE id=?\", (diff[:20000], node[\"nid\"]))",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|6000|cbf2d1f8": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "6000",
+    "snip": "emit(\"patch\", {\"node\": node[\"nid\"], \"path\": r2, \"diff\": diff[:6000]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|300|d6a82c97": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"reason\": (feedback or \"\")[:300]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|500|d78c9475": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "500",
+    "snip": "db.execute(\"UPDATE nodes SET last_error=? WHERE id=?\", (reason[:500], node[\"nid\"]))",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|500|e98e3949": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "500",
+    "snip": "emit(\"node_failed\", {\"node\": node[\"nid\"], \"reason\": reason[:500],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|2000|74f0264c": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "2000",
+    "snip": "return {\"node\": node[\"nid\"], \"ok\": False, \"reason\": reason[:2000]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "author.py|截断长度|200|4ccf6ecf": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "return {\"ok\": False, \"reason\": f\"远端调用失败：{r.get('error')}\"[:200],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "author.py|截断长度|200|82f20a8c": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"reason\": str(fix.get(\"reason\"))[:200]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "author.py|截断长度|300|c3ee1270": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "return {\"ok\": False, \"reason\": \"只回函数体两次都未通过：\" + (last or \"\")[:300],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "author.py|默认上限|floor=3000|2b60c1f7": {
+    "file": "author.py",
+    "kind": "默认上限",
+    "value": "3000",
+    "snip": "floor=3000 if stubby else 1200)",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "author.py|截断长度|300|3995d766": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "return {\"ok\": False, \"reason\": \"整文件模式两版都未通过：\" + (last or \"\")[:300],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "author.py|截断长度|1200|b735d5ff": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "return {\"ok\": False, \"feedback\": \"；\".join(bad[:6])[:1200]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|200|24ac3fa6": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "emit(\"contract_synth\", {\"phase\": \"start\", \"requirement\": requirement[:200]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|120|ed409899": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "r = {\"ok\": False, \"reason\": f\"{type(exc).__name__}: {exc}\"[:120]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|200|aa8c631a": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"reason\": str(rr.get(\"reason\") or \"\")[:200]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|300|caf3ecb5": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "reason_txt = str(r.get(\"reason\") or \"（没有更具体的原因）\")[:300]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|160|db24c2b9": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "emit(\"round_error\", {\"round\": rnd, \"error\": f\"{type(exc).__name__}: {exc}\"[:160]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|400|1733a535": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "workorder.close(oid, ok, str(r.get(\"reason\") or \"\")[:400])",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|200|b47f2168": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"reason\": str(r.get(\"reason\") or \"\")[:200],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|160|37425704": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"applied\": r.get(\"applied\"), \"reason\": str(r.get(\"reason\") or \"\")[:160]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|200|800627b4": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "+ str(_e2e0.as_feedback(ev0))[:200])",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|140|ff207c3f": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "140",
+    "snip": "f\"{str(rec.get('reason') or '')[:140]} |\")",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|200|1e5b3ff5": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "reason=(\"异常中断：%s: %s\" % (type(exc).__name__, exc))[:200])",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "delegate.py|截断长度|200|ced8d5a5": {
+    "file": "delegate.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "failed.append({\"target\": name, \"reason\": verdict[\"feedback\"][:200]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "delegate.py|截断长度|200|2e38e9b6": {
+    "file": "delegate.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"reason\": verdict[\"feedback\"][:200]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "delegate.py|截断长度|300|cc1e1b3e": {
+    "file": "delegate.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "return {\"ok\": bool(r.get(\"ok\")), \"feedback\": str(props.as_feedback(r))[:300]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "e2e.py|截断长度|300|14dc57ac": {
+    "file": "e2e.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "return {\"ok\": False, \"reason\": why[:300], \"covers\": p[\"covers\"], \"files\": []}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "e2e.py|截断长度|160|a58fec12": {
+    "file": "e2e.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "return \"未跑通：\" + str(result.get(\"reason\") or \"\")[:160]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "handoff.py|截断长度|3000|5ba339aa": {
+    "file": "handoff.py",
+    "kind": "截断长度",
+    "value": "3000",
+    "snip": "test_src[t] = tp.read_text(encoding=\"utf-8-sig\", errors=\"replace\")[:3000]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "iterate.py|截断长度|240|a964d252": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "240",
+    "snip": "last = str(_props.as_feedback(r))[:240]",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "iterate.py|截断长度|160|ac9afd3c": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "emit(\"dictfill_skip\", {\"symbol\": want, \"reason\": why[:160]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "iterate.py|截断长度|120|54dc3c4d": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"reason\": f\"需要人回答：{q['question'][:120]}\"}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "iterate.py|截断长度|220|ec7365c5": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "220",
+    "snip": "+ props.as_feedback(pre)[:220]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "oracle.py|截断长度|200|ba3b465d": {
+    "file": "oracle.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"error\": (out.strip().splitlines() or [\"(无输出)\"])[-1][:200]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "patch.py|截断长度|180|982531ee": {
+    "file": "patch.py",
+    "kind": "截断长度",
+    "value": "180",
+    "snip": "return {\"ok\": False, \"reason\": f\"远端调用失败：{r.get('error')}\"[:180]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "patch.py|截断长度|200|1246ebf1": {
+    "file": "patch.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "return {\"ok\": False, \"reason\": \"补丁未应用：\" + \"；\".join(res[\"rejected\"])[:200],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "patch.py|截断长度|200|c158f357": {
+    "file": "patch.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "return {\"ok\": False, \"reason\": \"行级修复后仍不通过：\" + str(verdict.get(\"feedback\"))[:200],",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "reference.py|截断长度|300|5d5164f8": {
+    "file": "reference.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"error\": f\"差分输出无法解析：{(proc.stdout or '')[:300]}\"}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "reference.py|截断长度|300|c52c0b8d": {
+    "file": "reference.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "return f\"差分测试失败：{result['error'][:300]}\"",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "scale.py|默认上限|max_lines=100|e5ffcd61": {
+    "file": "scale.py",
+    "kind": "默认上限",
+    "value": "100",
+    "snip": "id=\"S\", label=\"< 10 万行（原型 / 单一团队）\", max_lines=100_000,",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "scale.py|默认上限|max_lines=500|1c0f5d81": {
+    "file": "scale.py",
+    "kind": "默认上限",
+    "value": "500",
+    "snip": "id=\"M\", label=\"10–50 万行（中型生产系统 / 多模块）\", max_lines=500_000,",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "scale.py|比较阈值|100|e941abcd": {
+    "file": "scale.py",
+    "kind": "比较阈值",
+    "value": "100",
+    "snip": "id=\"XL\", label=\"> 100 万行（超大规模 / 从零构建与长期演进）\", max_lines=0,",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "agent.py|截断长度|120|d147568b": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "return f\"{name}: {hit_pat}（{line.strip()[:120]}）\"",
+    "依据": "摘要/采样：长度 120：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "agent.py|截断长度|200|4bdf35e8": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "+ (text or \"\")[:200].replace(\"\\n\", \"\\\\n\"))",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "agent.py|截断长度|180|ebfd586a": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "180",
+    "snip": "\"contract\": m.contract[:180]} for m in modules]})",
+    "依据": "摘要/采样：长度 180：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "agent.py|截断长度|120|293111ce": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "model_plan = _plan({\"files\": \"\\n\".join(files[:120]), \"tests\": \", \".join(test_files) or \"（无）\",",
+    "依据": "摘要/采样：长度 120：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "apikb.py|截断长度|200|598a466d": {
+    "file": "apikb.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "sig = str(inspect.signature(obj)).strip(\"()\")[:200]",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "apikb.py|截断长度|100|484be81b": {
+    "file": "apikb.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "doc = (inspect.getdoc(obj) or \"\").split(\"\\n\")[0][:100]",
+    "依据": "摘要/采样：长度 100：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "author.py|截断长度|80|583e1c07": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "issues.append({\"where\": str(it.get(\"where\") or \"\")[:80],",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "briefing.py|截断长度|160|bf90f4a1": {
+    "file": "briefing.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "lines.append(f\"- 必须：{str(item)[:160]}\")",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "briefing.py|截断长度|160|dc2c85f8": {
+    "file": "briefing.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "lines.append(f\"- 证据：{str(item)[:160]}\")",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "briefing.py|截断长度|160|dec32373": {
+    "file": "briefing.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "lines.append(f\"- 做法：{how[:160]}\")",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "company.py|截断长度|70|99895b92": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "70",
+    "snip": "lines.append(f\"| {rec.get('order', key)[:70]} | {rec.get('fails')} | \"",
+    "依据": "摘要/采样：长度 70：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "contextpack.py|截断长度|90|4ff9bd43": {
+    "file": "contextpack.py",
+    "kind": "截断长度",
+    "value": "90",
+    "snip": "return line[:90]",
+    "依据": "摘要/采样：长度 90：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "contextpack.py|截断长度|200|99e17ee3": {
+    "file": "contextpack.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "lines.append(f\"- SQL: {m.group(1).strip()[:200]}\")",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "delegate.py|截断长度|200|901c096c": {
+    "file": "delegate.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "out.append({\"kind\": kind, \"target\": target, \"spec\": spec[:200]})",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "dictfill.py|截断长度|200|f07f92b6": {
+    "file": "dictfill.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "lines.append(f' \"\"\"{doc_txt[:200]}\"\"\"')",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "docs.py|截断长度|120|8855f828": {
+    "file": "docs.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "first = requirement.strip().splitlines()[0][:120]",
+    "依据": "摘要/采样：长度 120：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "gates.py|截断长度|160|d5fd6e38": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "findings.append(f\"{rel} 导入失败：{tail[:160]}\")",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "gates.py|截断长度|160|3ba399a0": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "keep.append(t[:160])",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "gates.py|截断长度|200|2e52104e": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "keep.append(t[:200])",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "gates.py|截断长度|160|db9db178": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "keep = [l.strip()[:160] for l in (out or \"\").strip().splitlines()[-6:]]",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "governance.py|截断长度|200|628296ed": {
+    "file": "governance.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"requirement\": (requirement or \"\").strip()[:200]}",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "governance.py|截断长度|120|aeeb7868": {
+    "file": "governance.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "f\"{(fn.doc or '')[:120].replace('|', '/')} |\")",
+    "依据": "摘要/采样：长度 120：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "guards.py|截断长度|80|8dd41ead": {
+    "file": "guards.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "fromfile=f\"a/{rel}\", tofile=f\"b/{rel}\", lineterm=\"\", n=2))[:80])",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "iterate.py|截断长度|80|1f55da6b": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "\"options\": [str(x)[:80] for x in (opts if isinstance(opts, list) else [])][:4],",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "iterate.py|截断长度|200|ec39c805": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "+ f\"崩在：{last[:200]}\\n\"",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "props.py|截断长度|160|257fa00c": {
+    "file": "props.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "return t[:160]",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "questions.py|截断长度|200|fde5de97": {
+    "file": "questions.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "_audit(ws, {\"qid\": qid, \"action\": \"ask\", \"question\": q[:200], \"options\": data[\"options\"]})",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "review.py|截断长度|120|c9e867e7": {
+    "file": "review.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "evidence=line.strip()[:120],",
+    "依据": "摘要/采样：长度 120：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "review.py|截断长度|160|f60ba297": {
+    "file": "review.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "f\"{i:>3}| {l}\" for i, l in enumerate(text.splitlines()[:160], 1)))",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "review.py|截断长度|200|01a8635b": {
+    "file": "review.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "expected=str(f.get(\"expected\") or \"\")[:200],",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "review.py|截断长度|200|454f85ac": {
+    "file": "review.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "actual=str(f.get(\"actual\") or \"\")[:200],",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "sandbox.py|截断长度|80|1359e7dc": {
+    "file": "sandbox.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "raise SandboxError(f\"命令被沙箱拒绝（匹配规则 {pat.pattern}）：{cmd[:80]}\")",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "settings_store.py|截断长度|200|dd3648ee": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"base_url\": str(raw.get(\"base_url\") or \"\").strip()[:200],",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "symedit.py|截断长度|80|be2acfe4": {
+    "file": "symedit.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "(ast.get_docstring(st) or \"\").split(\"\\n\")[0][:80]))",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "symedit.py|截断长度|80|1e2ffce0": {
+    "file": "symedit.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "\"\", \"\", (ast.get_docstring(st) or \"\").split(\"\\n\")[0][:80]))",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "trace.py|截断长度|160|23bf0fcf": {
+    "file": "trace.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "by_func.setdefault(n, ln[:160])",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "trace.py|截断长度|160|6073723e": {
+    "file": "trace.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "orphan.append(ln[:160])",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "trace.py|截断长度|80|a5b3738e": {
+    "file": "trace.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "return str(text or \"\").replace(\"|\", \"\\\\|\").replace(\"\\n\", \" \")[:80]",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "workorder.py|截断长度|200|93c133cb": {
+    "file": "workorder.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"acceptance\": str(o.get(\"acceptance\") or \"\")[:200],",
+    "依据": "摘要/采样：长度 200：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "agent.py|截断长度|800|bbc3ee67": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "\"code\": engine_code[:800]})",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "author.py|截断长度|300|80760b3f": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"issue\": str(it.get(\"issue\") or \"\")[:300],",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "author.py|截断长度|300|566d5980": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"suggest\": str(it.get(\"suggest\") or \"\")[:300]})",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "author.py|默认上限|floor=1600|ce3542a2": {
+    "file": "author.py",
+    "kind": "默认上限",
+    "value": "1600",
+    "snip": "max_out = _tokens.output_budget(skeleton, factor=1.2, floor=1600)",
+    "依据": "门禁/配额的默认值：由 `core/scale.py` 按代码规模给，环境变量可覆盖；改它要同步改 scale 与对应自检"
+  },
+  "author.py|截断长度|300|7a5b720b": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"only\": only, \"evidence\": (last or \"\")[:300]})",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "author.py|截断长度|400|8cdc35f0": {
+    "file": "author.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"evidence\": (last or \"\")[:400]})",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "briefing.py|截断长度|400|221dd1ca": {
+    "file": "briefing.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "key = _cache_key(symbol, contract[:400], evidence[:400])",
+    "依据": "缓存键的取样长度：只影响键的区分度，不影响内容正确性"
+  },
+  "briefing.py|截断长度|800|a7006df0": {
+    "file": "briefing.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "prompt = PROMPT.format(symbol=symbol, contract=(contract or \"\")[:800],",
+    "依据": "提示词模板的片段长度：控制上下文预算，判据由机械门禁兜底，不靠提示词长度"
+  },
+  "company.py|截断长度|1200|037e9162": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "\"text\": gen[\"text\"][:1200]})",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "company.py|截断长度|600|ac0b3719": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"text\": (auto_plan or \"\")[:600],",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "company.py|截断长度|800|eada2d24": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "json.dumps(r, ensure_ascii=False)[:800])",
+    "依据": "事件 payload 的展示长度（emit 里 json.dumps(...)[:800]）：写进事件流给人看，不参与判据"
+  },
+  "company.py|截断长度|400|fee80b82": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "workorder.close(oid, True, json.dumps(rr, ensure_ascii=False)[:400])",
+    "依据": "工作单结案备注的展示长度（workorder.close 的 result[:400]）：只进审计库，不参与判据"
+  },
+  "governance.py|截断长度|800|baffd7ee": {
+    "file": "governance.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "out += [\"## 7. 当前需求（来自甲方）\", \"\", \"```\", requirement.strip()[:800], \"```\", \"\"]",
+    "依据": "待人工确认：这个数字凭什么、超了会怎样、有没有测试覆盖 —— 由人回答；在有人回答之前，每次自检都会把它列出来"
+  },
+  "iterate.py|截断长度|400|a518db1a": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "return {\"question\": str(data[\"question\"]).strip()[:400],",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "iterate.py|截断长度|300|fd4dd09e": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"why\": str(data.get(\"why\") or \"\")[:300]}",
+    "依据": "事件/报告里的**展示字段**：写给人看，长度只影响可读性，不参与任何判据"
+  },
+  "iterate.py|截断长度|300|b02bc161": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "bad = \"；\".join(f'{k} = {str(v)[:60]}' for k, v in (fields or {}).items())[:300]",
+    "依据": "拼接后的整段文本截断（日志/反馈用）：只影响可读性"
+  },
+  "iterate.py|截断长度|2000|adcb6b27": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "2000",
+    "snip": ".replace(\"<<SOURCE>>\", _prompt_safe(source)[:2000])",
+    "依据": "提示词模板的片段长度：控制上下文预算，判据由机械门禁兜底，不靠提示词长度"
+  },
+  "iterate.py|截断长度|400|22e9c1c6": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "extra += (\"\\n【上一次的自动修复没有通过，原因（必须避开）】\\n\" + why[:400])",
+    "依据": "反馈文本（『上一次自动修复没通过的原因』）的展示长度：给模型看的一句摘要，判据另算"
+  },
+  "iterate.py|截断长度|400|9d2cc3d6": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"text\": brief_txt[:400]})",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "iterate.py|截断长度|800|b6dc3626": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "+ str(got.get(\"answer\"))[:800])",
+    "依据": "问答答案的展示长度（got.get('answer')[:800]）：进事件流，不参与判据"
+  },
+  "oracle.py|截断长度|600|072526e0": {
+    "file": "oracle.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "return \"\\n\".join(lines)[:600]",
+    "依据": "拼接后的整段文本截断（日志/反馈用）：只影响可读性"
+  },
+  "patch.py|默认上限|floor=800|ffd90952": {
+    "file": "patch.py",
+    "kind": "默认上限",
+    "value": "800",
+    "snip": "max_out = _tokens.output_budget(span or code, factor=0.6, floor=800)",
+    "依据": "门禁/配额的默认值：由 `core/scale.py` 按代码规模给，环境变量可覆盖；改它要同步改 scale 与对应自检"
+  },
+  "policy.py|截断长度|2000|4d5603b8": {
+    "file": "policy.py",
+    "kind": "截断长度",
+    "value": "2000",
+    "snip": "+ text[:2000]",
+    "依据": "模式说明文本的展示长度（text[:2000]）：只用于显示，不参与判据"
+  },
+  "questions.py|截断长度|300|87842b4f": {
+    "file": "questions.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "data = {\"qid\": qid, \"question\": q, \"options\": list(options or [])[:4], \"why\": why[:300],",
+    "依据": "事件/报告里的**展示字段**：写给人看，长度只影响可读性，不参与任何判据"
+  },
+  "questions.py|截断长度|300|2b0f1873": {
+    "file": "questions.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "_audit(ws, {\"qid\": qid, \"action\": \"answer\", \"answer\": txt[:300], \"by\": by})",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "questions.py|截断长度|1200|15078761": {
+    "file": "questions.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "r = ask(ws, f\"是否按这个实现方案执行？\\n{text[:1200]}\", options=[\"通过\", \"修改\"],",
+    "依据": "提问正文的展示长度（计划审批问题）：给人读的摘要，完整计划另存文件"
+  },
+  "review.py|截断长度|400|c9077c93": {
+    "file": "review.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "suggestion=str(f.get(\"suggestion\") or \"\")[:400],",
+    "依据": "审查建议的展示长度（suggestion[:400]）：只进报告，不参与判据"
+  },
+  "workorder.py|截断长度|400|7f5cfd37": {
+    "file": "workorder.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "return str(data.get(\"root_cause\") or \"\")[:400], orders",
+    "依据": "工作单失败原因的展示长度（写进审计/报告给人看）：不参与判据"
+  },
+  "workorder.py|截断长度|1200|6ca9e705": {
+    "file": "workorder.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "return \"\\n\".join(f\"- {x}\" for x in items)[:1200]",
+    "依据": "拼接后的整段文本截断（日志/反馈用）：只影响可读性"
+  },
+  "debt.py|截断长度|160|6b52c068": {
+    "file": "debt.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"text\": re.sub(r\"\\s+\", \" \", line.strip())[:160]})",
+    "依据": "摘要/采样：长度 160：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "debt.py|截断长度|100|22031479": {
+    "file": "debt.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "lines.append(f\"- `{r['file']}:{r['line']}` [{r['marker']}] {str(r.get('text'))[:100]}\")",
+    "依据": "摘要/采样：长度 100：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "governance.py|禁令|| 不要这样 | 改成这样 ||0e6ead4b": {
+    "file": "governance.py",
+    "kind": "禁令",
+    "value": "| 不要这样 | 改成这样 |",
+    "snip": "\"| 不要这样 | 改成这样 |\", \"|---|---|\"]",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "governance.py|截断长度|16|591bb321": {
+    "file": "governance.py",
+    "kind": "截断长度",
+    "value": "16",
+    "snip": "return hashlib.sha256(blob.encode(\"utf-8\")).hexdigest()[:16]",
+    "依据": "摘要/采样：长度 16：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "lint.py|禁令|改成 `except X as exc: log.warning(...)` 或|6cadf8a8": {
+    "file": "lint.py",
+    "kind": "禁令",
+    "value": "改成 `except X as exc: log.warning(...)` 或",
+    "snip": "\"swallow\": \"改成 `except X as exc: log.warning(...)` 或 `raise`（不许静默）\",",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "lint.py|截断长度|120|9217e7d5": {
+    "file": "lint.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "out.append({\"rule\": rule, \"file\": rel, \"line\": line, \"text\": text[:120],",
+    "依据": "摘要/采样：长度 120：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "lint.py|截断长度|100|8af4a07e": {
+    "file": "lint.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "\"text\": str(exc.msg)[:100], \"why\": \"语法错误\", \"fix\": \"先修语法，其余检查跳过\"})",
+    "依据": "摘要/采样：长度 100：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "quality.py|截断长度|110|518e6bb5": {
+    "file": "quality.py",
+    "kind": "截断长度",
+    "value": "110",
+    "snip": "sample = \"；\".join(e.replace(str(ws) + \"/\", \"\")[:110] for e in errs[:2])",
+    "依据": "摘要/采样：长度 110：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "quality.py|截断长度|100|f47a5b9e": {
+    "file": "quality.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "probs.append(\"重复定义：\" + dup.detail[:100] + \" → 抽公共函数\")",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|600|be33a096": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"text\": (gate_plan or \"\")[:600],",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "arch.py|截断长度|80|b9240680": {
+    "file": "arch.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "tail = f\"；**超过软上限但已说明理由**：{reason[:80]}（已记入交付报告）\"",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "isolate.py|截断长度|60|11b2a912": {
+    "file": "isolate.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "self.notes.append(f\"建分支失败（{out[:60]}）→ 退化到快照后端\")",
+    "依据": "摘要/采样：长度 60：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "isolate.py|截断长度|80|88190f0b": {
+    "file": "isolate.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "self.notes.append(f\"commit 失败：{out[:80]}\")",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "isolate.py|截断长度|80|2888c964": {
+    "file": "isolate.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "self.notes.append(f\"fast-forward 并回失败：{out[:80]}\")",
+    "依据": "摘要/采样：长度 80：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "doctor.py|截断长度|60|eedad193": {
+    "file": "doctor.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "evidence=str(t[\"last_task\"])[:60]))",
+    "依据": "摘要/采样：长度 60：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "deps_audit.py|截断长度|120|6d5b2f82": {
+    "file": "deps_audit.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "vulns = [{\"id\": v.get(\"id\", \"\"), \"summary\": (v.get(\"summary\") or \"\")[:120]}",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|截断长度|220|67de9381": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "220",
+    "snip": "lines.append(f\"- 依赖审计（幻觉包/已知漏洞）：{_da2.summarize(_ares)[:220]}\")",
+    "依据": "报告/追溯矩阵的展示行：只影响可读性；判据另由门禁负责"
+  },
+  "company.py|截断长度|120|bf6f5d2e": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "{\"path\": rel, \"reason\": f\"{type(exc).__name__}: {exc}\"[:120]})",
+    "依据": "展示/日志截断：只影响报告可读性，不参与判据；模型输入的真相源是 tokens.output_budget"
+  },
+  "company.py|禁令|## 运行期降级（不许静默，逐条列在这里）|a01b7be1": {
+    "file": "company.py",
+    "kind": "禁令",
+    "value": "## 运行期降级（不许静默，逐条列在这里）",
+    "snip": "lines += [\"\", \"## 运行期降级（不许静默，逐条列在这里）\", \"\"]",
+    "依据": "行为禁令：系统行为约束（如受保护区拒绝）；写它是为了避免已知事故，改动需同步改自检"
+  },
+  "company.py|截断长度|10|61375603": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "10",
+    "snip": "for d in _deg[:10]:",
+    "依据": "摘要/采样：长度 10：用于摘要/概览（docstring 首行、签名、名字列表等），不承载判据；完整内容走 contextpack / tokens.cut"
+  },
+  "contractcheck.py|截断长度|50|530a6924": {
+    "file": "contractcheck.py",
+    "kind": "截断长度",
+    "value": "50",
+    "snip": "f\"改由端到端判据覆盖（写 dict 会逼实现去 conn.get('conn')）（{raw[:50]}）\")",
+    "依据": "展示用：渲染/日志文本截断，不参与任何判据；模型输入的真相源是 tokens.output_budget，超长内容另有 tokens.cut 处理"
+  },
+  "company.py|截断长度|120|eb5a3f53": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"fixed_items\": [str(x)[:120] for x in _before[:4]]})",
+    "依据": "记录/展示用：写进 .sixcoder 的日志文件给人看，不参与任何判据；超长内容由 tokens.cut 在提示词侧单独处理（完整内容不截断）"
+  },
+  "company.py|截断长度|200|85d31d0b": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "_why = str((_tr or {}).get(\"reason\") or \"未知\")[:200]",
+    "依据": "记录/展示用：写进 .sixcoder 的日志文件给人看，不参与任何判据；超长内容由 tokens.cut 在提示词侧单独处理（完整内容不截断）"
+  },
+  "company.py|截断长度|200|1a73185e": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "iterate.log_test_gap(ws, rel, f\"{type(exc).__name__}: {exc}\"[:200])",
+    "依据": "记录/展示用：写进 .sixcoder 的日志文件给人看，不参与任何判据；超长内容由 tokens.cut 在提示词侧单独处理（完整内容不截断）"
+  },
+  "company.py|截断长度|200|05f84f59": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"fixed_items\": [str(x)[:200] for x in items]},",
+    "依据": "记录/展示用：写进 .sixcoder 的日志文件给人看，不参与任何判据；超长内容由 tokens.cut 在提示词侧单独处理（完整内容不截断）"
+  },
+  "company.py|截断长度|160|4990cb0c": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "lines.append(f\"- `{_g.get('path')}`：{str(_g.get('reason'))[:160]}\")",
+    "依据": "记录/展示用：写进 .sixcoder 的日志文件给人看，不参与任何判据；超长内容由 tokens.cut 在提示词侧单独处理（完整内容不截断）"
+  },
+  "iterate.py|截断长度|300|6cba1494": {
+    "file": "iterate.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"reason\": str(reason)[:300]}, ensure_ascii=False) + \"\\n\")",
+    "依据": "记录/展示用：写进 .sixcoder 的日志文件给人看，不参与任何判据；超长内容由 tokens.cut 在提示词侧单独处理（完整内容不截断）"
+  },
+  "company.py|禁令|3. 不要输出解释、不要输出 diff、不要写测试文件、不要用 markdown|072d6593": {
+    "file": "company.py",
+    "kind": "禁令",
+    "value": "3. 不要输出解释、不要输出 diff、不要写测试文件、不要用 markdown",
+    "snip": "f\"3. 不要输出解释、不要输出 diff、不要写测试文件、不要用 markdown 代码块\\n\"",
+    "依据": "提示词约定：约束模型输出形态（只回 JSON、不回 diff/解释/测试），不是系统硬限制；不满足时由回复解析与编译器/运行时验证兜住"
+  },
+  "company.py|截断长度|1200|24c26983": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "body += f\"\\n【上一版没通过，必须改掉】\\n{err[:1200]}\\n\"",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "company.py|默认上限|max_out=8000|8e00ed5c": {
+    "file": "company.py",
+    "kind": "默认上限",
+    "value": "8000",
+    "snip": "workspace=str(ws), emit=emit, json_mode=True, max_out=8000)",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "company.py|截断长度|200|98a5ed75": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "return {\"ok\": False, \"reason\": f\"远端失败：{r.get('error')}\"[:200]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "company.py|截断长度|300|032004eb": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "bad = {p: str(r.get(\"reason\") or r.get(\"feedback\") or \"\")[:300]",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "company.py|截断长度|120|ea26e5e1": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "reason += \" 未通过：\" + \"；\".join(f\"{k}（{v[:120]}）\" for k, v in list(bad.items())[:3])",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|d4334d0c": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stderr or r.stdout or \"javac 通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|ffe0c2dc": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stderr or r.stdout or f\"{cc} 通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|249f8b26": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stderr or r.stdout or \"node --check 通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|aa50ba2f": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stderr or r.stdout or \"运行通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|e4e35921": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stderr or r.stdout or \"go vet 通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|167d215b": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stderr or r.stdout or \"构建通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|90a17753": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stderr or r.stdout or \"rustc 通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|a2118d1a": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stdout or r.stderr or \"php -l 通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|600|a755454e": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"detail\": (r.stdout or r.stderr or \"ruby -c 通过\").strip()[:600]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "lang.py|截断长度|300|e7eb15c6": {
+    "file": "lang.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"detail\": f\"{type(exc).__name__}: {exc}\"[:300]}",
+    "依据": "展示/日志截断：只进提示词重试摘要或交付报告，不参与判据；完整内容另有 tokens.cut 在提示词侧处理"
+  },
+  "company.py|截断长度|160|ce070e7f": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "emit(\"estimate\", {\"est\": _est, \"budget_ok\": _fit[\"ok\"], \"note\": _fit[\"note\"][:160],",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "company.py|截断长度|140|c464c562": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "140",
+    "snip": "emit(\"notice\", {\"message\": f\"与上一份基线相比有退化：{_dif['note'][:140]}\"})",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "company.py|默认上限|max_modules=1|bd8db78e": {
+    "file": "company.py",
+    "kind": "默认上限",
+    "value": "1",
+    "snip": "max_modules = 1 if _nmod <= 6 else (3 if _nmod <= 12 else 4)",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "company.py|比较阈值|12|bd8db78e": {
+    "file": "company.py",
+    "kind": "比较阈值",
+    "value": "12",
+    "snip": "max_modules = 1 if _nmod <= 6 else (3 if _nmod <= 12 else 4)",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "company.py|禁令|\\n【已通过验收、不许改动或删除的函数】\\n|8143c3da": {
+    "file": "company.py",
+    "kind": "禁令",
+    "value": "\\n【已通过验收、不许改动或删除的函数】\\n",
+    "snip": "ws_text += (\"\\n【已通过验收、不许改动或删除的函数】\\n\"",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "contract.py|截断长度|1200|479ad489": {
+    "file": "contract.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "sig.doc = item[:1200]",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "project.py|截断长度|200|813fefa1": {
+    "file": "project.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "low = (Path(str(rel)).stem + \" \" + str(getattr(contract, \"raw\", \"\") or \"\")[:200]).lower()",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "project.py|截断长度|40|2c8568d6": {
+    "file": "project.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "lines.append(f\"- 全局字段名（只能用这些，别自造）：{'/'.join((m.get('fields') or [])[:40])}\")",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "project.py|截断长度|12|122318aa": {
+    "file": "project.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "for f in (info.get(\"funcs\") or [])[:12]:",
+    "依据": "展示/日志截断或提示词措辞：不参与判据；完整内容由 tokens.cut 在提示词侧处理"
+  },
+  "flow.py|截断长度|90|14d6ac65": {
+    "file": "flow.py",
+    "kind": "截断长度",
+    "value": "90",
+    "snip": "out[\"calls\"][\"%s.%s\" % (stem, fname)] = \"%s: %s\" % (type(exc).__name__, str(exc)[:90])",
+    "依据": "展示/日志截断：集成冒烟把子进程异常摘要写进失败原因，只影响报告可读性，不参与判据（判据只看返回类别 ok/value_error，不看截断后的文字）"
+  },
+  "agent.py|截断长度|50|8683c0bc": {
+    "file": "agent.py",
+    "kind": "截断长度",
+    "value": "50",
+    "snip": "snap = _snapshot(ws, f\"{node['kind']}({rel}): {node['contract'][:50]}\",",
+    "依据": "提交消息标签：contract[:50] 只截取写进 git 提交消息的契约摘要（给人看的标签），不参与任何判据/校验；判据与闸门用的是完整契约文本"
+  },
+  "flow.py|截断长度|120|35e3694c": {
+    "file": "flow.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"%s: %s\" % (type(exc).__name__, str(exc)[:120]))",
+    "依据": "异常摘要截断：只把异常写进失败原因给人看，判据看的是 ok 布尔与异常类型，不看截断后的文字"
+  },
+  "ceiling.py|截断长度|120|e41fb468": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"blocker\": str(exc)[:120], \"next\": \"修业务流探针\"}",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "ceiling.py|截断长度|140|9674db7b": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "140",
+    "snip": "\"blocker\": (r.get(\"fails\") or [\"未知\"])[0][:140],",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "ceiling.py|截断长度|120|b0c1b270": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"blocker\": str(exc)[:120], \"next\": \"修并行框架\"}",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "ceiling.py|截断长度|100|7dc85048": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "\"blocker\": f\"{type(exc).__name__}: {str(exc)[:100]}\",",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "ceiling.py|截断长度|120|3c25fbbf": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"blocker\": str(exc)[:120], \"next\": \"修 HTTP 端到端探针\"}",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "ceiling.py|截断长度|120|07c5034f": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"blocker\": str(exc)[:120], \"next\": \"修数据流探针\"}",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "ceiling.py|截断长度|120|c3638e68": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"blocker\": str(exc)[:120], \"next\": \"修 scale.gate_mode\"}",
+    "依据": "事件/报告字典里的展示字段（形如 key: x[:N]）：写给人看，长度不影响判据"
+  },
+  "ceiling.py|截断长度|120|e5c547b4": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "f\"{str(exc)[:120]}\"),",
+    "依据": "异常摘要截断：只把异常写进失败原因给人看，判据看的是 ok 布尔与异常类型，不看截断后的文字"
+  },
+  "ceiling.py|禁令|修产物或修判据（两者都不许糊弄）|1211c3fb": {
+    "file": "ceiling.py",
+    "kind": "禁令",
+    "value": "修产物或修判据（两者都不许糊弄）",
+    "snip": "\"next\": \"修产物或修判据（两者都不许糊弄）\"}",
+    "依据": "交付报告/台账里的提示文本：写给维护者看的建议或边界说明，不是系统硬性限制"
+  },
+  "dataflow.py|禁令|这类**没有来源证据**，不要当成|f6fd65cf": {
+    "file": "dataflow.py",
+    "kind": "禁令",
+    "value": "这类**没有来源证据**，不要当成",
+    "snip": "\"这类**没有来源证据**，不要当成'流到了哪里'的结论\"]}",
+    "依据": "交付报告/台账里的提示文本：写给维护者看的建议或边界说明，不是系统硬性限制"
+  }
+}

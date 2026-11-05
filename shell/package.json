@@ -1,0 +1,14 @@
+{
+  "name": "sixcoder-coder-shell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SixCoder 桌面外壳：拉起 Python 后端 + 原生目录选择",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^43.1.0"
+  }
+}

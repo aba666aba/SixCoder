@@ -1,0 +1,12 @@
+# SixCoder 后端运行时依赖（版本已锁定，保证"换台机器装出同样的东西"）
+# 校验：python prototype/tools/release.py verify 会跑 gates.gate_deps
+#
+# 注意：mypy / pytest 只用于自检（类型咨询闸门、引擎判据），不参与线上运行，
+# 因此放在 requirements-dev.txt；CI 两个都装。
+
+fastapi==0.141.1
+uvicorn==0.53.0
+pydantic==2.13.5
+starlette==1.6.0
+libcst==1.9.0
+httpx==0.28.1
