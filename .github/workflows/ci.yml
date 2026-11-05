@@ -43,6 +43,16 @@ jobs:
           cache: npm
           cache-dependency-path: prototype/web/package-lock.json
 
+      # 矩阵有意覆盖两条路径：
+      #   ubuntu 装 JDK → "工具链齐全"路径（真编译真运行）
+      #   windows 不装  → "工具链缺失 → 如实拒绝、零花费"路径
+      # 两条都必须绿，才说明两种环境都处理对了（自检里对应断言是"诚实性"，不是"必须有编译器"）。
+      - uses: actions/setup-java@v4
+        if: runner.os == 'Linux'
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: 安装依赖（锁定版本）
         run: |
           python -m pip install --upgrade pip

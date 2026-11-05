@@ -43,23 +43,54 @@ def main() -> int:
         got = lang.detect(text, paths)
         check(f"{text} → {want}", got["lang"] == want, f"得到 {got['lang']}（paths={paths}）")
 
-    print("[2] 工具链诚实性：装不上/跑不起来都要算缺")
-    dotnet_ok = lang.available("dotnet")
-    check("dotnet 被判定为不可用（PATH 里有但执行失败）", not dotnet_ok, "dotnet 竟被评为可用")
-    check("gcc/g++/javac/node 可用（本机真实环境）",
-          all(lang.available(c) for c in ("gcc", "g++", "javac", "node")),
-          str({c: lang.available(c) for c in ("gcc", "g++", "javac", "node")}))
+    print("[2] 工具链诚实性：装不上/跑不起来都要算缺，且**不许撒谎**")
+    # dotnet 这条以前是"必须判成不可用"——那是**本机**的事实（这台机器上 dotnet 在 PATH
+    # 但执行失败）。GitHub 的 ubuntu/windows runner 上 dotnet 是能用的，于是 CI 两个 OS
+    # 一起红。正确口径：结论必须与"真的跑一次 dotnet --version"一致。
+    import shutil as _shutil
+    import subprocess as _sp
+
+    def _really_works(cmd: str) -> bool:
+        if not _shutil.which(cmd):
+            return False
+        try:
+            r = _sp.run([cmd, "--version"], capture_output=True, text=True, timeout=30)
+            return r.returncode == 0
+        except Exception:                                # noqa: BLE001
+            return False
+
+    real_dotnet = _really_works("dotnet")
+    check("dotnet 的判定与真实执行结果一致（跑不起来就算缺）",
+          bool(lang.available("dotnet")) == real_dotnet,
+          f"判定={lang.available('dotnet')} 实测={real_dotnet}")
+
+    # 工具链可用性同理：**装了的不能说不可用**；没装的把"真编译"断言标成测不了。
+    tools = ("gcc", "g++", "javac", "node")
+    truth = {c: bool(_shutil.which(c)) for c in tools}
+    claim = {c: bool(lang.available(c)) for c in tools}
+    lies = {c: (truth[c], claim[c]) for c in tools if truth[c] and not claim[c]}
+    check("装了的工具链不许被判成不可用（诚实性）", not lies, str(lies))
+    missing = [c for c in tools if not truth[c]]
+    have = [c for c in tools if truth[c]]
+    if missing:
+        print(f"  SKIP  本机缺工具链：{'、'.join(missing)} ——"
+              f" 这些语言的'真编译'断言测不了（不算通过，也不算失败）")
+    if have:
+        print(f"  NOTE  本机可用：{'、'.join(have)}（下面按可用项验证真编译）")
 
     print("[3] C++ 必须用 g++ 验（不是 gcc）")
-    with _sandbox_temp() as td:
-        ws = Path(td)
-        (ws / "stats.cpp").write_text(
-            '#include <vector>\n'
-            'double mean_sum(std::vector<double> xs) { return xs.empty() ? 0.0 : 1.0; }\n',
-            encoding="utf-8")
-        v = lang.verify(ws, "stats.cpp", "cpp")
-        check("C++ 验证走 g++", "g++" in str(v.get("how")), str(v))
-        check("这段 C++ 真通过", bool(v.get("ok")), str(v)[:200])
+    if truth["g++"]:
+        with _sandbox_temp() as td:
+            ws = Path(td)
+            (ws / "stats.cpp").write_text(
+                '#include <vector>\n'
+                'double mean_sum(std::vector<double> xs) { return xs.empty() ? 0.0 : 1.0; }\n',
+                encoding="utf-8")
+            v = lang.verify(ws, "stats.cpp", "cpp")
+            check("C++ 验证走 g++", "g++" in str(v.get("how")), str(v))
+            check("这段 C++ 真通过", bool(v.get("ok")), str(v)[:200])
+    else:
+        print("  SKIP  没有 g++，C++ 真编译测不了（不是通过）")
 
     print("[4] 回复解析：非 .py 也要接受，但仍然拒绝越界路径")
     reply = '{"files":[{"path":"Calc.java","content":"public class Calc {}"}]}'

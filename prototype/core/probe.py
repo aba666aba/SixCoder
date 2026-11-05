@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 GREENFIELD = "GREENFIELD"
@@ -108,8 +109,9 @@ def classify(repo: Path, deep: bool = False) -> dict:
     test_count = None
     baseline = "no-tests"
     if signals["has_tests"]:
-        rc, out = _run(["python", "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
-                       repo, 90)
+        # 用当前解释器而不是裸 "python"：CI/虚拟环境里 PATH 上的 python 未必是同一个
+        rc, out = _run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+                        "-p", "no:cacheprovider"], repo, 90)
         collect_ok = rc in (0, 5)
         m = re.search(r"(\d+)\s+tests?\s+collected", out)
         if m:
@@ -121,14 +123,14 @@ def classify(repo: Path, deep: bool = False) -> dict:
         if not collect_ok:
             baseline = "collect-failed"          # 连用例都收集不起来 → 基线不可信
         elif test_count is not None and test_count <= FULL_RUN_LIMIT:
-            rc2, out2 = _run(["python", "-m", "pytest", "-q", "--tb=no", "-p", "no:cacheprovider"],
-                             repo, 600)
+            rc2, out2 = _run([sys.executable, "-m", "pytest", "-q", "--tb=no",
+                              "-p", "no:cacheprovider"], repo, 600)
             tests_green = rc2 in (0, 5)
             baseline = "verified" if tests_green else "failing"
             signals["pytest_tail"] = "\n".join(out2.strip().splitlines()[-3:])
         elif deep:
-            rc2, out2 = _run(["python", "-m", "pytest", "-q", "--tb=no", "-p", "no:cacheprovider"],
-                             repo, 1800)
+            rc2, out2 = _run([sys.executable, "-m", "pytest", "-q", "--tb=no",
+                              "-p", "no:cacheprovider"], repo, 1800)
             tests_green = rc2 in (0, 5)
             baseline = "verified" if tests_green else "failing"
             signals["pytest_tail"] = "\n".join(out2.strip().splitlines()[-3:])
