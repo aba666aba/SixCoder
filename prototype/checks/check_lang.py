@@ -104,13 +104,21 @@ def main() -> int:
     check("非代码文件（.txt）被拒绝", not files_txt, str(files_txt)[:120])
 
     print("[5] 缺工具链：开跑前拒绝、零花费、写清装什么")
-    before = remote.usage_summary("")
-    with _sandbox_temp() as td:
-        ws = Path(td)
-        res = company.night(ws, "1) main.go：\n   - func Add(a int, b int) int：两数相加",
-                            "qwen2.5-coder:7b", hours=0.01, use_remote=True, max_cny=0.05)
-        files = sorted(p.name for p in ws.iterdir() if p.suffix in (".go", ".py"))
-    after = remote.usage_summary("")
+    # 不能靠"本机恰好没装 go"来触发这条路径：GitHub 的 ubuntu 镜像自带 Go，
+    # 于是这条断言在不同机器上时红时绿（CI 就是这么红的）。这里**注入**缺失条件。
+    _orig_available = lang.available
+    lang.available = lambda name: False if str(name).lower() in ("go", "golang") \
+        else _orig_available(name)
+    try:
+        before = remote.usage_summary("")
+        with _sandbox_temp() as td:
+            ws = Path(td)
+            res = company.night(ws, "1) main.go：\n   - func Add(a int, b int) int：两数相加",
+                                "qwen2.5-coder:7b", hours=0.01, use_remote=True, max_cny=0.05)
+            files = sorted(p.name for p in ws.iterdir() if p.suffix in (".go", ".py"))
+        after = remote.usage_summary("")
+    finally:
+        lang.available = _orig_available
     calls = int(after["calls"]) - int(before["calls"])
     check("Go 任务被拒绝（没有静默生成）", not files, str(files))
     check("一次远端都没调（零花费）", calls == 0, f"{calls} 次")

@@ -66,7 +66,13 @@ def pick_default() -> str:
     for m in ms:
         if "coder" in m:
             return m
-    return ms[0] if ms else "qwen2.5:1.5b"
+    if ms:
+        return ms[0]
+    # 一个模型都没装：返回空串表示"没有可用的本地工人模型"。
+    # 以前这里回落 `qwen2.5:1.5b` —— 那正好是本项目明令不许当默认的小模型
+    # （1.5B 连结构化输出都不稳）。CI/新机器上没有任何模型，于是默认值成了 1.5B，
+    # check_model_policy 立刻判红。**宁可说"没有"，也不要给一个不合格的默认值。**
+    return ""
 
 
 def chat(messages: list[dict], model: str, *, json_mode: bool = False,

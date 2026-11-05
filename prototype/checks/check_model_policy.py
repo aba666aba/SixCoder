@@ -72,9 +72,20 @@ def main() -> int:
 
     print("[4] 默认模型不许是小模型")
     from core import ollama  # noqa: E402
+    installed = ollama.models()
     d = ollama.pick_default()
     n = mp.params_b(d)
-    check("pick_default 不返回 <7B", n == 0 or n >= mp.MIN_PARAMS_B, f"默认 {d}（{n}B）")
+    if installed:
+        # 装了模型 → 默认值必须是门槛以上的那个（挑出来的是 1.5B/3B 就是错）
+        check("装了模型时，默认值不低于建议门槛", n >= mp.MIN_PARAMS_B, f"默认 {d}（{n}B）")
+    else:
+        # 一个模型都没装（CI / 新机器）→ 必须如实返回空，不许回落成小模型占位。
+        # 以前回落 `qwen2.5:1.5b`，于是"默认模型"本身就是项目禁止的那种小模型。
+        check("没有可用模型时如实返回空（不回落成小模型）", d == "", f"默认 {d!r}")
+        # 注意：verdict("") 是 ok=True（"未标注参数量→放行"这条规则），所以不能拿它判。
+        # 这里断的是"返回非空名字时，那个名字必须达标"。
+        check("空默认值不会被当成合格模型（0 参数不算达标）",
+              d == "" or mp.params_b(d) >= mp.MIN_PARAMS_B, f"默认 {d!r}")
 
     print()
     if FAILS:
