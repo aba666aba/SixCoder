@@ -1,0 +1,106 @@
+name: 自检诊断
+
+# 为什么要有这个：CI 的"自检套件"步骤一红，GitHub 的日志接口要登录才能读
+# （未认证访问 /actions/jobs/{id}/logs 返回 403），本地又复现不出来（本机装了
+# 编译器/构建产物/运行期状态）。所以让 CI 自己把失败详情写进一个分支，开发者
+# 用 git fetch 就能读到 —— 不需要 token，也不需要人工复制粘贴。
+#
+# 触发方式：把任意提交推到 `ci-diag-trigger` 分支（或手动 workflow_dispatch）。
+# 产物：分支 `ci-diag-<os>`，内含 ci-diag/<os>.md（失败检查名 + 每个失败检查的完整输出）。
+
+on:
+  push:
+    branches: [ci-diag-trigger]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diag:
+    name: 诊断（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r prototype/requirements.txt -r prototype/requirements-dev.txt
+
+      - name: 构建前端产物
+        working-directory: prototype/web
+        run: |
+          npm ci || npm install --no-audit --no-fund
+          npm run build
+
+      - name: 跑自检并收集失败详情
+        working-directory: prototype
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          set +e
+          python checks/run_all.py > "$RUNNER_TEMP/runall.txt" 2>&1
+          echo "run_all exit=$?"
+          python - <<'PY'
+          import os, re, subprocess, sys
+          from pathlib import Path
+
+          temp = Path(os.environ["RUNNER_TEMP"])
+          log = (temp / "runall.txt").read_text(encoding="utf-8", errors="replace")
+          fails = [m.group(1) for m in re.finditer(r"^\s*FAIL\s+(check_\S+\.py)", log, re.M)]
+          summary = [ln for ln in log.splitlines()
+                     if ln.startswith("共 ") or "全部通过" in ln or "有失败项" in ln]
+          out = ["# CI 诊断", "", "## 环境", "",
+                 f"- runner: `{os.environ.get('RUNNER_OS')}` / python "
+                 f"`{sys.version.split()[0]}`",
+                 f"- 失败检查数: **{len(fails)}**", "", "## 汇总", "", "```"]
+          out += summary or ["(没有抓到汇总行)"]
+          out += ["```", "", "## 失败检查", ""]
+          if not fails:
+              out += ["（没有失败项 —— 这次自检是全绿的）"]
+          for name in fails:
+              out += [f"### `{name}`", "", "```"]
+              r = subprocess.run([sys.executable, f"checks/{name}"], capture_output=True,
+                                 text=True, encoding="utf-8", errors="replace", timeout=600)
+              body = (r.stdout or "") + (r.stderr or "")
+              body = "\n".join(body.splitlines()[-60:])
+              out += [body.replace("\n```", "\n`` `"), f"(exit={r.returncode})", "```", ""]
+          (temp / "diag.md").write_text("\n".join(out), encoding="utf-8")
+          print("诊断写到", temp / "diag.md", "，失败", len(fails), "项")
+          PY
+
+      - name: 上传诊断分支
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          os_name="$(python -c 'import os;print(os.environ.get("RUNNER_OS","unknown").lower())')"
+          mkdir -p ci-diag
+          cp "$RUNNER_TEMP/diag.md" "ci-diag/${os_name}.md"
+          git config user.name "ci-diag"
+          git config user.email "ci-diag@local"
+          git checkout --orphan "tmp-${os_name}" 2>/dev/null || git checkout -B "tmp-${os_name}"
+          git add -f "ci-diag/${os_name}.md"
+          git commit -q -m "ci-diag: ${os_name} / ${{ github.sha }}"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" \
+            "HEAD:refs/heads/ci-diag-${os_name}"
+          echo "已推送分支 ci-diag-${os_name}"
