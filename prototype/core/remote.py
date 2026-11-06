@@ -516,10 +516,35 @@ def http_error_hint(exc) -> str:
     return f"HTTP {code}: {detail}" if detail else f"HTTP {code}"
 
 
-def complete(prompt: str, task_id: str = '', node_id: str = 'architect',
+def _fit_messages(msgs: list[dict], limit_chars: int) -> list[dict]:
+    """多轮上下文超限时怎么活：**保住第一条**（契约/代码都在里面），丢掉中间轮次。
+
+    为什么不能像单轮那样直接截尾：多轮里最后几条是"我刚跑出来的证据+我刚交的代码"，
+    截掉它们等于让模型失忆；而中间轮次的推理价值最低。丢的时候留一句醒目的标记，
+    免得模型以为对话没断过。
+    """
+    joined = sum(len(m.get('content') or '') for m in msgs)
+    if joined <= limit_chars or len(msgs) <= 2:
+        return msgs
+    head = msgs[0]
+    tail = list(msgs[1:])
+    dropped = 0
+    while tail and (len(head.get('content') or '')
+                    + sum(len(m.get('content') or '') for m in tail)) > limit_chars:
+        tail.pop(0)
+        dropped += 1
+    if dropped:
+        note = {'role': 'user',
+                'content': f'…（中间 {dropped} 轮对话因体积上限被省略；以第一条与本条为准）…'}
+        return [head, note, *tail]
+    return [head, *tail]
+
+
+def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
              workspace: str = '', emit=None, thinking: str | None = None,
              step_index: int | None = None, json_mode: bool = False,
-             max_out: int | None = None) -> dict:
+             max_out: int | None = None,
+             messages: list[dict] | None = None) -> dict:
     """发一段自由文本提示，返回 {ok, answer, usage}。
 
     走**单模型 + 思考强度阶梯**（core/settings_store.ladder）：一次运行只用一个模型，
@@ -527,14 +552,30 @@ def complete(prompt: str, task_id: str = '', node_id: str = 'architect',
       · step_index=None → 从第 0 档（flash:none）开始；
       · thinking="on"/"off" 是老接口，映射成档位过滤（on→跳过 none 档）；
       · 限流/网络抖动会自动升一档重试；"答得不对"不在这里重试（由夜班按阈值升档）。
+      · `messages`：给多轮对话用（片内自验的"跑→看→改"就是多轮）。不给就单轮。
+
+    多轮为什么要单开一个入口（实测动机）：单轮时每一步都要把契约+全部代码+证据重新
+    塞进一个巨型提示词，模型看不到自己上一轮交了什么；多轮能让它带着自己的代码继续改，
+    代价是历史会涨 —— 所以配了 `_fit_messages` 的丢中间轮策略，绝不静默截最后一轮。
     """
+    msgs: list[dict] | None = None
+    if messages:
+        msgs = [{'role': str(m.get('role') or 'user'),
+                 'content': str(m.get('content') or '')}
+                for m in messages if str(m.get('content') or '').strip()]
+        if not msgs:
+            msgs = None
+    text = msgs[-1]['content'] if msgs else (prompt or '')
     ok, why = available()
     if not ok:
         return {'ok': False, 'error': why, 'answer': ''}
     # 关键节点守卫：开发者模式在"把代码发往远端"前要人点头（甲方模式自动放行）
     try:
         from . import guards
-        g = guards.gate_remote_call(workspace, len(prompt or ''), task_id, emit=emit)
+        g = guards.gate_remote_call(workspace,
+                                    len(prompt or '') if not msgs
+                                    else sum(len(m['content']) for m in msgs),
+                                    task_id, emit=emit)
         if not g.get('ok'):
             return {'ok': False, 'error': f"未获批准：{g.get('reason')}", 'answer': ''}
     except Exception:                                    # noqa: BLE001
@@ -556,12 +597,15 @@ def complete(prompt: str, task_id: str = '', node_id: str = 'architect',
                 'answer': ''}
     # token 预算（真正的物理上限）：先按校准比率估算，超了才压缩；绝不拆成两次调用。
     from . import tokens as _tokens
-    text = prompt
     need, info = _tokens.needs_compression(text)
     if need:
         limit_chars = int((r.get('max_prompt_tokens') or 950000) / max(_tokens.ratio(), 0.2))
         limit_chars = min(limit_chars, int(r.get('max_prompt_chars') or 4000000))
-        text = prompt[:limit_chars]
+        if msgs:
+            # 多轮：丢中间轮次而不是砍最后一轮（最后一轮是刚跑出来的证据）
+            msgs = _fit_messages(msgs, limit_chars)
+        else:
+            text = prompt[:limit_chars]
         if emit:
             emit('context_budget', {**info, 'action': '压缩', 'chars': limit_chars})
     tried = []
@@ -569,8 +613,8 @@ def complete(prompt: str, task_id: str = '', node_id: str = 'architect',
     seq = [(i, s) for i, s in remote_steps if i >= start] or remote_steps[:1]
     for idx, step in seq:
         tag = f"{step['profile_id']}:{step['effort']}"
-        payload, base, key = _payload_for(step, r, [{'role': 'user', 'content': text}],
-                                          json_mode=json_mode)
+        _wire = msgs if msgs else [{'role': 'user', 'content': text}]
+        payload, base, key = _payload_for(step, r, _wire, json_mode=json_mode)
         _eff = str(payload.get("reasoning_effort") or "none").lower()
         if max_out:
             # 整文件/架构设计需要长输出；档位默认 8K 只够一个函数。
@@ -615,7 +659,8 @@ def complete(prompt: str, task_id: str = '', node_id: str = 'architect',
         rt = int((usage.get('completion_tokens_details') or {}).get('reasoning_tokens') or 0)
         answer = ((data.get('choices') or [{}])[0].get('message') or {}).get('content') or ''
         # 用真实 usage 校准"token/字符"比率（下次估算更准，不依赖 tokenizer）
-        _tokens.observe(len(text), pt)
+        _chars = len(text) if not msgs else sum(len(m['content']) for m in msgs)
+        _tokens.observe(_chars, pt)
         _record(task_id=task_id, node_id=node_id, model=step['model'],
                 prompt_tokens=pt, completion_tokens=ct, cache_hit_tokens=hit, ms=ms,
                 reasoning_tokens=rt, effort=step['effort'], pricing=step.get('pricing'))

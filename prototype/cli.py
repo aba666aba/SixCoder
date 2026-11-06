@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -45,7 +46,13 @@ def out(data, as_json: bool = False) -> None:
 def _slim(payload: dict) -> str:
     keep = ("state", "policy", "gate", "ok", "evidence_kind", "path", "attempt",
             "temperature", "model", "ms", "tokens", "snapshot", "reason", "message",
-            "passed", "model_assertion_rate", "mutation_kill_rate", "nodes_ok", "nodes_total")
+            "passed", "model_assertion_rate", "mutation_kill_rate", "nodes_ok", "nodes_total",
+            # 全自主模式的进度字段（蓝图/切片/覆盖/花费）：以前这些不在白名单里，
+            # 事件打出来是一行空白 —— 命令行看不到进度，等于把可观测性丢了
+            "phase", "goal", "version", "caps", "funcs", "slice", "cap", "gained", "left",
+            "budget_cny", "cost_cny", "spent_cny", "pct", "coverage", "replans", "descoped",
+            "contract", "why", "added", "rewired", "funcs_cap", "problems", "next_funcs_cap", "streak", "entry", "n", "changes",
+            "questions", "answered", "samples", "ids")
     parts = [f"{k}={payload[k]}" for k in keep if k in payload]
     if "diff" in payload:
         d = payload["diff"] or ""
@@ -186,11 +193,15 @@ def cmd_night(args) -> None:
         print(f"[FAIL] {pol.name}不写文件，不能跑夜班；请切到甲方模式或开发者模式")
         sys.exit(2)
     db.init()
+    goal = str(getattr(args, "goal", "") or "").strip()
     requirement = args.requirement or ""
     if getattr(args, "requirement_file", ""):
         requirement = Path(args.requirement_file).read_text(encoding="utf-8-sig")
-    if not requirement.strip():
-        print("[FAIL] 需要 --requirement 或 --requirement-file")
+    if not requirement.strip() and not goal:
+        print("[FAIL] 需要 --goal（一句话目标，全自主）或 --requirement / --requirement-file")
+        sys.exit(2)
+    if goal and requirement.strip():
+        print("[FAIL] --goal 与 --requirement 只能用一个：目标模式自己规划切片，不再吃需求清单")
         sys.exit(2)
     plan = args.plan or ""
     if getattr(args, "plan_file", ""):
@@ -213,6 +224,70 @@ def cmd_night(args) -> None:
     except Exception as exc:                             # noqa: BLE001
         print(f"[FAIL] {exc}")
         sys.exit(4)
+
+    def printer(kind, payload) -> None:
+        if kind in ("round", "strategy", "architect", "escalate", "rescue", "scale",
+                    "governance", "workingset", "protected_zone", "structure_gate",
+                    "output_budget", "write_cap", "stop",
+                    "order_failed", "needhuman", "dictfill", "autofix",
+                    "blueprint", "coverage", "slice_start", "slice_done", "replan",
+                    "slice_contract", "autonomy_done", "architecture",
+                    "architect_questions", "spec_samples"):
+            print(f"   {kind:<14} {_slim(payload or {})[:150]}", flush=True)
+
+    if goal:
+        # ---- 全自主模式：只给一句话目标，切片与验收对象由系统自己规划 ----
+        from core import auto as _auto
+        from core import blueprint as _bp
+        print(f"> 全自主模式：目标「{goal}」")
+        print(f"> 仓库 {repo}  model={model}")
+        print(f"> 总预算 " + (f"¥{args.max_cny:.2f}" if args.max_cny else "（未设，不封顶）")
+              + (f"｜时间 {args.hours}h" if args.hours else ""))
+        approve = None
+        if getattr(args, "approve_plan", False):
+            def approve(bp) -> bool:                     # noqa: F811
+                print("\n" + _bp.summary(bp) + "\n")
+                try:
+                    return input("蓝图认可吗？y 开跑，其它键停止：").strip().lower() in ("y", "yes")
+                except EOFError:
+                    return False
+        _samples = ""
+        _sp = getattr(args, "spec_sample", "") or ""
+        if _sp:
+            try:
+                _samples = Path(_sp).read_text(encoding="utf-8-sig")
+                print(f"> 验收样例：{_sp}")
+            except OSError as exc:
+                print(f"[FAIL] 读不了验收样例：{exc}")
+                sys.exit(2)
+        # ---- 阶段 1：架构问答（人只在最贵的位置介入这一次）----
+        _arch = {}
+        if getattr(args, "ask", False) or getattr(args, "answers", "") or getattr(args, "interview", False):
+            _arch = _arch_interview(repo, goal,
+                                    force_ask=bool(getattr(args, "ask", False)),
+                                    answers_path=str(getattr(args, "answers", "") or ""),
+                                    interactive=bool(getattr(args, "interview", False)))
+            if _arch.get("asked_only"):
+                sys.exit(0)
+            _arch.pop("asked_only", None)
+        res = _auto.night_auto(repo, goal, budget_cny=args.max_cny, hours=args.hours,
+                               model=model,
+                               max_slices=getattr(args, "max_slices", 0) or 0,
+                               max_rounds=args.max_rounds,
+                               slice_hours=getattr(args, "slice_hours", 0.0) or 0.0,
+                               fresh=getattr(args, "fresh", False),
+                               emit=None if args.quiet else printer, approve=approve,
+                               spec_samples=_samples, arch=_arch or None,
+                               selfcheck=not getattr(args, "no_selfcheck", False))
+        print("\n■ " + _auto.describe(res))
+        if res.get("report"):
+            print(f"  自主报告 {res['report']}")
+        for row in (res.get("descoped") or [])[:6]:
+            print(f"  降级 {row}")
+        for row in (res.get("blocked") or [])[:6]:
+            print(f"  受阻 {row.get('cap')}：{row.get('why')}")
+        sys.exit(0 if res.get("ok") else 1)
+
     # 规模分级：不同代码规模该有的约束不一样，提需求时就要写明目标规模。
     from core import scale as _scale
     scope = _scale.resolve(requirement, repo)
@@ -229,13 +304,6 @@ def cmd_night(args) -> None:
     if plan.strip():
         print("> 实现方案（权威）已注入：", plan.strip().splitlines()[0][:60])
 
-    def printer(kind, payload) -> None:
-        if kind in ("round", "strategy", "architect", "escalate", "rescue", "scale",
-                    "governance", "workingset", "protected_zone", "structure_gate",
-                    "output_budget", "write_cap", "stop",
-                    "order_failed", "needhuman", "dictfill", "autofix"):
-            print(f"   {kind:<12} {_slim(payload or {})[:140]}", flush=True)
-
     # 预算：没给就按代码规模取默认（S 0.5h / M 2h / L 6h / XL 12h）
     hours = args.hours or _scale.default_hours(scope["level"])
     print(f"> 预算 {hours}h（{'按规模默认' if not args.hours else '命令行指定'}）")
@@ -251,6 +319,144 @@ def cmd_night(args) -> None:
         print(f"  交付报告 {res.delivery_path}")
     if not res.ok:
         sys.exit(1)
+
+
+def _read_answers_file(path: str) -> dict:
+    """答案文件两种写法都收：JSON 字典，或 `Q1: 答案` 逐行（含多行续写）。"""
+    from core import architect as _arch_mod
+    return _arch_mod.parse_answers(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def _arch_interview(ws: Path, goal: str, *, force_ask: bool = False,
+                    answers_path: str = "", interactive: bool = True,
+                    ask_only: bool = False) -> dict:
+    """阶段 1：远端就架构安排提问 → 人给安排 → 落盘。之后全自动，人不再介入。
+
+    省钱的规则：问题已经落盘就不重复问（`--ask` 才强制重问）；
+    人不回答就用默认安排（保证仍然能开跑，且默认可追责）。
+    """
+    from core import architect as arch
+    qs = [] if force_ask else arch.load_questions(ws)
+    if not qs:
+        if not goal.strip():
+            print("[FAIL] 没有问题缓存、也没给目标：无法提问")
+            sys.exit(2)
+        print("> 阶段 1：远端就架构安排提问（只花这一次，之后人不再介入）")
+        got = arch.ask(goal)
+        if not got.get("ok"):
+            print("[WARN] 提问失败（" + "；".join(got.get("problems") or []) + "）"
+                  "——按无安排直接生成，质量会明显下降")
+            return {}
+        qs = got["questions"]
+        arch.save(ws, qs, None, goal)
+        print(f"> 共 {len(qs)} 个问题 → {arch.QUESTIONS_FILE}"
+              f"（填好后用 --answers 传回，或直接交互答）")
+    for q in qs:
+        opt = ("／".join(q["options"]) + "  ") if q.get("options") else ""
+        print(f"\n[{q['id']}] {q['q']}")
+        if q.get("why"):
+            print(f"     为什么问：{q['why']}")
+        print(f"     建议安排：{q.get('default') or '（空）'}    {opt}".rstrip())
+    if ask_only:
+        print(f"\n> 问题已写入 {ws / arch.QUESTIONS_FILE}；"
+              f"把答案写进 {arch.ANSWERS_FILE} 后重跑 --answers 即可")
+        return {"questions": qs, "answers": arch.load_answers(ws), "asked_only": True}
+
+    ans: dict = arch.load_answers(ws) if not answers_path else {}
+    if answers_path:
+        try:
+            ans = _read_answers_file(answers_path)
+        except OSError as exc:
+            print(f"[FAIL] 读不了答案文件：{exc}")
+            sys.exit(2)
+        print(f"> 架构安排来自 {answers_path}")
+    elif interactive:
+        for q in qs:
+            try:
+                line = input(f"  {q['id']} 回答（回车＝用建议）：").strip()
+            except EOFError:
+                line = ""
+            if line:
+                ans[q["id"]] = line
+    arch.save(ws, qs, ans, goal)
+    done = sum(1 for q in qs if str(ans.get(q["id"]) or "").strip())
+    print(f"> 架构安排已定：{done}/{len(qs)} 条由人拍板，其余走建议默认"
+          f" → {ws / arch.ARCH_FILE}")
+    return {"questions": qs, "answers": ans}
+
+
+def cmd_plan(args) -> None:
+    """自主规划层的只读视图：蓝图 / 切片 / 覆盖 / 单条能力溯源（不花一次远端调用）。
+
+    这四个视图对应"计划错得看不出来"的四种看法：
+      show   —— 全场一眼看完（人审那一页）
+      slices —— 下一刀会切在哪（剂量、闭合、永远轮不到的）
+      cover  —— 现在到底做完没有（真执行探针）
+      trace  —— 某条能力的来龙去脉（能力 → 切片 → 契约 → 该片交付报告）
+    """
+    _need("agent.run")
+    from core import auto as _auto
+    from core import blueprint, coverage, probe, slicer
+    ws = Path(args.repo)
+    what = (getattr(args, "what", "") or "show").lower()
+    if what == "ask":
+        # 阶段 1 单独跑：只提问、不生成、不花钱在代码上
+        _arch_interview(ws, str(getattr(args, "goal", "") or ""),
+                        force_ask=True, answers_path=str(getattr(args, "answers", "") or ""),
+                        interactive=False, ask_only=not getattr(args, "answers", ""))
+        return
+    bp = blueprint.load(ws)
+    if not bp.caps:
+        print("[FAIL] 还没有蓝图：先跑一次 "
+              '`sixcoder night --repo <目录> --goal "一句话目标" --max-cny 1`')
+        sys.exit(2)
+    if what == "show":
+        print(blueprint.summary(bp))
+        return
+    if what == "slices":
+        plan = slicer.plan(bp)
+        print(f"待办切片 {len(plan['slices'])} 个｜合计 {plan['funcs']} 个函数")
+        for sl in plan["slices"]:
+            print(f"  {sl['id']}  函数 {sl['funcs']:>3}  {sl['title']}"
+                  f"  模块 {', '.join(sl['modules']) or '-'}")
+        for cid, why in plan["blocked"]:
+            print(f"  ⊘ {cid} 永远轮不到：{why}")
+        for p in plan["problems"]:
+            print(f"  ! {p}")
+        return
+    if what == "cover":
+        cov = coverage.run(bp, ws)
+        coverage.record(ws, cov, "手工观测")
+        bp2 = coverage.mark(bp, cov)
+        blueprint.save(bp2, ws)
+        print(coverage.report(bp2, cov))
+        sys.exit(0 if coverage.ratios(cov)["pct"] >= 100.0 else 1)
+    if what == "trace":
+        cid = str(getattr(args, "cap", "") or "").strip()
+        c = bp.by_id(cid)
+        if c is None:
+            print(f"[FAIL] 蓝图里没有 `{cid}`；用 `sixcoder plan show --repo {args.repo}` 看清单")
+            sys.exit(2)
+        dependents = [x.id for x in bp.caps if c.id in x.deps]
+        print(f"能力 {c.id}")
+        print(f"  内容：{c.desc}")
+        print(f"  状态：{c.status}" + (f"（{c.why}）" if c.why else ""))
+        print(f"  观测：{probe.describe(c.probe)}")
+        print(f"  依赖：{', '.join(c.deps) or '-'}")
+        print(f"  被依赖：{', '.join(dependents) or '-'}")
+        print(f"  切片：{c.slice_id or '-'}")
+        if c.slice_id:
+            for label, p in (("契约", Path(ws) / _auto.SLICE_DIR / f"{c.slice_id}.txt"),
+                             ("该片交付报告",
+                              Path(ws) / _auto.SLICE_DIR / f"{c.slice_id}.DELIVERY.md")):
+                print(f"  {label}：{p}{'（存在）' if p.exists() else '（缺失）'}")
+        hs = coverage.history(ws, limit=1)
+        if hs:
+            st = dict(hs[-1].get("statuses") or {}).get(cid)
+            print(f"  最近一次观测：{hs[-1].get('at')}  → {st}")
+        return
+    print(f"[FAIL] 不认识的视图：{what}（show / slices / cover / trace）")
+    sys.exit(2)
 
 
 def cmd_questions(args) -> None:
@@ -757,6 +963,28 @@ def build() -> argparse.ArgumentParser:
     sp.add_argument("--repo", required=True)
     sp.add_argument("--requirement", default="", help="需求文本（短需求）")
     sp.add_argument("--requirement-file", default="", help="需求文件路径（长需求用这个）")
+    sp.add_argument("--goal", default="",
+                    help="一句话目标（全自主模式）：切片、验收对象、预算分配全部由系统自己规划")
+    sp.add_argument("--max-slices", type=int, default=0,
+                    help="全自主模式：最多做几个切片（0 = 不限，直到覆盖完成/钱用完）")
+    sp.add_argument("--slice-hours", type=float, default=0.0,
+                    help="全自主模式：单个切片的时间预算（默认 0.5h）")
+    sp.add_argument("--fresh", action="store_true",
+                    help="全自主模式：忽略已有蓝图重新推导（默认续跑，已通过的能力不重做）")
+    sp.add_argument("--spec-sample", default="",
+                    help="验收样例文件（人给的权威判据）：怎么跑、输入什么、该看到什么；"
+                         "每条样例变成一条能力，模型不再猜规格")
+    sp.add_argument("--approve-plan", action="store_true",
+                    help="全自主模式：先打印一页蓝图等人点头再开跑（第一次用推荐）")
+    sp.add_argument("--ask", action="store_true",
+                    help="阶段 1：先让远端就架构安排详细提问（强制重问；有问题缓存就不重复花钱）")
+    sp.add_argument("--answers", default="",
+                    help="阶段 1 的答案文件（JSON 字典或 `Q1: ...` 逐行）；给了就不再问人，直接开跑")
+    sp.add_argument("--interview", action="store_true",
+                    help="阶段 1：在终端逐条交互答完再开跑（人不答则用建议默认）")
+    sp.add_argument("--no-selfcheck", action="store_true",
+                    help="关掉片内自验（作者不能自己跑验收命令，只能事后判红整片重来；"
+                         "只在做对照实验时用，平时别关）")
     sp.add_argument("--plan", default="", help="实现方案（开发者模式下是权威，不许系统改架构）")
     sp.add_argument("--plan-file", default="", help="实现方案文件路径")
     sp.add_argument("--allow-no-plan", action="store_true",
@@ -775,6 +1003,17 @@ def build() -> argparse.ArgumentParser:
     sp.add_argument("--no-remote", action="store_true", help="不用远端（纯本地，质量会明显下降）")
     sp.add_argument("--quiet", action="store_true")
     sp.set_defaults(fn=cmd_night)
+
+    sp = sub.add_parser("plan", help="自主规划：看蓝图/切片/覆盖/单条能力溯源（只读，不花 token）")
+    sp.add_argument("what", nargs="?", default="show",
+                    choices=["show", "slices", "cover", "trace", "ask"],
+                    help="show=蓝图一页；slices=下一刀切在哪；cover=真跑探针看做完没有；"
+                         "trace=某条能力的来龙去脉；ask=只让远端就架构提问（阶段 1）")
+    sp.add_argument("--repo", required=True)
+    sp.add_argument("--cap", default="", help="trace 用：能力 id（如 cap.cli.count）")
+    sp.add_argument("--goal", default="", help="ask 用：一句话目标（提问的依据）")
+    sp.add_argument("--answers", default="", help="ask 用：答案文件；给了就直接把安排定下来")
+    sp.set_defaults(fn=cmd_plan)
 
     sp = sub.add_parser("inspect", help="定期巡检：缓存命中率趋势 + 文档健康（只读）")
     sp.add_argument("--repo", required=True)

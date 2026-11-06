@@ -538,6 +538,9 @@ function connect(taskId) {
    协作方式由 core/policy.py 决定：甲方模式代码默认由远端写（本地 7B 兜底），
    开发者模式必须由人给实现方案。界面只负责把这件事摆到手边。 */
 const night = reactive({ hours: 6, plan: '', taskId: '', busy: false, info: null,
+                         // 全自主模式：只给一句话目标，系统自己规划切片/验收对象/预算分配
+                         // （对应 core/auto.py：蓝图 → 切片 → 逐片生成 → 覆盖观测 → 重规划）
+                         goalMode: false, goal: '',
                          // 右上角选定的远端模型档案（flash / pro）；空 = 整条八档阶梯
                          remoteProfile: '',
                          // 每夜花费硬上限（元）。默认 1 元，自己可改；0 = 不设上限
@@ -623,22 +626,32 @@ async function deleteProfile(id) {
 function nightBrief(p) {
   const o = p || {}
   const keys = ['round', 'strategy', 'verified', 'total', 'symbol', 'path', 'order',
-                'why', 'reason', 'ok', 'used', 'message', 'text', 'question']
+                'why', 'reason', 'ok', 'used', 'message', 'text', 'question',
+                // 全自主模式的进度：蓝图 / 切片 / 覆盖 / 花费
+                'goal', 'caps', 'version', 'slice', 'gained', 'left', 'cap',
+                'cost_cny', 'spent_cny', 'pct', 'replans', 'coverage', 'descoped']
   const out = keys.filter((k) => o[k] !== undefined && o[k] !== null && o[k] !== '')
     .map((k) => `${k}=${String(o[k]).replace(/\s+/g, ' ').slice(0, 90)}`)
-  return out.join(' ').slice(0, 220)
+  return out.join(' ').slice(0, 260)
 }
 
 async function startNight() {
-  if (!form.repo || !form.requirement.trim()) {
-    errMsg.value = '夜班需要仓库和需求'; return
+  const auto = !!night.goalMode
+  if (!form.repo) { errMsg.value = '夜班需要先选仓库'; return }
+  if (auto ? !night.goal.trim() : !form.requirement.trim()) {
+    errMsg.value = auto ? '全自主模式需要一句话目标' : '夜班需要仓库和需求'; return
   }
-  if (!night.scale) { errMsg.value = '请选择目标代码规模（S/M/L/XL）——约束按规模分级，选错等于没约束'; return }
+  if (!auto && !night.scale) {
+    errMsg.value = '请选择目标代码规模（S/M/L/XL）——约束按规模分级，选错等于没约束'; return
+  }
   night.busy = true; errMsg.value = ''; night.lines = []; night.delivery = ''
   night.info = null
   try {
     const d = await api('/v1/night', { method: 'POST', body: JSON.stringify({
-      repo: form.repo, requirement: form.requirement, model: form.model,
+      repo: form.repo,
+      requirement: auto ? '' : form.requirement,
+      goal: auto ? night.goal : '',
+      model: form.model,
       hours: Number(night.hours) || 6, plan: night.plan, scale: night.scale,
       remote_profile: night.remoteProfile,
       max_cny: Number(night.maxCny) || 0 }) })
@@ -1377,17 +1390,36 @@ onUnmounted(() => {
           </div>
 
           <!-- 目标文件、示例、字段填法一律在「需求帮助」里讲清楚；输入区只留需求本身 -->
-          <textarea v-model="form.requirement" style="min-height:120px"
+          <!-- 甲方模式多一个开关：需求模式（我指定范围）/ 目标模式（系统自己规划切片） -->
+          <div v-if="isClientMode" class="row" style="gap:8px;align-items:center;margin-bottom:6px">
+            <label class="dim" style="font-size:10.5px;display:flex;align-items:center;gap:4px"
+                   title="需求模式：你指定范围与文件，系统只做给定契约｜目标模式：只给一句话，切片、验收对象、预算分配全部由系统自己规划（已通过的能力不会重做）">
+              模式
+              <select v-model="night.goalMode" style="width:168px">
+                <option :value="false">需求（我指定范围）</option>
+                <option :value="true">目标（全自主规划）</option>
+              </select>
+            </label>
+            <span v-if="night.goalMode" class="dim" style="font-size:10px">
+              全自主：自己规划能力表与切片，每轮跑完重新观测整个项目；缺口和降级会写进报告
+            </span>
+          </div>
+          <textarea v-if="!(isClientMode && night.goalMode)" v-model="form.requirement" style="min-height:120px"
                     :placeholder="isClientMode
                       ? '写清要什么、写进哪个文件（如 clean.py）、行为与异常怎么处理｜点「开始夜班」'
                       : '写清改哪个文件、要什么行为、异常怎么处理｜Ctrl+Enter 发送'"
                     @keydown.ctrl.enter.prevent="onSendShortcut"></textarea>
+          <textarea v-else v-model="night.goal" style="min-height:90px"
+                    placeholder="一句话目标，例如「做一个 CSV 记账工具：能导入、按月汇总、导出报表」｜点「全自主开始」"></textarea>
 
           <!-- 甲方模式：只有「开始夜班」这一个动作（内部自己拍板、自己写） -->
           <div v-if="isClientMode" class="row" style="margin-top:8px;gap:10px;flex-wrap:wrap;align-items:flex-end">
             <button style="min-width:120px" :disabled="night.busy || !can('agent.run')"
-                    title="提需求 → 系统反复体检/派工/开发/机械验收 → 交付报告"
-                    @click="startNight">{{ night.busy ? '夜班进行中…' : '开始夜班' }}</button>
+                    :title="night.goalMode
+                      ? '给一句话目标 → 系统自己规划能力表与切片 → 逐片生成 → 每轮重新观测 → 报告'
+                      : '提需求 → 系统反复体检/派工/开发/机械验收 → 交付报告'"
+                    @click="startNight">{{ night.busy ? '夜班进行中…'
+                      : (night.goalMode ? '全自主开始' : '开始夜班') }}</button>
             <label class="dim" style="font-size:10.5px;display:flex;align-items:center;gap:3px">
               预算
               <input type="number" min="0.1" step="0.5" v-model.number="night.hours"

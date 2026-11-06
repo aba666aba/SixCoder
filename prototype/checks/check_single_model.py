@@ -142,16 +142,21 @@ def main() -> int:
 
     mt_none, th_none = _mt("none")
     mt_max, th_max = _mt("max")
-    check("不思考时也直接给到安全上限（上限不等于消费）",
-          mt_none == _remote.SAFETY_CAP, str(mt_none))
-    check("max 档同样顶到安全上限，不再按需算小值",
-          mt_max == _remote.SAFETY_CAP, str(mt_max))
-    check("安全上限容得下 4 倍实测峰值（26 788 ×4）且小于官方 384K",
-          4 * 26788 <= _remote.SAFETY_CAP < 384000, str(_remote.SAFETY_CAP))
+    # 生效上限是**校准值**（core/calibration），不是那个常量：常量只是地板。
+    # 断言口径因此改成"等于当前生效值 + 不低于地板 + 小于官方 384K"，
+    # 否则台账一变（真实跑几次就会变）这条自检就假红 —— 测的应该是策略，不是某天的数字。
+    cap_now = _remote.safety_cap()
+    check("不思考时也直接给到安全上限（上限不等于消费）", mt_none == cap_now, str(mt_none))
+    check("max 档同样顶到安全上限，不再按需算小值", mt_max == cap_now, str(mt_max))
+    check("安全上限不低于地板 128k、容得下 4 倍实测峰值、且小于官方 384K",
+          _remote.SAFETY_MIN_CAP <= cap_now < 384000 and 4 * 26788 <= cap_now,
+          str(cap_now))
+    check("校准时上限绝不被压到地板以下", _remote.safety_cap() >= _remote.SAFETY_MIN_CAP,
+          str(cap_now))
     check("开档位的 thinking 参数正确", th_max == {"type": "enabled"}
           and th_none == {"type": "disabled"}, f"{th_max} / {th_none}")
     mt_floor, _ = _mt("max", cap=0)
-    check("没配正文配额也照样给上限", mt_floor == _remote.SAFETY_CAP, str(mt_floor))
+    check("没配正文配额也照样给上限", mt_floor == cap_now, str(mt_floor))
     check("正文配额（dosing）与上限解耦：capacity 仍是 12 000",
           dosing.capacity_tokens({"max_output_tokens": 12000, "effort": "max"}) == 12000)
     # 正文截断判定：必须扣掉思考再比，否则"思考用满"会被误判成"正文用满"
@@ -169,7 +174,7 @@ def main() -> int:
           "content_truncated" in inspect.getsource(contractgen.synthesize))
     # 唯一的算法入口：complete() 的 max_out 分支也必须带预留，否则会把 _payload_for 的结果覆盖掉
     check("max_tokens 只有一个算法入口 max_tokens_for",
-          _remote.max_tokens_for(12000, "max") == _remote.SAFETY_CAP
+          _remote.max_tokens_for(12000, "max") == cap_now
           and _remote.max_tokens_for(0, "none") == 0)
     _csrc = inspect.getsource(_remote.complete)
     check("complete() 的 max_out 分支带上了思考预留",

@@ -1767,6 +1767,16 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
         except OSError:
             cur_lines = 0
         auto = "bodies" if cur_lines >= BIG_FILE_LINES else "whole_file"
+        # **只要这个模块已经有函数通过验收，就必须走"只回函数体"**。
+        # 实测（exp1d）：logparse.py 6 个函数里 5 个写对、1 个写错 → 整文件重写把 5 个正确的
+        # 一起扔掉 → 下一轮从头再写一遍 → 同一模块连输三次，整片零收益（无效调用）。
+        # 粒度必须跟着"已通过多少"走，而不是只跟着文件大小走。
+        try:
+            _prev_state = state.get(rel) or {}
+            if int(_prev_state.get("verified") or 0) > 0:
+                auto = "bodies"
+        except Exception:                                # noqa: BLE001
+            pass
         granular = (_os.environ.get("SIXCODER_GRANULAR") or "").strip().lower() or auto
         if emit and granular != auto:
             emit("notice", {"message": f"粒度被环境变量覆盖：{granular}（自动判断是 {auto}）"})

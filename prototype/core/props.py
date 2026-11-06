@@ -166,14 +166,14 @@ for c in checks:
                 if step.get("op") in ("set", "call"):
                     try:
                         exec(step["code"], ns)
-                    except Exception as exc:
+                    except BaseException as exc:   # argparse 抛 SystemExit（不是 Exception）
                         ok, detail = False, (f"{step['code']} 抛了 "
                                              f"{type(exc).__name__}: {exc}")
                         break
                     continue
                 try:
                     g = eval(step["expr"], ns)
-                except Exception as exc:
+                except BaseException as exc:       # 同上：SystemExit 也要算判据红
                     ok, detail = False, (f"{step['expr']} 调用抛了 "
                                          f"{type(exc).__name__}: {exc}")
                     break
@@ -283,6 +283,11 @@ for c in checks:
         passed += 1
     elif detail:
         results.append({"kind": kind, "detail": detail})
+# **结果输出必须抢回真正的 stdout**：示例脚本会临时把 sys.stdout 换成缓冲区（为了断言输出文本）。
+# 万一清场语句没跑到，缓冲区还挂在 sys.stdout 上 —— 打结果等于打进黑洞：引擎看不到任何输出，
+# 只能报"引擎自身跑不动"，而真正的错（argparse 拒绝参数）被彻底掩盖（实测卡了整整两轮）。
+sys.stdout = sys.__stdout__
+sys.stderr = sys.__stderr__
 print(json.dumps({"ok": not results, "fails": results[:5], "passed": passed,
                   "total": len(checks), "advisories": advisories[:5]}))
 '''
@@ -401,6 +406,14 @@ SAMPLE = {"str": '"abc"', "int": "7", "float": "1.5", "bool": "True",          "
           "list[str]": '["a", "b"]', "list[int]": "[1, 2]",
           "list[dict]": '[{"name": "a", "age": 10, "email": "a@x.com"}]',
           "dict[str, int]": '{"a": 1}'}
+
+# 示例**前置准备行**允许出现的名字：造夹具要用它们（写文件/序列化），
+# 但它们不是判据来源 —— 断言行仍然必须引用本模块的符号（防跨模块泄漏）。
+PREP_BUILTINS = frozenset({
+    "open", "json", "csv", "os", "io", "Path", "pathlib", "time", "datetime",
+    "StringIO", "tempfile", "shutil", "copy", "math", "re",
+    "__import__", "contextlib", "sys",
+})
 
 # ---------------------------------------------------------------- 数据库端到端
 # 为什么专门做一条：`conn` 类参数在契约里只是 object，过去的引擎判据直接跳过它，
@@ -695,10 +708,14 @@ def expr_checks(c) -> list[dict]:
     owner = {getattr(f, "owner_class", "") for f in getattr(c, "funcs", []) or []}
     allowed = {x for x in (funcs | owner) if x}
     out: list[dict] = []
-    _src = getattr(c, "full_text", "") or getattr(c, "raw", "") or ""
+    _src = own_text(c) or getattr(c, "full_text", "") or getattr(c, "raw", "") or ""
     for left, right in example_expressions(_src):
         m = re.match(r"^([A-Za-z_]\w*)", left)
         head = m.group(1) if m else ""
+        if re.search(r"(?<![A-Za-z0-9_])_[A-Za-z_]\w*", left):
+            # 用到脚本脚手架变量（`('B 30' in _txt) == True`）的断言：离开脚本必 NameError，
+            # 交给 expr_seq 那条判据，不能单独成条（实测：单独成条会把正确实现判红）
+            continue
         if m and re.match(r"^[A-Za-z_]\w*\s*\(", left) and head in funcs:
             continue                      # 普通函数调用，已经有 per-function 判据
         if head and head not in allowed:
@@ -857,21 +874,42 @@ def from_contract(c, skip_exprs: set[str] | None = None) -> list[dict]:
     # 示例是硬证据，探针是按文字猜的 → 冲突时一律砍探针。
     _ex = {c["expr"] for c in checks if c.get("kind") == "call_eq"}
     checks = [c for c in checks if not (c.get("kind") == "raises" and c["expr"] in _ex)]
-    # 有状态 API：示例里有赋值行 → 合成一条按序执行的小脚本判据。
-    # 有脚本时**不再单独生成整表达式判据**：`c.keys() == []` 离开设置行就会 NameError。
-    _src_all = getattr(c, "full_text", "") or getattr(c, "raw", "") or ""
-    # 同样按模块过滤：只有"本模块的类方法"才有状态脚本（否则别人的示例会漏进来）
+    # 有状态 API / **带前置准备的示例**：示例里有赋值行或造文件的行 →
+    # 合成一条按序执行的小脚本判据（示例脚本：赋值行 exec、断言行 eval）。
+    #
+    # 为什么不能只给"类方法"用（2026-11-06 实测）：全自主模式的验收判据是命令行，
+    # 而命令行要跑通得先有输入文件。示例块里写
+    #     open('d.csv','w',encoding='utf-8').write('team,amount\nA,10\n')
+    #     main(['--file','d.csv','--group','team','--value','amount']) == 0
+    # 就能把"真验收命令"机械绑进函数级判据；但过去这条路径只为类方法开着，
+    # 于是前置行被静默丢掉 → 只判出 `main(...) == 0` 却没有夹具 → 正确实现也红
+    # （实测提示：`m.main(['--file','sales.csv',...]) == 0: 得到 1，应为 0`）。
+    _src_all = own_text(c) or getattr(c, "full_text", "") or getattr(c, "raw", "") or ""
+    _funcs = [f.name for f in getattr(c, "funcs", []) or []]
     _methods = [f.name for f in getattr(c, "funcs", []) or []
                 if getattr(f, "is_method", lambda: False)()]
-    _script = example_script(_src_all, allowed=set(_methods) | {
-        getattr(f, "owner_class", "") for f in getattr(c, "funcs", []) or []} - {""}) \
-        if _methods else []
+    _allowed = set(_funcs) | set(_methods) | {
+        getattr(f, "owner_class", "") for f in getattr(c, "funcs", []) or []} - {""}
+    _script = example_script(_src_all, allowed=_allowed,
+                             prep_builtins=PREP_BUILTINS if not _methods else frozenset())
     if _script:
-        _covers = [f.name for f in getattr(c, "funcs", []) or []
-                   if getattr(f, "is_method", lambda: False)()]
+        # 被脚本覆盖的裸判据必须**移除**：同一条断言在"有夹具"时有意义，
+        # 单独拿出来跑就是必红（实测：`main(['--file','sales.csv']) == 0` 没有夹具 → 得到 1）。
+        # 留存它等于让正确实现永远判不过，而脚本版本是它的严格加强版。
+        _seq = {str(x.get("expr") or "").replace("m.", "").strip()
+                for x in _script if x.get("op") == "eq"}
+        checks = [ch for ch in checks
+                  if not (ch.get("kind") in ("call_eq", "expr_eq")
+                          and str(ch.get("expr") or "").replace("m.", "").strip() in _seq)]
+        _covers = _methods or [s for s in _funcs
+                               if any(s in (x.get("code") or "") + (x.get("expr") or "")
+                                      for x in _script)]
         checks.append({"kind": "expr_seq", "steps": _script, "covers": _covers,
                        "desc": "示例脚本按序执行：" + " → ".join(
                            s.get("expr") or s.get("code") for s in _script[:4])})
+        if not _methods:
+            # 函数模块：脚本与整表达式判据**并集**（脚本不会让 expr_checks 失效）
+            checks.extend(expr_checks(c))
     else:
         # 类 API / 链式示例：整表达式判据（与 per-function 判据并存，互不替代）
         checks.extend(expr_checks(c))
@@ -1232,8 +1270,52 @@ def _safe_doc(text: str) -> str:
     return t[:160]
 
 
-def example_script(text: str, allowed: set[str] | None = None) -> list[dict]:
-    """把「示例」段落解析成**按顺序执行的小脚本**（支持赋值语句）。
+def _is_expr(line: str) -> bool:
+    """这一行是不是一个**能求值的表达式**（用来区分代码行和散文行）。
+
+    散文（"返回两数之和，注意除零"）根本编译不过；`with ...:`、`for ...:` 之类语句
+    编译成表达式也会失败。只有真表达式才当成脚本的一步去执行。
+    """
+    try:
+        compile(line, "<prep>", "eval")
+        return True
+    except SyntaxError:
+        return False
+
+
+_MOD_HEAD_RE = re.compile(r"^\s*\d+\)\s*([\w./\\-]+\.[A-Za-z0-9]+)")
+
+
+def own_text(c) -> str:
+    """只取**本模块那一段**契约文本（模块标题行到下一个模块标题）。
+
+    为什么必须切（实测 run 7 续跑）：契约对象带着全文（`full_text`/`raw`），
+    于是入口模块的示例（夹具 + `main([...]) == 0` + 输出断言）会被复制进每个模块的判据
+    —— `cli_args.py::parse_args` 被判 `'cost' in _txt` 红，整轮去重写三个不相干的模块。
+    按模块标题切段是唯一稳的口径：示例属于它前面那个模块。
+    """
+    text = str(getattr(c, "full_text", "") or getattr(c, "raw", "") or "")
+    if not text:
+        return ""
+    lines = text.splitlines()
+    heads: list[tuple[int, str]] = []
+    for i, ln in enumerate(lines):
+        m = _MOD_HEAD_RE.match(ln)
+        if m:
+            heads.append((i, m.group(1)))
+    want = str(getattr(c, "path", "") or "").replace("\\", "/").split("/")[-1]
+    if not want or not heads:
+        return text
+    for k, (i, p) in enumerate(heads):
+        if p.replace("\\", "/").split("/")[-1] == want:
+            end = heads[k + 1][0] if k + 1 < len(heads) else len(lines)
+            return "\n".join(lines[i:end])
+    return text
+
+
+def example_script(text: str, allowed: set[str] | None = None,
+                   prep_builtins: frozenset = frozenset()) -> list[dict]:
+    """把「示例」段落解析成**按顺序执行的小脚本**（支持赋值语句与前置准备）。
 
     为什么需要（双模式·有状态 API）：`LRU(2)` 这种类要么跨多条示例保持同一个实例，
     要么只能写出 `LRU(1).keys() == []` 这种没信息量的示例 —— 实测"忘记更新最近使用"
@@ -1242,6 +1324,11 @@ def example_script(text: str, allowed: set[str] | None = None) -> list[dict]:
         c.keys() == []
         c.put("a", 1)
         c.get("a") == 1
+
+    prep_builtins：允许出现在**前置准备行**里的内建/标准库名字（open / json / csv …）。
+    全自主模式的 CLI 验收需要先造输入文件；不清空这个白名单的话，
+    `open('d.csv','w')...` 这种准备行会被"跨模块泄漏"过滤器一起丢掉。
+    只对**准备行**放开，断言行仍然必须引用本模块的符号（防泄漏那条教训不能丢）。
     """
     raw = str(text or "")
     i = raw.find("示例")
@@ -1250,9 +1337,15 @@ def example_script(text: str, allowed: set[str] | None = None) -> list[dict]:
 
     def _ok(line_txt: str) -> bool:
         """这一行是不是"本模块的"状态脚本行（见 expr_checks 里的跨模块泄漏教训）。"""
+        head = (re.match(r"^([A-Za-z_]\w*)", line_txt.strip()) or [None, ""])[1]
+        if head and head.startswith("_"):
+            return True          # `_` 开头的临时变量/脚手架：属于脚本自己，不是别人的 API
+        if re.search(r"(?<![A-Za-z0-9_])_[A-Za-z_]\w*", line_txt):
+            return True          # 行内用了脚本自己的临时变量（如 `('B 30' in _txt) == True`）
+        if head and head in prep_builtins:
+            return True                       # 前置准备行（造文件等）：只影响环境，不引入别人的断言
         if not allowed:
             return True
-        head = (re.match(r"^([A-Za-z_]\w*)", line_txt.strip()) or [None, ""])[1]
         if head in allowed:
             return True
         # 变量行（c = LRU(2) / c.put(...)）：看右边/后面出现的是不是本模块的名字
@@ -1272,11 +1365,28 @@ def example_script(text: str, allowed: set[str] | None = None) -> list[dict]:
                               "expect": lit})
         elif re.match(r"^[A-Za-z_]\w*\s*=\s*\S", s) and "->" not in s:
             steps.append({"op": "set", "code": s.replace("m.", "")})
-        elif re.match(r"^[A-Za-z_][\w.\[\]\"'()]*\s*\(.*\)$", s) and "->" not in s:
-            # 裸调用行（c.put("a", 1)）：也是状态脚本的一步，必须执行
+        elif "->" not in s and _is_expr(s):
+            # 裸调用行（`c.put("a", 1)` / `open('d.csv','w').write(...)`）也是脚本的一步，必须执行。
+            # 早先这里用的是窄正则（只认 `名字(参数)` 这种形状），于是带关键字参数、带逗号、
+            # 带方法链的准备行全被丢掉（实测：造夹具的那一行 `open(...).write(...)` 直接消失，
+            # 只留下断言 → 正确实现也被判红）。
             steps.append({"op": "call", "code": s.replace("m.", "")})
-    if not any(x["op"] == "set" for x in steps):
-        return []                       # 没有设置行 → 不是状态脚本，交给普通示例判据
+    # 只保留"有准备、也有断言"的脚本：只有准备行没有断言 = 判不了任何东西；
+    # 没有准备行 = 普通单行示例，交给普通示例判据（不要在这里重复处理）。
+    if not any(x["op"] in ("set", "call") for x in steps):
+        return []                       # 没有设置/准备行 → 不是状态脚本
+    eqs = [x for x in steps if x["op"] == "eq"]
+    if not eqs:
+        return []
+    # **脚本必须真的调用本模块的函数**，否则它是别的模块的示例（跨模块泄漏）。
+    # 实测（run 7 续跑）：入口模块的脚本被复制进每个模块的判据 → `cli_args.py::parse_args`
+    # 被判红 → 整轮去重写三个不相干的模块。
+    # 注意：要在**所有步骤**（set/call/eq）里找，不能只看断言行 —— 入口调用可能是一条
+    # 不判退出码的裸调用（错误路径与成功路径都存在的探针），那只出现在 call 步里。
+    if allowed and not any(re.search(rf"\b{re.escape(n)}\s*\(",
+                                     (s.get("expr") or "") + (s.get("code") or ""))
+                           for s in steps for n in allowed):
+        return []
     return steps
 
 

@@ -110,18 +110,28 @@ def main() -> int:
     lang.available = lambda name: False if str(name).lower() in ("go", "golang") \
         else _orig_available(name)
     try:
-        before = remote.usage_summary("")
-        with _sandbox_temp() as td:
-            ws = Path(td)
-            res = company.night(ws, "1) main.go：\n   - func Add(a int, b int) int：两数相加",
-                                "qwen2.5-coder:7b", hours=0.01, use_remote=True, max_cny=0.05)
-            files = sorted(p.name for p in ws.iterdir() if p.suffix in (".go", ".py"))
-        after = remote.usage_summary("")
+        # **不能用"全局用量表差"来判零花费**：这台机器上可能同时跑着别的真实任务
+        # （实测 2026-11-06：我一边跑全自主验证，一边跑自检 → 这条断言假红，
+        # 排查半小时才发现是并发污染）。改成拦死远端入口：被调用一次就记下来。
+        _hits = []
+        _orig_complete = remote.complete
+
+        def _trap(*a, **kw):
+            _hits.append(kw.get("task_id") or "?")
+            return {"ok": False, "error": "自检拦截：不该有远端调用", "answer": ""}
+        remote.complete = _trap
+        try:
+            with _sandbox_temp() as td:
+                ws = Path(td)
+                res = company.night(ws, "1) main.go：\n   - func Add(a int, b int) int：两数相加",
+                                    "qwen2.5-coder:7b", hours=0.01, use_remote=True, max_cny=0.05)
+                files = sorted(p.name for p in ws.iterdir() if p.suffix in (".go", ".py"))
+        finally:
+            remote.complete = _orig_complete
     finally:
         lang.available = _orig_available
-    calls = int(after["calls"]) - int(before["calls"])
     check("Go 任务被拒绝（没有静默生成）", not files, str(files))
-    check("一次远端都没调（零花费）", calls == 0, f"{calls} 次")
+    check("一次远端都没调（零花费）", not _hits, f"{len(_hits)} 次：{_hits[:3]}")
     check("理由里写清了缺什么、装什么",
           "go" in res.reason.lower() and "装" in res.reason, res.reason[:200])
     check("验收数为 0（不冒充通过）", res.verified == 0, str(res.verified))

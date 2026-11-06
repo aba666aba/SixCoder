@@ -188,14 +188,23 @@ def suggest(ws: Path | None = None, days: int = 14, min_samples: int = 20) -> di
         out["basis"]["content_floor"] = f"样本 {len(bodies)} < {min_samples}，沿用现值"
 
     # 3) 上限：不低于 128k，且 ≥ 实测单次输出**峰值** × 4（同样是 cap，按峰值不按分位）
+    #
+    # **必须有样本门槛**（实测 2026-11-06）：早先这一支没有 min_samples 检查，于是
+    # 两三次真机运行就能把全局安全上限从 128k 抬到 257k —— 这正是本模块开头批评的
+    # "把过拟合钉进产品"。cap 抬高的代价是每次调用都可能想更久更贵，必须攒够样本才动。
     outs = [c for xs in (obs.get("by_effort") or {}).values() for c in xs]
-    if outs:
+    if len(outs) >= min_samples:
         want = int(max(SAFETY_MIN, max(float(v) for v in outs) * 4))
         if want != int(out["safety_cap"]) and abs(want - int(out["safety_cap"])) / max(
                 1, int(out["safety_cap"])) >= 0.15:
             out["safety_cap"] = want
             out["changed"].append("safety_cap")
-            out["basis"]["safety_cap"] = f"峰值={int(max(outs))} ×4 → {want}"
+            out["basis"]["safety_cap"] = f"n={len(outs)} 峰值={int(max(outs))} ×4 → {want}"
+        else:
+            out["basis"]["safety_cap"] = (f"n={len(outs)} 峰值={int(max(outs))}，"
+                                          f"建议 {want}≈现值 {int(out['safety_cap'])}，不动")
+    else:
+        out["basis"]["safety_cap"] = f"样本 {len(outs)} < {min_samples}，沿用现值"
 
     # 4) 单模块预算：按模块总花费 p75 × 1.5
     mods = list((obs.get("module_cost") or {}).values())

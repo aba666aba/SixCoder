@@ -546,7 +546,9 @@ def create_task(req: TaskReq):
 
 class NightReq(BaseModel):
     repo: str
-    requirement: str
+    requirement: str = ""
+    goal: str = ""                 # 全自主模式：一句话目标（切片/验收对象/预算分配由系统自己规划）
+    fresh: bool = False            # 全自主模式：忽略已有蓝图重新推导（默认续跑）
     target: str = ""
     model: str = ""
     hours: float = 0.0   # 0 = 按代码规模默认（S 0.5 / M 2 / L 6 / XL 12）
@@ -584,7 +586,7 @@ def create_night(req: NightReq):
         print(f"[WARN] {model_warn}")
     if not ollama.alive():
         raise HTTPException(503, "Ollama 不可达，请先 `ollama serve`")
-    task_id = agent.new_task(repo, req.requirement, req.target, model)
+    task_id = agent.new_task(repo, req.requirement or req.goal, req.target, model)
     emit = agent.Emitter(task_id)
     _NIGHT[task_id] = {"state": "running", "delivery": "", "reason": "", "verified": 0,
                        "total": 0, "mode": pol.mode, "policy": policy.describe(pol),
@@ -593,6 +595,34 @@ def create_night(req: NightReq):
     def _run() -> None:
         info = _NIGHT[task_id]
         try:
+            if (req.goal or "").strip():
+                # 全自主模式：只给一句话目标 → 蓝图 → 切片 → 逐片生成 → 覆盖 → 报告
+                from core import auto as _auto
+                emit("night_start", {"hours": req.hours, "mode": "auto", "goal": req.goal,
+                                     "policy": policy.describe(pol), "max_cny": req.max_cny,
+                                     "model_warning": model_warn, "fresh": req.fresh})
+                res = _auto.night_auto(repo, req.goal, budget_cny=req.max_cny,
+                                       hours=req.hours, model=model, emit=emit,
+                                       fresh=req.fresh)
+                ratios = res.get("ratios") or {}
+                info.update({"state": "done" if res.get("ok") else "failed",
+                             "delivery": res.get("report") or "",
+                             "reason": res.get("reason") or "",
+                             "verified": ratios.get("done", 0),
+                             "total": ratios.get("total", 0)})
+                emit("night_done", {"verified": ratios.get("done", 0),
+                                    "total": ratios.get("total", 0),
+                                    "pct": ratios.get("pct", 0),
+                                    "reason": res.get("reason"),
+                                    "report": res.get("report"),
+                                    "spent_cny": res.get("spent_cny"),
+                                    "slices": res.get("slices"),
+                                    "replans": res.get("replans"),
+                                    "descoped": res.get("descoped"),
+                                    "blocked": res.get("blocked")})
+                db.execute("UPDATE tasks SET state=?, updated_at=? WHERE id=?",
+                           ("done" if res.get("ok") else "failed", db.now(), task_id))
+                return
             # 规模分级：优先用前端/客户端声明的，其次从需求原文读，最后按实测推断
             from core import scale as _scale
             scope = _scale.resolve(req.requirement, repo)
@@ -632,6 +662,73 @@ def create_night(req: NightReq):
     threading.Thread(target=_run, daemon=True).start()
     return {"task_id": task_id, "model": model, "mode": pol.mode,
             "policy": policy.describe(pol), "stream": f"/v1/tasks/{task_id}/stream"}
+
+
+@app.get("/v1/plan")
+def get_plan(repo: str):
+    """自主规划只读视图：蓝图一页 + 切片 + 最近一次覆盖（不执行探针、不花 token）。
+
+    全自主跑的进度就靠这三样东西看：计划长什么样、下一刀切在哪、上一轮观测结果。
+    """
+    _guard("agent.run")
+    from core import blueprint, coverage, frontier, slicer
+    ws = Path(repo)
+    bp = blueprint.load(ws)
+    if not bp.caps:
+        return {"ok": False, "reason": "还没有蓝图：先用目标模式跑一次", "caps": []}
+    plan = slicer.plan(bp)
+    hs = coverage.history(ws, limit=1)
+    last = hs[-1] if hs else {}
+    return {"ok": True, "summary": blueprint.summary(bp), "version": bp.version,
+            "goal": bp.goal, "total_budget_cny": bp.total_budget_cny,
+            "caps": [c.to_dict() for c in bp.caps],
+            "slices": plan["slices"], "blocked": plan["blocked"],
+            "problems": plan["problems"], "funcs_left": plan["funcs"],
+            "last_coverage": {"at": last.get("at"), "done": last.get("done"),
+                              "total": last.get("total"),
+                              "statuses": last.get("statuses") or {}},
+            "next": [{"cap": c.id, "why": frontier.why(bp, c)}
+                     for _s, c in frontier.rank(bp)[:8]]}
+
+
+@app.get("/v1/plan/cover")
+def plan_cover(repo: str):
+    """真跑覆盖探针（本地执行，不花一次远端调用）：项目到底做完没有。"""
+    _guard("agent.run")
+    from core import blueprint, coverage
+    ws = Path(repo)
+    bp = blueprint.load(ws)
+    if not bp.caps:
+        raise HTTPException(400, "还没有蓝图")
+    cov = coverage.run(bp, ws)
+    coverage.record(ws, cov, "界面观测")
+    blueprint.save(coverage.mark(bp, cov), ws)
+    return {"ok": True, "ratios": coverage.ratios(cov),
+            "report": coverage.report(coverage.mark(bp, cov), cov), "coverage": cov}
+
+
+@app.get("/v1/plan/trace")
+def plan_trace(repo: str, cap: str):
+    """某条能力的来龙去脉：内容 / 观测方式 / 依赖 / 被依赖 / 切片 / 契约 / 最近观测。"""
+    _guard("agent.run")
+    from core import blueprint, coverage, probe
+    ws = Path(repo)
+    bp = blueprint.load(ws)
+    c = bp.by_id(cap)
+    if c is None:
+        raise HTTPException(404, f"蓝图里没有 {cap}")
+    hs = coverage.history(ws, limit=1)
+    slice_files = {}
+    if c.slice_id:
+        d = ws / ".sixcoder" / "slices"
+        for label, name in (("contract", f"{c.slice_id}.txt"),
+                            ("delivery", f"{c.slice_id}.DELIVERY.md")):
+            p = d / name
+            slice_files[label] = {"path": str(p), "exists": p.exists()}
+    return {"ok": True, "cap": c.to_dict(), "observable": probe.describe(c.probe),
+            "dependents": [x.id for x in bp.caps if c.id in x.deps],
+            "slice_files": slice_files,
+            "last_status": (dict(hs[-1].get("statuses") or {}).get(cap) if hs else None)}
 
 
 @app.get("/v1/night")
