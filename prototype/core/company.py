@@ -1494,6 +1494,10 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
     from . import scale as _scale_mod      # 分级参数（阈值/档位/上限）
     import os as _osr                     # 环境变量覆盖（round/隔离后端）
 
+    # 本片时间截止点：budget_left 是进入这一轮时剩余的秒数。
+    # 必须一路传到作者自愈循环内部，否则 4 次自愈足以把 --slice-hours 拖穿。
+    _deadline = time.time() + max(0.0, float(budget_left or 0))
+
     # 依赖图（只读一次）：思考强度路由要按"这个模块有几个依赖"判断难度
     try:
         from . import project as _proj_map
@@ -1595,7 +1599,7 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
         return rec
 
     for rel in mods:
-        if budget_left <= 20:
+        if budget_left <= 20 or time.time() >= _deadline - 5:
             break
         hit = _scale_mod.protected_hits(ws, [rel])
         if hit and zone_mode == "block":
@@ -1812,13 +1816,14 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                                           model_plan=plan, step_index=lvl, task_id=task_id,
                                           emit=emit, local_model=local_model,
                                           workingset=ws_text, max_out=_mo_hint,
-                                          attempts=_heal, stop_on_repeat=_stop_rep)
+                                          attempts=_heal, stop_on_repeat=_stop_rep,
+                                          deadline=_deadline)
         else:
             r = _author.author_module(ws, rel, contracts.get(rel), contracts, model_plan=plan,
                                       step_index=lvl, task_id=task_id, emit=emit,
                                       local_model=local_model, workingset=ws_text,
                                       max_out=_mo_hint, attempts=_heal,
-                                      stop_on_repeat=_stop_rep)
+                                      stop_on_repeat=_stop_rep, deadline=_deadline)
         _mo_used = int(r.get("max_out") or 0)
         if _mo_used > _mo_hint:
             _wu(rel)["max_out"] = _mo_used

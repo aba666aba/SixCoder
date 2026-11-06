@@ -322,14 +322,30 @@ def ensure_core_binding(text: str, entry: str, probes, fail_note: str = "") -> s
         if core_at < 0:
             lines.insert(tgt + 1, core_line)
         else:
-            if note and "上一轮实测失败" not in lines[core_at]:
-                lines[core_at] = lines[core_at].rstrip("；; ") + f"；【上一轮实测失败】{note}"
+            # cli_run 的签名是「引擎 wrapper ↔ 纯函数」之间的硬约定：必须返回
+            # (退出码, 文本)。远端常写成 -> int，而 core_groups() 生成的判据用
+            # cli_run(...)[1]，两者矛盾 → 判据永远红。实测 dev1106a：4 轮自愈
+            # 全在重写 cli_core.py，桩 csvio.py 一直没人管。签名不对就强制换回。
+            cur = lines[core_at]
+            if not _re.search(r"->\s*tuple\s*\[\s*int\s*,\s*str\s*\]", cur):
+                cur = CORE_LINE
+            if note and "上一轮实测失败" not in cur:
+                cur = cur.rstrip("；; ") + f"；【上一轮实测失败】{note}"
+            lines[core_at] = cur
     else:
         idx = max([len(heads) and heads[-1][1] or ""] and [0] or [0])
         num = (len(heads) + 1)
         lines += ["", f"{num}) {CORE_MODULE}：命令行核心（入口脚本由引擎生成，会调用这里的 cli_run）",
                   core_line, "", "示例（必须满足）：", "（无）", ""]
     exs = core_groups(probes)
+    if exs:
+        # 引擎完全接管 cli_run 的判据。远端自己写的旧示例（典型是
+        # `cli_run(...) == 0`）与 tuple 签名矛盾，留着就是两套判据并存、永远判红
+        # （实测 dev1106b：order_failed 里同时出现 `== 0` 与 `[1]` 断言）。
+        # 只删示例行，保留以 "- cli_run(" 开头的签名行。
+        lines = [ln for ln in lines
+                 if not _re.search(r"\bcli_run\s*\(", ln)
+                 or _re.match(r"^\s*-\s*cli_run\s*\(", ln)]
     text = "\n".join(lines)
     if exs:
         text = ensure_example(text, CORE_MODULE, "", groups=exs)
@@ -717,6 +733,8 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
           history, report, descoped, blocked, gaps, next}
     """
     ws = Path(repo).resolve()
+    # 全自主是从 0 生成：工作区允许还不存在（CLI --goal 模式与 API 直接调都会走这里）
+    ws.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     llm = llm or blueprint._default_llm
     runner = runner or _default_runner

@@ -536,12 +536,15 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
                   emit=None, attempts: int = 2, max_out: int = 0,
                   context_budget: int = 0, local_model: str = "",
                   workingset: str = "", verify_fn=None,
-                  stop_on_repeat: bool = True) -> dict:
+                  stop_on_repeat: bool = True,
+                  deadline: float | None = None) -> dict:
     """让远端把**整个文件**写出来：提炼上下文 → 一次生成 → 本地验收 → 窄证据重试。
 
     max_out=0（默认）→ 按"要写的文件多大"自动算输出配额（见 tokens.output_budget）。
     attempts 是"自愈轮数"（甲方模式默认 4，来自 policy.heal_attempts）；
     stop_on_repeat=True 时，若新一轮的失败证据与已用过的完全相同就不发这次调用。
+    deadline 是本片的时间截止点（unix 秒）：单轮 4 次自愈每次可能耗两分钟，
+    只在外层 round 边界查时间会让 --slice-hours 形同虚设（实测 dev1106c）。
     """
     from . import contextpack, protocol, remote, tools
     from . import tokens as _tokens
@@ -597,7 +600,21 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
     # 配额放大跨调用要**记住**：以前每次调 author_module 都从 3000 重算，于是同一个模块
     # 每轮都先被截断一次、白烧一次调用（实测 search-index 连输三次）。放大值通过返回值
     # max_out 交给调用方保存（见 company._author_round 的 rec["max_out"]）。
+    timed_out = False
     for attempt in range(1, max(1, attempts) + 1):
+        # 时间闸门必须落在自愈循环**内部**：只在外层 round 边界查时间的话，
+        # 单轮 4 次自愈 × 每次约两分钟（委托本地 7B）就能把 3 分钟的限时实验
+        # 拖到十分钟以上（实测 dev1106c）。
+        if deadline:
+            import time as _time
+            if _time.time() >= deadline:
+                timed_out = True
+                issues.append({"where": "author", "issue": "本片时间预算耗尽，停止自愈",
+                               "suggest": "下一片/下一轮再继续，不要在预算外反复刺激同一份证据"})
+                if emit:
+                    emit("heal_stop", {"path": path, "attempt": attempt,
+                                       "why": "本片时间预算耗尽"})
+                break
         # 同一个失败证据再问一遍只会白烧钱（远端看到完全相同的输入，答案大概率也一样）。
         # 自愈轮数放开后这条更关键：它把"反复刺激"限制在"每轮都有新信息"的前提下。
         _ev = (last or "").strip()
@@ -690,9 +707,10 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
         if emit:
             emit("author_feedback", {"path": path, "attempt": attempt,
                                      "evidence": (last or "")[:400]})
-    return {"ok": False, "reason": "整文件模式两版都未通过：" + (last or "")[:300],
+    return {"ok": False, "reason": ("本片时间预算耗尽，停止自愈" if timed_out
+                                    else "整文件模式两版都未通过：" + (last or "")[:300]),
             "by": "", "attempt": attempts, "feedback": last, "system_issues": issues,
-            "max_out": max_out}
+            "max_out": max_out, "timed_out": timed_out}
 
 
 def author_modules(ws: Path, paths: list[str], contracts: dict, model_plan: str = "",

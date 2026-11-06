@@ -54,6 +54,11 @@ def _slim(payload: dict) -> str:
             "contract", "why", "added", "rewired", "funcs_cap", "problems", "next_funcs_cap", "streak", "entry", "n", "changes",
             "questions", "answered", "samples", "ids")
     parts = [f"{k}={payload[k]}" for k in keep if k in payload]
+    if not parts:
+        # 新事件的字段没进白名单时别再打一行空白（文档 18.5 踩过、dev1106a 又复现：
+        # scale / governance / round 全打成空行，命令行等于没有进度）。
+        parts = [f"{k}={str(v)[:60]}" for k, v in list(payload.items())[:6]
+                 if isinstance(v, (str, int, float, bool)) or v is None]
     if "diff" in payload:
         d = payload["diff"] or ""
         add = len([l for l in d.splitlines() if l.startswith("+") and not l.startswith("+++")])
@@ -212,8 +217,14 @@ def cmd_night(args) -> None:
         sys.exit(2)
     repo = Path(args.repo)
     if not repo.exists():
-        print(f"[FAIL] 仓库不存在：{repo}")
-        sys.exit(2)
+        if goal:
+            # 全自主模式是从 0 建仓库：--repo 允许指向还不存在的目录。
+            # 实测踩过：按需求模式的旧口径直接 exit(2)，一句话目标根本跑不起来。
+            repo.mkdir(parents=True, exist_ok=True)
+            print(f"[auto] 已新建工作区：{repo}")
+        else:
+            print(f"[FAIL] 仓库不存在：{repo}")
+            sys.exit(2)
     if not ollama.alive():
         print("[FAIL] Ollama 不可达，请先 `ollama serve`")
         sys.exit(3)
@@ -226,14 +237,13 @@ def cmd_night(args) -> None:
         sys.exit(4)
 
     def printer(kind, payload) -> None:
-        if kind in ("round", "strategy", "architect", "escalate", "rescue", "scale",
-                    "governance", "workingset", "protected_zone", "structure_gate",
-                    "output_budget", "write_cap", "stop",
-                    "order_failed", "needhuman", "dictfill", "autofix",
-                    "blueprint", "coverage", "slice_start", "slice_done", "replan",
-                    "slice_contract", "autonomy_done", "architecture",
-                    "architect_questions", "spec_samples"):
-            print(f"   {kind:<14} {_slim(payload or {})[:150]}", flush=True)
+        # 默认打印**所有**事件。以前用 kind 白名单决定可见性，结果新加的
+        # selfcheck_done / wiring / probe_aligned / regression 全被吞掉，
+        # 命令行看不到片内自验在干什么（实测 dev1106a/b 每轮空耗两分钟却查不出）。
+        # 白名单容易漏，改成全打 + 限长，宁可多几行也不要丢可观测性。
+        if kind in ("context_layout", "usage", "event"):
+            return
+        print(f"   {kind:<18} {_slim(payload or {})[:150]}", flush=True)
 
     if goal:
         # ---- 全自主模式：只给一句话目标，切片与验收对象由系统自己规划 ----
