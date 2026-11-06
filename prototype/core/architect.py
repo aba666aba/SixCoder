@@ -63,7 +63,8 @@ def _default_llm(prompt: str, *, json_mode: bool = True, task_id: str = "archite
     except Exception:                                    # noqa: BLE001
         idx = None
     r = remote.complete(prompt, task_id=task_id, node_id=node_id, json_mode=json_mode,
-                        step_index=idx, thinking="on", max_out=max_out)
+                        step_index=idx, thinking="on", max_out=max_out,
+                        reuse_scope=f"{task_id}:{node_id}")
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error") or "远端调用失败", "answer": ""}
     return {"ok": True, "answer": r.get("answer") or "", "by": r.get("by") or "",

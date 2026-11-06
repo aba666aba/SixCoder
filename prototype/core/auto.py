@@ -745,7 +745,7 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
         if not goal:
             return _fail(ws, "既没有蓝图也没有目标：至少要给一句话")
         got = blueprint.derive(goal, budget_cny=budget_cny, llm=llm,
-                               do_audit=do_audit, emit=emit)
+                               do_audit=do_audit, emit=emit, ws=ws)
         calls += int(got.get("calls") or 0)
         if not got.get("ok"):
             return _fail(ws, "蓝图不合格：" + "；".join((got.get("problems") or [])[:3]),

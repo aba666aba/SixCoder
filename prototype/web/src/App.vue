@@ -165,7 +165,7 @@ const showSettings = ref(false)
 
 /* 远端模型（DeepSeek）：key 只存本机设置文件，界面只显示掩码 */
 const remote = ref({ available: false, reason: '', remote: {}, usage: {} })
-const remoteForm = reactive({ api_key: '', model: '', base_url: '' })
+const remoteForm = reactive({ api_key: '', model: '', base_url: '', compat: 'deepseek' })
 
 async function loadRemote(reveal = false) {
   try {
@@ -173,6 +173,7 @@ async function loadRemote(reveal = false) {
     remote.value = d
     remoteForm.model = d.remote?.model || ''
     remoteForm.base_url = d.remote?.base_url || ''
+    remoteForm.compat = d.remote?.compat || 'deepseek'
     if (reveal) remoteForm.api_key = d.remote?.key_plain || ''
     loadPricing(d)
     loadProfiles()        // 模型档案与"单模型思考强度阶梯"一起刷新（改了立刻能看到新阶梯）
@@ -221,9 +222,10 @@ function loadPricing(d) {
   windowForm.tz = w.tz || 'UTC'
 }
 
-/* 当前模型的三个连接参数一起保存（模型名 / 接口 / key） */
+/* 当前模型的连接参数一起保存（模型名 / 接口 / 协议 / key） */
 async function saveCurrentModel() {
-  const patch = { model: remoteForm.model, base_url: remoteForm.base_url }
+  const patch = { model: remoteForm.model, base_url: remoteForm.base_url,
+                  compat: remoteForm.compat }
   if (remoteForm.api_key) patch.api_key = remoteForm.api_key
   await saveRemote(patch)
   await loadRemote()
@@ -1640,6 +1642,14 @@ onUnmounted(() => {
             <button class="ghost tiny" @click="revealRemoteKey()">{{ remoteForm.api_key ? '隐藏' : '显示' }}</button>
             <button class="ghost tiny" @click="clearRemoteKey()">清除</button>
           </div>
+          <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
+            <span class="dim" style="font-size:11px;width:64px">协议</span>
+            <select v-model="remoteForm.compat" style="width:190px">
+              <option value="deepseek">DeepSeek（默认）</option>
+              <option value="openai">OpenAI 兼容</option>
+            </select>
+            <span class="dim" style="font-size:11px">非 DeepSeek 端点选「OpenAI 兼容」；普通 chat 模型把该档案档位设为 none</span>
+          </div>
           <div class="row" style="gap:8px;align-items:center">
             <button class="primary tiny" @click="saveCurrentModel()">保存当前模型</button>
             <span class="badge" :class="remote.available ? 'b-ok' : 'b-dim'">
@@ -2146,7 +2156,11 @@ onUnmounted(() => {
             <div class="row" style="gap:8px;align-items:center">
               <input v-model="remoteForm.model" placeholder="deepseek-flash" style="width:180px" />
               <input v-model="remoteForm.base_url" placeholder="https://api.deepseek.com" style="flex:1" />
-              <button class="ghost tiny" @click="saveRemote({model: remoteForm.model, base_url: remoteForm.base_url})">保存</button>
+              <select v-model="remoteForm.compat" style="width:130px">
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI 兼容</option>
+              </select>
+              <button class="ghost tiny" @click="saveRemote({model: remoteForm.model, base_url: remoteForm.base_url, compat: remoteForm.compat})">保存</button>
             </div>
             <div class="panel-title" style="margin-top:14px">用量（本地累计，含缓存命中）</div>
             <table>

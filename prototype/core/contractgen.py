@@ -200,7 +200,8 @@ def synthesize(requirement: str, task_id: str = "contract", step_index: int | st
                             prompt + "\n\n【上一次的问题，必须改掉】\n" + "\n".join(problems[:6]),
                             task_id=task_id, node_id="contract", json_mode=True,
                             step_index=step_index, thinking=thinking,
-                            max_out=out_budget or None)
+                            max_out=out_budget or None,
+                            reuse_scope=f"{task_id}:contract")
         if not r.get("ok"):
             return {"ok": False, "problems": [f"远端调用失败：{r.get('error')}"],
                     "contracts": {}, "text": "", "by": ""}

@@ -45,6 +45,9 @@ REASONING_RESERVE = {"none": 0, "low": 12000, "high": 24000, "max": 40000}
 # 没配正文配额却又开了思考时，正文至少留这么多
 CONTENT_FLOOR = 12000
 CONTENT_CEIL = 384000          # 官方单次输出上限（正文部分）
+# OpenAI 兼容端点的输出配额上限（智谱官方示例 65536，接口硬上限 131072）。
+# DS 校准出的 33 万配额直接发给这类端点会 HTTP 400「max_tokens 参数非法」。
+OPENAI_OUTPUT_CEIL = 65536
 
 
 def reasoning_reserve(effort: str | None) -> int:
@@ -128,6 +131,20 @@ def content_truncated(usage: dict | None, content_budget: int) -> bool:
     return content >= int(budget * 0.98)
 
 
+def compat_of(step: dict | None = None, r: dict | None = None) -> str:
+    """协议口径：**默认 deepseek**，允许显式设 openai 走 OpenAI 兼容格式。
+
+    优先级：档案 compat > 全局 compat > 全局 provider > deepseek。
+    这里返回原始值、不擅自收敛 —— 未知协议要由 available() 明确拒绝，
+    不能静默当成 deepseek 把专有参数发到别的厂商去。
+    """
+    for src in (step, r):
+        v = str((src or {}).get("compat") or "").strip().lower()
+        if v:
+            return v
+    return str((r or {}).get("provider") or "deepseek").strip().lower() or "deepseek"
+
+
 def _key() -> str:
     r = settings_store.get_remote()
     return (r.get("api_key") or "").strip() or os.environ.get("DEEPSEEK_API_KEY", "").strip()
@@ -138,9 +155,10 @@ def available() -> tuple[bool, str]:
     if not r.get("enabled", True):
         return False, "远端协助已在设置里关闭"
     if not _key():
-        return False, "未配置 DeepSeek API key（设置 → 远端模型，或环境变量 DEEPSEEK_API_KEY）"
-    if r.get("provider", "deepseek") != "deepseek":
-        return False, f"暂不支持 provider={r.get('provider')}（当前仅 deepseek）"
+        return False, "未配置 API key（设置 → 远端模型，或环境变量 DEEPSEEK_API_KEY）"
+    compat = compat_of(r=r)
+    if compat not in ("deepseek", "openai"):
+        return False, f"不支持的远端协议 compat={compat}（可选 deepseek / openai）"
     return True, ""
 
 
@@ -267,6 +285,19 @@ def _cache_key(packet: str, model: str, max_tokens: int = 0, thinking: str = "")
         f"{PROMPT_VERSION}|{model}|{max_tokens}|{thinking}|{packet}".encode("utf-8")).hexdigest()
 
 
+def _reuse_key(scope: str, wire: list[dict], model: str = "") -> str:
+    """确定性步骤的「同证据」指纹：认证据内容 + 模型，不认档位 / 配额 / 重试次数。
+
+    必须含 model：换档案（flash ↔ pro，或换到别的厂商）后，同一份证据也绝不能
+    复用上一个模型的答复 —— 那会让对照实验测出来的其实是旧模型的结论。
+    故意不含 effort、max_tokens、step_index —— 升档重试、配额放大重试问的是同一件事，
+    理应复用同一份答复。PROMPT_VERSION 保证改提示词后旧答复自动失效。
+    """
+    body = "\n".join(f"{m.get('role')}:{m.get('content')}" for m in wire)
+    return "reuse:" + hashlib.sha1(
+        f"{PROMPT_VERSION}|{scope}|{model}|{body}".encode("utf-8")).hexdigest()
+
+
 def _record(**kw) -> None:
     with _REC_LOCK:
         _record_locked(**kw)
@@ -299,9 +330,14 @@ def usage_summary(task_id: str = "") -> dict:
     _ensure_table()
     where, params = ("WHERE task_id=?", (task_id,)) if task_id else ("", ())
     rows = db.query("SELECT * FROM remote_usage " + where, params)
+    # 阶梯只在本次统计里算一次。以前 cost_of / saved / by_model 的占位循环对**每一行**
+    # 都调 ladder()（而 ladder 每次重读 settings.json），2000 行 ≈ 6000 次文件 IO，
+    # 实测把 GET /v1/settings/remote 拖到超时、前端配置面板根本打不开。
+    model_steps = {str(s.get("model") or ""): s
+                   for s in ladder() if str(s.get("model") or "").strip()}
 
     def cost_of(r: dict) -> float:
-        step = next((s for s in ladder() if s["model"] == (r.get("model") or "")), None)
+        step = model_steps.get(r.get("model") or "")
         return cost_cny(step, r["prompt_tokens"] or 0, r["cache_hit_tokens"] or 0,
                         r["completion_tokens"] or 0, offpeak=bool(r.get("offpeak")))
 
@@ -324,20 +360,17 @@ def usage_summary(task_id: str = "") -> dict:
     # 缓存省下来的钱：命中部分若按未命中价计会多花多少
     saved = 0.0
     for r in rows:
-        step = next((s for s in ladder() if s["model"] == (r.get("model") or "")), None)
+        step = model_steps.get(r.get("model") or "")
         if not step:
             continue
-        price = step["pricing"]["offpeak" if r.get("offpeak") else "peak"]
+        prices = step.get("pricing") or {}
+        price = prices.get("offpeak" if r.get("offpeak") else "peak") or {}
         hit = r["cache_hit_tokens"] or 0
         saved += hit / 1e6 * (float(price.get("in_miss") or 0) - float(price.get("in_hit") or 0))
     total["cache_saved_cny"] = round(saved, 6)
 
     # 按模型 / 按档位分开看（"钱花在哪个模型、哪个思考强度上"）
-    by_model: dict[str, dict] = {}
-    for r in rows:
-        key = r.get("model") or "?"
-        by_model[key] = agg([r] + [])          # 占位，下面重算
-    by_model = {}
+    by_model: dict[str, list] = {}
     for r in rows:
         by_model.setdefault(r.get("model") or "?", []).append(r)
     total["by_model"] = {k: agg(v) for k, v in by_model.items()}
@@ -392,7 +425,17 @@ def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool) -> 
         payload["max_tokens"] = _mt
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    if effort == "none":
+    compat = compat_of(step, r)
+    if compat == "openai":
+        # 按智谱等 OpenAI 兼容端点的**官方格式**发：thinking 开关 + 受限的输出配额。
+        # 它们不认 reasoning_effort，也不需要 response_format（JSON 由提示词约束 +
+        # _json_of 从围栏里兜底解析）。实测发 DS 的 336136 会 400，官方示例是 65536。
+        payload["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
+        payload.pop("reasoning_effort", None)
+        payload.pop("response_format", None)
+        payload["max_tokens"] = max(1, min(int(payload.get("max_tokens") or
+                                              OPENAI_OUTPUT_CEIL), OPENAI_OUTPUT_CEIL))
+    elif effort == "none":
         payload["thinking"] = {"type": "disabled"}
     else:
         payload["thinking"] = {"type": "enabled"}
@@ -434,6 +477,7 @@ def ask(packet_md: str, task_id: str = "", node_id: str = "",
     if not ok:
         return {"ok": False, "error": why, "answer": ""}
     r = settings_store.get_remote()
+    single = settings_store.single_effort()
     limit = int(r.get("max_prompt_chars") or 200000)
     body_md = _trim(packet_md, limit)
     steps = ladder() or []
@@ -472,7 +516,7 @@ def ask(packet_md: str, task_id: str = "", node_id: str = "",
         data, err, ms = _post(payload, base, key)
         if data is None:
             tried.append(f"{tag}失败({err[:40]})")
-            if _is_transient(err) and idx + 1 < len(steps):
+            if not single and _is_transient(err) and idx + 1 < len(steps):
                 continue                                  # 限流/网络抖动 → 升一档再试
             return {"ok": False, "error": err, "answer": "", "tried": tried}
         usage = data.get("usage") or {}
@@ -544,8 +588,14 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
              workspace: str = '', emit=None, thinking: str | None = None,
              step_index: int | None = None, json_mode: bool = False,
              max_out: int | None = None,
-             messages: list[dict] | None = None) -> dict:
+             messages: list[dict] | None = None,
+             reuse_scope: str | None = None) -> dict:
     """发一段自由文本提示，返回 {ok, answer, usage}。
+
+    `reuse_scope`：给**确定性步骤**（蓝图/审计/契约/架构问答）用的响应复用开关。
+    给了就按「scope + 完整证据内容」算指纹，同一份证据重复问直接复用上次答复，
+    记一条 cached_reply=1、0 token 的用量记录。不给就完全不缓存 —— 写代码的自愈
+    4 轮靠的正是同证据拿到不同答案，那类调用绝不能复用。详见 checks/check_reuse.py。
 
     走**单模型 + 思考强度阶梯**（core/settings_store.ladder）：一次运行只用一个模型，
     在这个模型内部按 none → low → high → max 切思考强度（强度由 core/effort.py 按需求选）。
@@ -585,9 +635,15 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
     if not steps:
         return {'ok': False, 'error': '没有任何启用的远端模型档案（设置 → 远端模型档案）',
                 'answer': ''}
-    start = 0 if step_index is None else max(0, min(int(step_index), len(steps) - 1))
-    if thinking and str(thinking).lower() == 'on' and step_index is None:
-        start = next((i for i, s in enumerate(steps) if s['effort'] != 'none'), 7)
+    single = settings_store.single_effort()
+    if single:
+        # 单档直通分路：只有一个思考强度，忽略 step_index / thinking，
+        # 不按难度挑起点，也没有可升可降的档（见 settings_store.single_effort）。
+        start = 0
+    else:
+        start = 0 if step_index is None else max(0, min(int(step_index), len(steps) - 1))
+        if thinking and str(thinking).lower() == 'on' and step_index is None:
+            start = next((i for i, s in enumerate(steps) if s['effort'] != 'none'), 7)
     # 阶梯第 0 档是**本地模型**（model 为空、effort 为 "-"）：它不该被发到远端。
     # 实测踩过：按档位下标直接发请求，payload 里出现 reasoning_effort="-" →
     # HTTP 422 unknown variant `-`。这里只保留真正的远端档，并保留原始下标。
@@ -610,17 +666,39 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
             emit('context_budget', {**info, 'action': '压缩', 'chars': limit_chars})
     tried = []
     err = ''
-    seq = [(i, s) for i, s in remote_steps if i >= start] or remote_steps[:1]
+    seq = remote_steps[:1] if single else (
+        [(i, s) for i, s in remote_steps if i >= start] or remote_steps[:1])
+    # 同证据复用：只认证据内容，不认这次用哪个档位 / 给多少配额
+    _wire0 = msgs if msgs else [{'role': 'user', 'content': text}]
+    _reuse_model = str((seq[0][1] or {}).get("model") or "")
+    reuse_key = _reuse_key(reuse_scope, _wire0, _reuse_model) if reuse_scope else None
+    if reuse_key:
+        _ensure_table()
+        prev = db.query("SELECT answer FROM remote_cache WHERE key=?", (reuse_key,))
+        if prev and (prev[0]["answer"] or "").strip():
+            _record(task_id=task_id, node_id=node_id, purpose=reuse_scope or "",
+                    model=str((seq[0][1] or {}).get("model") or ""), cached_reply=True,
+                    effort=str((seq[0][1] or {}).get("effort") or ""))
+            return {"ok": True, "answer": prev[0]["answer"] or "", "ms": 0,
+                    "cached": True, "by": "reuse", "step": start,
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0,
+                              "reasoning_tokens": 0, "cache_hit_tokens": 0,
+                              "cost_cny": 0.0},
+                    "error": "同一份证据已问过远端，直接复用上次答复（0 token）"}
     for idx, step in seq:
         tag = f"{step['profile_id']}:{step['effort']}"
-        _wire = msgs if msgs else [{'role': 'user', 'content': text}]
+        _wire = _wire0
         payload, base, key = _payload_for(step, r, _wire, json_mode=json_mode)
         _eff = str(payload.get("reasoning_effort") or "none").lower()
         if max_out:
             # 整文件/架构设计需要长输出；档位默认 8K 只够一个函数。
             # 注意：这里也必须走 max_tokens_for，否则会把 _payload_for 算好的思考预留覆盖掉
             # （实测：只在 _payload_for 加预留时，这条一覆盖，思考又把正文挤成 1 369 token）。
-            payload['max_tokens'] = max_tokens_for(min(int(max_out), CONTENT_CEIL), _eff)
+            if str(compat_of(step, r)).lower() == "openai":
+                # 兼容端点：只夹到官方示例的 65536，别把 DS 校准的 33 万覆盖回去
+                payload['max_tokens'] = max(1, min(int(max_out), OPENAI_OUTPUT_CEIL))
+            else:
+                payload['max_tokens'] = max_tokens_for(min(int(max_out), CONTENT_CEIL), _eff)
         # 「配额不够」要归因到配额，不要归因到模型，并且**当场自动放大重试一次**。
         # 实测（2026-11-05）：high 档预留 8000 时出现过「思考 11 000、正文 0」，
         # 白烧 ¥0.048；max 档也出现过「思考 22 452、正文 4 336」把正文挤到写不完。
@@ -635,7 +713,11 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
             _ct = int(u.get('completion_tokens') or 0)
             _rt = int((u.get('completion_tokens_details') or {}).get('reasoning_tokens') or 0)
             _body = max(0, _ct - _rt)
-            starved = (_ct > 0 and _body <= 32) or fin == 'length'
+            # 只有真的产生了 reasoning token 且正文几乎为空，才算「思考吃光配额」。
+            # none 档 / 无思考端点本来就可能只回一两个字（实测智谱回「好」= 2 token），
+            # 旧口径会把它当配额不足放大重发一次：白烧一次调用，还容易撞上 429。
+            # finish_reason=length 仍是硬信号，照旧放大。
+            starved = fin == 'length' or (_ct > 0 and _rt > 0 and _body <= 32)
             if not starved or _attempt == 1:
                 break
             # 思考吃光 / 顶到上限 → 直接把配额翻倍（再留一档余量），重发一次
@@ -648,7 +730,8 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
                                                    'body': _body, 'finish': fin}})
         if data is None:
             tried.append(f'{tag}失败({err[:40]})')
-            if _is_transient(err) and idx + 1 < len(steps):
+            # 单档直通没有「升一档」这条路；瞬态错误直接如实返回，不换档重试
+            if not single and _is_transient(err) and idx + 1 < len(steps):
                 continue
             return {'ok': False, 'error': err, 'answer': '', 'tried': tried}
         usage = data.get('usage') or {}
@@ -664,6 +747,10 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
         _record(task_id=task_id, node_id=node_id, model=step['model'],
                 prompt_tokens=pt, completion_tokens=ct, cache_hit_tokens=hit, ms=ms,
                 reasoning_tokens=rt, effort=step['effort'], pricing=step.get('pricing'))
+        # 只缓存「有内容且成功」的答复：空答/解析失败不能变成下次的假命中
+        if reuse_key and answer.strip():
+            db.execute("INSERT OR REPLACE INTO remote_cache(key,answer,created_at) VALUES(?,?,?)",
+                       (reuse_key, answer, db.now()))
         return {'ok': True, 'answer': answer, 'ms': ms, 'by': tag, 'step': idx,
                 'usage': {'prompt_tokens': pt, 'completion_tokens': ct,
                           'reasoning_tokens': rt, 'cache_hit_tokens': hit,

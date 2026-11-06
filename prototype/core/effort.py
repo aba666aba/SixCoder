@@ -81,6 +81,8 @@ def pick(steps: list[dict], want: str) -> int:
     """
     if not steps:
         return 0
+    if len(steps) == 1:
+        return 0                # 单档直通：没有可挑的档，也不按难度打分
     w = norm(want)
     for i, s in enumerate(steps):
         if norm(s.get("effort")) == w:

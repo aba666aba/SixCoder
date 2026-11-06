@@ -20,7 +20,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -28,6 +30,9 @@ from pathlib import Path
 
 BLUEPRINT_FILE = ".sixcoder/blueprint.json"
 DIFF_FILE = ".sixcoder/blueprint.diff.jsonl"
+AUDIT_CACHE_FILE = ".sixcoder/audit_cache.json"
+# 改 AUDIT_PROMPT / AUDIT_DIFF_PROMPT 时递增，旧结论自动失效
+AUDIT_CACHE_VERSION = "1"
 MAX_CAPS = 200                    # 超过说明粒度太细，切片会碎成沙子
 PROBE_KINDS = ("cli", "py_call")  # 已有执行器的种类（见 core/probe.py）
 CAP_ID_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
@@ -445,6 +450,27 @@ AUDIT_PROMPT = """你是独立评审，不是这张表的作者。下面是**目
 @TABLE@
 """
 
+AUDIT_DIFF_PROMPT = """你是独立评审。上版蓝图**已经评审过**，没变的能力不要重复评审。
+
+本轮只做了一次重规划（降级 / 补能力 / 重连依赖 / 重开）。只审变更带来的新风险：
+1. 新增或重开的能力：探针空壳是不是也能过、目标隐含的验收动作有没有漏
+2. rewired 的依赖：有没有成环，有没有把各自独立的命令串成链（一条红锁死一片）
+3. removed / descoped：有没有留下指向它的悬空依赖
+
+四类问题同全量评审：missing / dup / broken_dep / fake_probe，只报能指到具体 id 的。
+输出 JSON：{"issues":[...],"add":[],"drop":[],"rewire":{}}；没问题输出 {"issues": []}。
+**不要重复列出未变更条目的问题**，也不要给改进建议。
+
+【目标】
+@GOAL@
+
+【本轮变更】
+@DIFF@
+
+【仅变更涉及的能力】
+@TABLE@
+"""
+
 
 def _default_llm(prompt: str, *, json_mode: bool = True, task_id: str = "blueprint",
                  node_id: str = "plan", step: str = "strongest",
@@ -465,7 +491,9 @@ def _default_llm(prompt: str, *, json_mode: bool = True, task_id: str = "bluepri
         idx = None
     kw = {}
     if messages:
-        kw["messages"] = messages
+        kw["messages"] = messages            # 多轮（片内自验）历史在变，不能复用
+    else:
+        kw["reuse_scope"] = f"{task_id}:{node_id}"   # 确定性单轮：同证据复用
     r = remote.complete(prompt, task_id=task_id, node_id=node_id, json_mode=json_mode,
                         step_index=idx, thinking="on", max_out=max_out, **kw)
     if not r.get("ok"):
@@ -500,6 +528,55 @@ def table_text(bp: Blueprint) -> str:
     return json.dumps(rows, ensure_ascii=False, indent=1)
 
 
+def fingerprint(bp: Blueprint) -> str:
+    """蓝图指纹：只含会改变评审结论的**结构**字段。
+
+    故意不含 version / notes / created_at / status —— 重规划只改版本号或备注、
+    某条能力从 pending 变 done，评审对象并没有变，不该再花一次最强档调用。
+    降级 / 删能力这类结构变化由 diff 评审（AUDIT_DIFF_PROMPT）单独覆盖。
+    """
+    rows = []
+    for c in sorted(bp.caps, key=lambda x: str(x.id)):
+        rows.append({"id": c.id, "desc": c.desc, "probe": c.probe,
+                     "deps": list(c.deps or []), "funcs": c.funcs})
+    raw = json.dumps({"goal": bp.goal or "", "caps": rows},
+                     ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _diff_changes(diff: dict | None) -> dict | None:
+    """从 replan.diff() 里只取会造成新风险的变更；None = 全量评审。"""
+    if diff is None:
+        return None
+    keys = ("added", "removed", "rewired", "descoped", "reopened")
+    return {k: diff.get(k) for k in keys if diff.get(k)} or {}
+
+
+def _audit_cache_load(ws) -> dict:
+    try:
+        d = json.loads((Path(ws) / AUDIT_CACHE_FILE).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
+def _audit_cache_store(ws, key: str, result: dict) -> None:
+    """原子写：进程被中断也不会留下 0 字节缓存（docs/26 §7 踩过）。"""
+    p = Path(ws) / AUDIT_CACHE_FILE
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        cache = _audit_cache_load(ws)
+        cache[key] = {"at": time.time(), "result": result}
+        if len(cache) > 40:
+            for k in sorted(cache, key=lambda x: cache[x].get("at") or 0)[:-40]:
+                cache.pop(k, None)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception:                                    # noqa: BLE001
+        pass    # 缓存只是优化，写失败不能拖垮主流程
+
+
 def _n_funcs_for(budget: float) -> int:
     if budget <= 0:
         return 200
@@ -509,7 +586,7 @@ def _n_funcs_for(budget: float) -> int:
 # ---------------------------------------------------------------- 推导 / 审计 / 修补
 
 def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = True,
-           max_repair: int = 1, emit=None) -> dict:
+           max_repair: int = 1, emit=None, ws=None) -> dict:
     """目标 → 蓝图（derive 一次 + audit 一次 + 机械修补）。
 
     返回 {ok, blueprint, issues, notes, audit, calls, problems}。
@@ -577,8 +654,9 @@ def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = Tru
     for _ in range(max(0, int(max_repair)) + (1 if do_audit else 0)):
         if not do_audit:
             break
-        audit_result = audit(bp, llm=llm, emit=emit)
-        calls += 1
+        audit_result = audit(bp, llm=llm, emit=emit, ws=ws)
+        if not (audit_result.get("cached") or audit_result.get("skipped")):
+            calls += 1            # 缓存命中不算一次远端调用（不许把省钱写成调用过）
         if not audit_result.get("ok"):
             notes.append("审计失败（按未审计处理，风险自负）："
                          + str(audit_result.get("error") or "")[:80])
@@ -600,11 +678,56 @@ def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = Tru
             "notes": notes, "audit": audit_result, "calls": calls}
 
 
-def audit(bp: Blueprint, *, llm=None, emit=None) -> dict:
-    """独立评审：**新上下文**，只看目标 + 能力表。"""
+def audit(bp: Blueprint, *, llm=None, emit=None, ws=None, diff=None) -> dict:
+    """独立评审：**新上下文**，只看目标 + 能力表。
+
+    两道省钱的闸（实测 blueprint-audit 曾占最近 500 次调用花费的三成）：
+      1. 指纹没变 → 直接复用上次评审结论，一次远端调用都不发；
+      2. 重规划走 diff 模式：没有结构变更就跳过，有变更只把变更条目 +
+         涉及到的那几条能力交给评审，不重审整张表。
+    返回里带 cached / skipped，调用方据此决定 calls 计不计（不许把缓存算成"调用过"）。
+    """
     llm = llm or _default_llm
-    prompt = (AUDIT_PROMPT.replace("@GOAL@", (bp.goal or "")[:4000])
-              .replace("@TABLE@", table_text(bp)))
+    changes = _diff_changes(diff)
+    empty = {"ok": True, "issues": [], "add": [], "drop": [], "rewire": {}}
+    if diff is not None and not changes:
+        out = {**empty, "skipped": True, "cached": True}
+        if emit:
+            emit("blueprint", {"phase": "audited", "issues": 0, "skipped": True,
+                               "why": "重规划没有结构变更，跳过复评"})
+        return out
+
+    dpart = hashlib.sha1(json.dumps(changes or {}, ensure_ascii=False,
+                                    sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    ckey = f"{AUDIT_CACHE_VERSION}|{'diff' if diff is not None else 'full'}|{fingerprint(bp)}|{dpart}"
+    if ws is not None:
+        hit = _audit_cache_load(ws).get(ckey)
+        if isinstance(hit, dict) and isinstance(hit.get("result"), dict):
+            out = dict(hit["result"])
+            out["cached"] = True
+            if emit:
+                emit("blueprint", {"phase": "audited", "cached": True,
+                                   "why": "蓝图指纹未变，复用上次评审（0 调用）"})
+            return out
+
+    if diff is not None:
+        ids: set[str] = set()
+        for v in (changes or {}).values():
+            if isinstance(v, dict):
+                ids.update(str(k) for k in v)
+            elif isinstance(v, (list, tuple)):
+                ids.update(str(x) for x in v)
+        rows = [{"id": c.id, "desc": c.desc, "probe": c.probe,
+                 "deps": c.deps, "funcs_est": c.funcs}
+                for c in bp.caps if c.id in ids]
+        prompt = (AUDIT_DIFF_PROMPT.replace("@GOAL@", (bp.goal or "")[:4000])
+                  .replace("@DIFF@", json.dumps(changes, ensure_ascii=False,
+                                                indent=1, default=str)[:6000])
+                  .replace("@TABLE@", json.dumps(rows, ensure_ascii=False,
+                                                 indent=1, default=str)[:12000]))
+    else:
+        prompt = (AUDIT_PROMPT.replace("@GOAL@", (bp.goal or "")[:4000])
+                  .replace("@TABLE@", table_text(bp)))
     r = llm(prompt, json_mode=True, task_id="blueprint-audit", node_id="plan")
     if not r.get("ok"):
         return {"ok": False, "error": r.get("error") or "审计调用失败",
@@ -616,10 +739,13 @@ def audit(bp: Blueprint, *, llm=None, emit=None) -> dict:
            "drop": [str(x) for x in (d.get("drop") or []) if str(x).strip()],
            "rewire": {str(k): v for k, v in (d.get("rewire") or {}).items()
                       if isinstance(v, dict)}}
+    if ws is not None and out["ok"]:
+        _audit_cache_store(ws, ckey, out)
     if emit:
         emit("blueprint", {"phase": "audited", "issues": len(out["issues"]),
                            "add": [a.get("id") for a in out["add"]][:6],
-                           "drop": out["drop"][:6]})
+                           "drop": out["drop"][:6],
+                           "mode": "diff" if diff is not None else "full"})
     return out
 
 

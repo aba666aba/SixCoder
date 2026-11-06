@@ -17,6 +17,9 @@ DEFAULTS = {
     "remote": {
         "enabled": True,
         "provider": "deepseek",
+        # 空 = 跟随 provider（默认 deepseek）；设 "openai" 走 OpenAI 兼容格式。
+        # 档案级 compat 优先于这里，方便一条档案接第三方端点、其余仍是 DS。
+        "compat": "",
         "base_url": "https://api.deepseek.com",
         "model": "deepseek-flash",
         "api_key": "",
@@ -193,6 +196,9 @@ def _norm_model_profile(raw: dict) -> dict:
 
     mid = str(raw.get("id") or "").strip()[:32]
     model = str(raw.get("model") or "").strip()[:64]
+    compat = str(raw.get("compat") or "").strip().lower()
+    if compat not in ("", "deepseek", "openai"):
+        compat = ""                  # 非法值收敛到「未设置」，交给下游回落，不猜协议
     pricing = raw.get("pricing") or {}
 
     def price_block(b):
@@ -205,6 +211,7 @@ def _norm_model_profile(raw: dict) -> dict:
         "id": mid or model,
         "label": str(raw.get("label") or mid or model)[:48],
         "model": model,
+        "compat": compat,
         "base_url": str(raw.get("base_url") or "").strip()[:200],
         "api_key": str(raw.get("api_key") or "").strip(),
         "enabled": bool(raw.get("enabled", True)),
@@ -284,6 +291,7 @@ def active_model() -> dict | None:
     if flat_model or str(r.get("base_url") or "").strip() or str(r.get("api_key") or "").strip():
         return _norm_model_profile({"id": flat_model or "flat", "label": flat_model or "平铺配置",
                                     "model": flat_model or "deepseek-flash",
+                                    "compat": r.get("compat") or r.get("provider") or "deepseek",
                                     "base_url": r.get("base_url") or "",
                                     "api_key": r.get("api_key") or "",
                                     "enabled": True})
@@ -300,19 +308,23 @@ def ladder() -> list[dict]:
     `local_first=True` 时第 0 档仍是本地模型（它也是"一个模型"，同样不构成多模型）。
     """
     steps: list[dict] = []
-    if get_remote().get("local_first", True):
+    r = get_remote()
+    default_compat = str(r.get("compat") or r.get("provider") or "deepseek").strip().lower()
+    if r.get("local_first", True):
         # 第 0 档 = 本地模型（0 token）。本地连续失败到阈值才上远端。
         steps.append({"profile_id": "local", "label": "本地模型", "model": "",
                       "effort": "-", "max_output_tokens": 0, "temperature": 0.2,
-                      "base_url": "", "api_key": "", "pricing": None})
+                      "compat": "deepseek", "base_url": "", "api_key": "", "pricing": None})
     p = active_model()
     if not p:
         return steps
     for eff in p.get("efforts") or ["none"]:
         steps.append({"profile_id": p["id"], "label": p["label"], "model": p["model"],
                       "effort": eff, "max_output_tokens": p["max_output_tokens"],
-                      "temperature": p["temperature"], "base_url": p["base_url"],
-                      "api_key": p["api_key"], "pricing": p["pricing"]})
+                      "temperature": p["temperature"],
+                      "compat": p.get("compat") or default_compat,
+                      "base_url": p["base_url"], "api_key": p["api_key"],
+                      "pricing": p["pricing"]})
     return steps
 
 
@@ -329,6 +341,28 @@ def ladder_step(idx: int) -> dict | None:
         return None
     i = int(idx or 0)
     return steps[i] if 0 <= i < len(steps) else None
+
+
+def single_effort() -> bool:
+    """当前是否只有**一个思考强度** → 走「单档直通」分路。
+
+    OpenAI 兼容端点（智谱 / 腾讯混元等）通常不认 reasoning_effort 的多档切换，
+    档案只配一档时也一样。用户口径：这种情况直接走另一条分路，
+    **不做思维强度提升和降阶**，因为只有一个强度可升可降。
+    DS 默认多档阶梯仍走原来的升档 / 难度路由语义。
+    """
+    try:
+        r = get_remote()
+        p = active_model()
+        if not p:
+            return False
+        effs = [str(e).strip().lower() for e in (p.get("efforts") or [])
+                if str(e or "").strip()]
+        compat = str(p.get("compat") or r.get("compat") or r.get("provider")
+                     or "deepseek").strip().lower()
+        return compat == "openai" or len(effs) <= 1
+    except Exception:                                    # noqa: BLE001
+        return False
 
 
 def strongest_step_index() -> int:
@@ -372,6 +406,11 @@ def update_remote(patch: dict) -> tuple[dict, list[str]]:
             v = _norm_profiles(v)
             if not v:
                 continue
+        elif k == "compat":
+            # 只认三个值；非法/空一律收敛成「跟随默认」，绝不把不认识的协议写进配置
+            v = str(v or "").strip().lower()
+            if v not in ("deepseek", "openai"):
+                v = ""
         elif k == "api_key":
             v = str(v or "").strip()
         elif k == "active_model":
@@ -431,6 +470,7 @@ def public_remote(reveal: bool = False) -> dict:
     out = {
         "enabled": bool(r.get("enabled", True)),
         "provider": r.get("provider", "deepseek"),
+        "compat": r.get("compat") or r.get("provider") or "deepseek",
         "base_url": r.get("base_url", ""),
         "model": r.get("model", ""),
         "key_configured": bool(effective),

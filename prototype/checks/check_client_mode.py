@@ -78,7 +78,10 @@ def main() -> int:
     check("阶梯访问住在 settings_store（不是 contractgen）",
           hasattr(settings_store, "ladder_step")
           and not hasattr(contractgen, "strongest_step_index"))
-    check("默认设置下最强档不是第 0 档（否则等于没改）", want > 0, f"strongest={want}")
+    _single = settings_store.single_effort()
+    check("多档阶梯最强档 > 0；单档直通允许为 0",
+          want > 0 or _single,
+          f"strongest={want} single={_single}")
 
     fake = Fake([])
     old = patch(fake)

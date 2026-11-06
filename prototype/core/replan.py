@@ -101,8 +101,12 @@ def replan(bp, *, cov: dict | None = None, ws=None, llm=None, reason: str = "",
     issues: list[str] = []
 
     if do_audit and bp.pending():
-        audit_result = _bp.audit(bp, llm=llm, emit=emit)
-        calls += 1
+        # 重规划只审相对上版的结构变更：没变更直接跳过，指纹没变复用上次结论。
+        # 全量重审整张表是这里最贵的一件事（实测 51 次审计 ≈ ¥9）。
+        pre = diff(old, bp)
+        audit_result = _bp.audit(bp, llm=llm, emit=emit, ws=ws, diff=pre)
+        if not (audit_result.get("cached") or audit_result.get("skipped")):
+            calls += 1
         if audit_result.get("ok"):
             notes: list[str] = []
             _bp.repair(bp, audit_result, notes=notes)

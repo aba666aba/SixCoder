@@ -131,7 +131,7 @@ def generate(ws: Path, symbol: str, contract: str, evidence: str, snippet: str =
     ok_r, why = remote.available()
     if ok_r:
         r = remote.complete(prompt, task_id=task_id, node_id=f"briefing:{symbol}",
-                            workspace=str(ws))
+                            workspace=str(ws), reuse_scope=f"{task_id}:briefing")
         if r.get("ok"):
             data = _parse(r.get("answer") or "")
             passed, why2 = validate(data, symbol, evidence)

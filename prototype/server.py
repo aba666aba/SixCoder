@@ -314,6 +314,7 @@ class RemoteSettingsReq(BaseModel):
     clear_key: Optional[bool] = None
     model: Optional[str] = None
     base_url: Optional[str] = None
+    compat: Optional[str] = None         # deepseek（默认）| openai 兼容格式
     enabled: Optional[bool] = None
     max_output_tokens: Optional[int] = None
     max_prompt_chars: Optional[int] = None
@@ -332,6 +333,7 @@ class ModelProfileReq(BaseModel):
     model: Optional[str] = None
     label: Optional[str] = None
     base_url: Optional[str] = None
+    compat: Optional[str] = None         # 档案级协议，优先于全局
     api_key: Optional[str] = None
     enabled: Optional[bool] = None
     priority: Optional[float] = None

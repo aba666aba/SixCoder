@@ -1615,22 +1615,33 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
         if str(effort_mode) == "auto" and steps:
             try:
                 from . import effort as _eff_m
-                _c = contracts.get(rel)
-                _fails = int((_wu(rel).get("total") or 0))
-                try:
-                    _src_txt = (ws / rel).read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    _src_txt = ""
-                _want, _score = _auto_effort(contracts, _deps_map, rel, _fails,
-                                             stub=(not _src_txt.strip()
-                                                   or "raise NotImplementedError" in _src_txt),
-                                             lines=len(_src_txt.splitlines()))
-                _lvl0 = _eff_m.pick(steps, _want)
-                tier_of.setdefault(rel, _lvl0)
-                if emit:
-                    _ev = _eff_m.explain("code", _score, _want, steps, _lvl0)
-                    _ev["path"] = rel
-                    emit("effort_route", _ev)
+                from . import settings_store as _ss
+                if _ss.single_effort():
+                    # 单档直通分路：只有一个思考强度，别按难度打分、也别发一个
+                    # 「想要 max 实际 none」的假路由事件。
+                    tier_of.setdefault(rel, 0)
+                    if emit:
+                        emit("effort_route", {
+                            "mode": "single", "path": rel, "index": 0,
+                            "chosen": str((steps[0] or {}).get("effort") or "none"),
+                            "why": "该端点只有一个思考强度，不做难度路由与升档"})
+                else:
+                    _c = contracts.get(rel)
+                    _fails = int((_wu(rel).get("total") or 0))
+                    try:
+                        _src_txt = (ws / rel).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        _src_txt = ""
+                    _want, _score = _auto_effort(contracts, _deps_map, rel, _fails,
+                                                 stub=(not _src_txt.strip()
+                                                       or "raise NotImplementedError" in _src_txt),
+                                                 lines=len(_src_txt.splitlines()))
+                    _lvl0 = _eff_m.pick(steps, _want)
+                    tier_of.setdefault(rel, _lvl0)
+                    if emit:
+                        _ev = _eff_m.explain("code", _score, _want, steps, _lvl0)
+                        _ev["path"] = rel
+                        emit("effort_route", _ev)
             except Exception as _exc:                # noqa: BLE001
                 if emit:
                     emit("notice", {"message": f"思考强度路由跳过：{type(_exc).__name__}"})
