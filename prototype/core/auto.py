@@ -1256,3 +1256,63 @@ def describe(res: dict) -> str:
     return (f"{'完成' if res.get('ok') else '未完成'}：覆盖 {r.get('done', 0)}/{r.get('total', 0)}"
             f"（{r.get('pct', 0)}%）｜¥{res.get('spent_cny', 0):.2f}"
             f"｜切片 {res.get('slices', 0)}｜{res.get('reason', '')}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 阶段①澄清循环（开发文档 §13.2）：多轮 / 单文档 / 多选 / 双闸门
+# ─────────────────────────────────────────────────────────────────────────────
+
+def clarify_design_doc_to_arch(doc) -> dict:
+    """把澄清产出的 DesignDoc 转成 night_auto 已支持的 arch 格式。"""
+    qs = [
+        {"id": c.key, "q": c.question, "options": c.options, "why": "", "default": c.options[0]}
+        for c in doc.choices
+    ]
+    ans = {c.key: c.picked for c in doc.choices if c.picked}
+    return {"questions": qs, "answers": ans}
+
+
+def run_clarify_phase(ws, requirement: str, complete=None, answers: dict | None = None,
+                      interactive: bool = True, force: bool = False) -> dict:
+    """跑澄清循环：远端最强模型列全量待定项+多选 → 人类选 → 落进同一份设计文档（越改越细）
+    → 直到双人闸门（人类满意 + AI 判足够）。产物转 arch 格式返回，并落盘：
+      `.sixcoder/design_doc.md`（人读） + `.sixcoder/design_doc.json`（机读，二次跳过）。
+
+    默认不破坏既有夜班：仅在 CLI `--clarify` 时调用。
+    """
+    from . import clarify as _clarify  # noqa: WPS433
+
+    ws = Path(ws).resolve()
+    (ws / ".sixcoder").mkdir(parents=True, exist_ok=True)
+    json_path = ws / ".sixcoder" / "design_doc.json"
+    md_path = ws / ".sixcoder" / "design_doc.md"
+
+    if json_path.exists() and not force:
+        import json as _json  # noqa: WPS433
+        return _json.loads(json_path.read_text(encoding="utf-8"))
+
+    complete = complete or _clarify.default_complete
+
+    def human_answer(doc):
+        sel: dict = {}
+        for c in doc.open_choices():
+            if answers and str(answers.get(c.key, "")) in c.options:
+                sel[c.key] = str(answers[c.key])
+            elif interactive:
+                try:
+                    line = input(f"  [{c.key}] {c.question}\n    选项 {c.options}\n    选择：").strip()
+                except EOFError:
+                    line = ""
+                if line in c.options:
+                    sel[c.key] = line
+        satisfied = bool(answers) or (not doc.open_choices())
+        return sel, satisfied
+
+    doc = _clarify.clarify_loop(requirement, complete, human_answer, effort="max", max_rounds=8)
+    md_path.write_text(doc.render(), encoding="utf-8")
+    arch = clarify_design_doc_to_arch(doc)
+    import json as _json  # noqa: WPS433
+    json_path.write_text(_json.dumps(arch, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"> 设计文档已落盘：{md_path}")
+    return arch
+

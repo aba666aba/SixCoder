@@ -272,7 +272,20 @@ def cmd_night(args) -> None:
                 sys.exit(2)
         # ---- 阶段 1：架构问答（人只在最贵的位置介入这一次）----
         _arch = {}
-        if getattr(args, "ask", False) or getattr(args, "answers", "") or getattr(args, "interview", False):
+        if getattr(args, "clarify", False):
+            # 新澄清循环：多轮 / 单文档 / 多选 / 双闸门；结果转 arch 格式。
+            from core import auto as _auto
+            _ans = None
+            if getattr(args, "answers", ""):
+                try:
+                    _ans = _read_answers_file(args.answers)
+                except OSError as exc:
+                    print(f"[FAIL] 读不了答案文件：{exc}")
+                    sys.exit(2)
+            _arch = _auto.run_clarify_phase(repo, goal, answers=_ans, interactive=not _ans)
+            if not _arch.get("answers"):
+                print("[WARN] 澄清未完成（无答案），将按无安排直接生成，质量会明显下降")
+        elif getattr(args, "ask", False) or getattr(args, "answers", "") or getattr(args, "interview", False):
             _arch = _arch_interview(repo, goal,
                                     force_ask=bool(getattr(args, "ask", False)),
                                     answers_path=str(getattr(args, "answers", "") or ""),
@@ -992,6 +1005,9 @@ def build() -> argparse.ArgumentParser:
                     help="阶段 1 的答案文件（JSON 字典或 `Q1: ...` 逐行）；给了就不再问人，直接开跑")
     sp.add_argument("--interview", action="store_true",
                     help="阶段 1：在终端逐条交互答完再开跑（人不答则用建议默认）")
+    sp.add_argument("--clarify", action="store_true",
+                    help="阶段①澄清循环：远端最强模型列全量待定项+每项多选，落进同一份设计文档"
+                         "（越改越细），人类选完、AI 判足够才进生成；结果转 arch 喂给夜班")
     sp.add_argument("--no-selfcheck", action="store_true",
                     help="关掉片内自验（作者不能自己跑验收命令，只能事后判红整片重来；"
                          "只在做对照实验时用，平时别关）")
