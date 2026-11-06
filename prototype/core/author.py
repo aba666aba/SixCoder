@@ -537,7 +537,8 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
                   context_budget: int = 0, local_model: str = "",
                   workingset: str = "", verify_fn=None,
                   stop_on_repeat: bool = True,
-                  deadline: float | None = None) -> dict:
+                  deadline: float | None = None,
+                  tool_loop: bool = False) -> dict:
     """让远端把**整个文件**写出来：提炼上下文 → 一次生成 → 本地验收 → 窄证据重试。
 
     max_out=0（默认）→ 按"要写的文件多大"自动算输出配额（见 tokens.output_budget）。
@@ -580,6 +581,14 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
                            focus=focus, budget_chars=context_budget, evidence=evidence)
     # 把提炼结果切成稳定/易变两块：契约+签名表稳定（可命中缓存），焦点源码+证据易变
     head, _, tail = ctx.partition("# 焦点符号完整源码")
+    # §13.4 第 5 步：把跨轮记忆前置进稳定前缀（命中缓存、让远端越用越强）
+    try:
+        from . import memory as _mem
+        _mem_prefix = _mem.MemoryStore(Path(ws)).render_prefix()
+        if _mem_prefix:
+            head = _mem_prefix + "\n\n" + head
+    except Exception:                            # noqa: BLE001
+        pass
     chunks = [
         _layout.Chunk("a_stable_context", head, True),
         _layout.Chunk("z_focus_and_evidence",
@@ -593,6 +602,13 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
         req_block = (req_block + "\n\n" + workingset).strip()
     prompt = AUTHOR_PROMPT.format(protocol=protocol.render("files"), context=ctx,
                                   requirements=req_block)
+    # §13.4 第 3 步：开启工具循环时，把只读工具说明追加给远端（它可发 <tool> 调用）
+    if tool_loop:
+        try:
+            from . import remotetools as _rtl
+            prompt = prompt + "\n\n" + _rtl.tool_loop_guide()
+        except Exception:                        # noqa: BLE001
+            pass
     last = evidence
     issues: list[dict] = []
     _seen_evidence: set[str] = set()                # 已用过的失败证据（防止同证据反复刺激）

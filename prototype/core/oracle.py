@@ -262,3 +262,227 @@ def as_feedback(res: dict) -> str:
     if not res["divergences"]:
         lines.append(f"- {res['summary']}")
     return "\n".join(lines)[:600]
+
+
+# ================================================================== oracle 升级（§13.4 第 2 步）
+# 把「验收 oracle」从「只判过示例」升级为：性质测试 / 复杂度预算 / e2e 业务流 / 变异杀伤率
+# 当硬判据。原因（开发文档 §12）：oracle 只能判「过示例」→ 刺激越多越贴示例（Goodhart），
+# A 主张就停在小模块生成器。升级后，能被测量的能力才被奖励。
+
+_ALLOWED_PROP_NODES = (
+    ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare, ast.Name,
+    ast.Constant, ast.List, ast.Tuple, ast.Call, ast.Load, ast.And, ast.Or,
+    ast.Not, ast.USub, ast.UAdd, ast.Add, ast.Sub, ast.Mult, ast.Div,
+    ast.FloorDiv, ast.Mod, ast.Pow, ast.Eq, ast.NotEq, ast.Lt, ast.LtE,
+    ast.Gt, ast.GtE, ast.In, ast.NotIn,
+)
+_SAFE_BUILTINS = {"len", "abs", "min", "max", "sorted", "bool", "int", "float", "str", "sum"}
+
+
+def _safe_eval_bool(expr: str, ns: dict) -> bool:
+    """在受限命名空间里安全地求一个布尔性质表达式（只允许比较/算术/白名单内建）。"""
+    tree = ast.parse(expr, mode="eval")
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            if not (isinstance(f, ast.Name) and f.id in _SAFE_BUILTINS):
+                raise ValueError(f"性质表达式不允许调用 {getattr(f, 'id', f)!r}")
+        elif not isinstance(n, _ALLOWED_PROP_NODES):
+            raise ValueError(f"性质表达式含不允许的语法：{type(n).__name__}")
+    return bool(eval(compile(tree, "<prop>", "eval"), {"__builtins__": {}}, ns))
+
+
+def _invoke(ws: Path, module: str, func: str, args: list[str]) -> dict:
+    """在沙箱里实调 module.func(*args)，把返回值 JSON 化回传（供性质测试断言）。"""
+    values, bad = [], []
+    for a in args:
+        try:
+            values.append(ast.literal_eval(normalize_literal(a)))
+        except Exception:
+            bad.append(repr(a))
+    if bad:
+        return {"ok": False, "error_type": "SpecError", "error": f"非法参数 {bad}", "value": None}
+    payload = json.dumps(values, ensure_ascii=False)
+    code = (
+        "import json, sys\n"
+        "sys.path.insert(0, '.')\n"
+        f"import {module} as _m\n"
+        f"_f = getattr(_m, {func!r})\n"
+        f"_args = json.loads({json.dumps(payload)})\n"
+        "try:\n"
+        "    _r = _f(*_args)\n"
+        "    print('RESULT::' + json.dumps({'v': _r}, ensure_ascii=False, default=str))\n"
+        "except Exception as _e:\n"
+        "    print('RAISED::' + type(_e).__name__ + '::' + str(_e)[:200])\n"
+    )
+    try:
+        sb = tools.sandbox(ws)
+        p = subprocess.run(["python", "-c", code], cwd=str(ws), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=TIMEOUT, env=sb.env())
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error_type": "Timeout", "error": f"调用超时 {TIMEOUT}s", "value": None}
+    out = (p.stdout or "") + (p.stderr or "")
+    for line in out.splitlines():
+        if line.startswith("RESULT::"):
+            return {"ok": True, "error_type": None, "error": "", "value": line[len("RESULT::"):]}
+        if line.startswith("RAISED::"):
+            _, et, msg = (line.split("::", 2) + ["", ""])[:3]
+            return {"ok": False, "error_type": et, "error": msg, "value": None}
+    return {"ok": False, "error_type": "NoOutput",
+            "error": (out.strip().splitlines() or ["(无输出)"])[-1][:200], "value": None}
+
+
+def _run_property(ws: Path, module: str, prop: dict) -> tuple[bool, str]:
+    """实跑性质测试：对每组样本调 func，把返回值绑到 r、参数绑到 x0..，断言 expect。"""
+    func = str(prop.get("func") or "")
+    samples = prop.get("samples") or []
+    expect = str(prop.get("expect") or "").strip()
+    if not func or not expect:
+        return False, "性质测试缺 func 或 expect"
+    for args in samples:
+        inv = _invoke(ws, module, func, [str(a) for a in args])
+        if not inv["ok"]:
+            return False, f"{func}{tuple(args)} 调用异常（{inv['error_type']}），性质无法断言"
+        try:
+            val = json.loads(inv["value"])["v"]
+        except Exception:
+            val = inv["value"]
+        ns: dict = {"r": val}
+        for j, a in enumerate(args):
+            try:
+                ns[f"x{j}"] = ast.literal_eval(str(a))
+            except Exception:
+                ns[f"x{j}"] = str(a)
+        try:
+            ok = _safe_eval_bool(expect, ns)
+        except Exception as exc:
+            return False, f"性质表达式无法求值：{expect}（{exc}）"
+        if not ok:
+            return False, f"{func}{tuple(args)} 违反性质「{expect}」（实测 r={val!r}）"
+    return True, f"{func} 通过 {len(samples)} 组性质样本（{expect}）"
+
+
+def _level_default(criterion: str, lv: str) -> bool:
+    """某判据在本级是否默认开启。显式开关（spec 里的同名键）优先级更高。"""
+    if criterion in ("computational", "property"):
+        return True
+    if criterion == "complexity_check":
+        return lv in ("M", "L", "XL")
+    if criterion == "e2e_check":
+        return lv in ("M", "L", "XL")
+    if criterion == "mutation_check":
+        return lv in ("L", "XL")
+    return False
+
+
+def evaluate(ws: Path, spec: dict, level: str = "S") -> dict:
+    """oracle 升级后的统一硬判据入口。
+
+    spec 可含：
+      module/path        ：目标模块（path 缺省为 module.py）
+      checks             ：(已有) 计算校验的检查列表
+      properties         ：[{func, samples:[[..]], expect: "r >= 0"}] 性质测试
+      complexity_check   ：bool 覆盖默认（M+ 默认开）
+      e2e_check          ：bool 覆盖默认（M+ 默认开）
+      mutation_check     ：bool 覆盖默认（L+ 默认开）
+      complexity          ：{max_complexity,max_depth,max_lines} 覆盖默认阈值
+
+    返回 {passed, level, module, checks[], failed[], skipped[]}。
+    约定（与 docs/25 一致）：测不了 → skipped（不判红也不假绿）；实测不达标 → failed（硬红）。
+    """
+    ws = Path(ws)
+    module = str(spec.get("module") or "").strip()
+    path = str(spec.get("path") or (f"{module}.py" if module else "")).strip()
+    lv = str(level).upper()
+    res = {"passed": True, "level": lv, "module": module,
+           "checks": [], "failed": [], "skipped": []}
+
+    def _want(crit: str) -> bool:
+        if crit in spec and isinstance(spec[crit], bool):
+            return spec[crit]
+        return _level_default(crit, lv)
+
+    # 1) 计算校验（已有能力，永远开）
+    if spec.get("checks"):
+        c = check(ws, {"module": module, "checks": spec["checks"]})
+        ok = not c["divergences"]
+        res["checks"].append({"criterion": "computational", "ok": ok, "detail": c["summary"]})
+        if not ok:
+            res["passed"] = False
+            res["failed"].append("computational: " + c["summary"])
+
+    # 2) 性质测试（永远是硬判据，便宜且确定性）
+    for prop in (spec.get("properties") or []):
+        ok, detail = _run_property(ws, module, prop)
+        res["checks"].append({"criterion": "property", "ok": ok, "detail": detail})
+        if not ok:
+            res["passed"] = False
+            res["failed"].append("property: " + detail)
+
+    # 3) 复杂度预算（M+ 硬判据；纯 ast，零依赖）
+    if _want("complexity_check") and path:
+        try:
+            from . import gates as _gates
+            lim = spec.get("complexity") if isinstance(spec.get("complexity"), dict) else None
+            qm = _gates.gate_quality_metrics(
+                ws, [path], level=lv,
+                max_complexity=int((lim or {}).get("max_complexity", 0)) or 0,
+                max_depth=int((lim or {}).get("max_depth", 0)) or 0,
+                max_lines=int((lim or {}).get("max_lines", 0)) or 0)
+            res["checks"].append({"criterion": "complexity", "ok": qm.ok, "detail": qm.detail})
+            if not qm.ok:
+                res["passed"] = False
+                res["failed"].append("complexity: " + qm.detail)
+        except Exception as exc:                        # noqa: BLE001
+            res["skipped"].append(f"complexity: 引擎未跑起来（{type(exc).__name__}）")
+
+    # 4) e2e 业务流（M+ 硬判据；跑不通删测试，不污染仓库）
+    if _want("e2e_check"):
+        try:
+            from . import e2e as _e2e
+            er = _e2e.write(ws, {}, requirement=str(spec.get("requirement") or ""),
+                            fname=f".sixcoder/_oracle_e2e_{module or 'mod'}.py", run=True)
+            if er.get("skipped"):
+                res["skipped"].append("e2e: " + str(er.get("reason", "跳过")))
+            else:
+                ok = bool(er.get("ok"))
+                res["checks"].append({"criterion": "e2e", "ok": ok,
+                                      "detail": _e2e.as_feedback(er)})
+                if not ok:
+                    res["passed"] = False
+                    res["failed"].append("e2e: " + str(er.get("reason", "业务流未通过")))
+        except Exception as exc:                        # noqa: BLE001
+            res["skipped"].append(f"e2e: 引擎未跑起来（{type(exc).__name__}）")
+
+    # 5) 变异杀伤率（L+ 硬判据；无 git diff 退化为全文件并如实说明）
+    if _want("mutation_check"):
+        try:
+            from . import arch as _arch
+            mr = _arch.gate_mutation_changed(ws, level=lv)
+            if mr.evidence_ref in ("skipped", "no-mutants") or "skip" in (mr.evidence_kind or ""):
+                res["skipped"].append("mutation: " + mr.detail)
+            else:
+                ok = mr.ok
+                res["checks"].append({"criterion": "mutation", "ok": ok, "detail": mr.detail})
+                if not ok:
+                    res["passed"] = False
+                    res["failed"].append("mutation: " + mr.detail)
+        except Exception as exc:                        # noqa: BLE001
+            res["skipped"].append(f"mutation: 引擎未跑起来（{type(exc).__name__}）")
+
+    return res
+
+
+def evaluate_feedback(res: dict) -> str:
+    """把 oracle 升级结果转成给模型的窄反馈（≤600 字）。"""
+    if res.get("passed"):
+        if res.get("skipped"):
+            return "oracle 升级版：全部可量化判据通过；" + "；".join(res["skipped"][:2])
+        return "oracle 升级版：全部硬判据通过"
+    lines = ["【oracle 升级版（引擎实测，不是推理）未通过】"]
+    for f in res["failed"][:4]:
+        lines.append(f"- {f}")
+    if res.get("skipped"):
+        lines.append("- 注：" + "；".join(res["skipped"][:2]))
+    return "\n".join(lines)[:600]

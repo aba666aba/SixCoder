@@ -246,16 +246,22 @@ def _dict_keys_in_text(text: str) -> set[str]:
     return out
 
 
-def inspect(ws: Path, contracts: dict[str, contract_mod.Contract]) -> dict:
+def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
+            specs: dict | None = None) -> dict:
     """逐模块体检：符号状态 + 契约判据通过情况。
 
-    两条诚实性原则（实测教训）：
-    1. 一个函数若**没有任何机械判据**（契约没给示例、参数只有 object/conn），
-       不再默认算"验收通过"——过去正是这条默认值让 store 模块"8/8"却是假的；
-    2. conn 类参数没有样例可造，必须追加"写→读"端到端判据（真 sqlite），
-       否则整个数据库模块等于没验收。
+    specs: 可选 {path: oracle_spec} —— §13.4 第 2 步 oracle 升级的硬判据规格。
+    提供时，每个模块的验收会并入 oracle.evaluate 的计算校验/性质/复杂度/e2e/变异结果，
+    实测不达标的部分作为硬失败计入 fails（整模块判红）。
     """
+
     state: dict = {}
+    # 工作区实测规模（oracle 升级的判据开关按级别走）
+    try:
+        from . import scale as _scale_i
+        _level = _scale_i.resolve("", Path(ws))["level"]
+    except Exception:                            # noqa: BLE001
+        _level = "S"
     # 共享文件的示例（同一个 csv 先写后读）逐函数跑必然失败 → 逐函数时跳过，
     # 由模块级 seq 判据按顺序覆盖（见 props.file_pipeline_checks）。
     _shared = props.shared_artifact_exprs(contracts)
@@ -469,6 +475,20 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract]) -> dict:
         missing = [f.name for f in c.funcs if f.name not in have]
         if missing:
             fails.append(f"契约函数缺失：{', '.join(missing)}（文件里根本没有这些函数）")
+        # === §13.4 第 2 步：oracle 升级（HARD 判据）===
+        # 提供 specs 时，把 oracle.evaluate 的实测结果并入本模块验收：
+        # 计算校验/性质/复杂度/e2e/变异中任一可量化的不达标 → 整模块硬红。
+        if specs and path in specs:
+            try:
+                from . import oracle as _oracle
+                _or = _oracle.evaluate(ws, specs[path], _level)
+                for _f in _or.get("failed") or []:
+                    fails.append(f"oracle[{_or.get('module') or path}]: {_f}")
+                if _or.get("skipped"):
+                    if "oracle 部分判据未能量化（如实说明，不判红）" not in notes:
+                        notes.append("oracle 部分判据未能量化（如实说明，不判红）")
+            except Exception:                        # noqa: BLE001
+                pass
         # docstring 是契约说明的**残句**：引擎以前把 doc 切到 60/80 字，残句还留在交付物里。
         # 实测代价：pow 的"…不支持分数指数与负数底数的非整数次幂"被切成"…负数底"，
         # 远端照着残句写成"负数底一律 ValueError"（契约只排除负数底的**非整数**次幂）。

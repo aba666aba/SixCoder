@@ -330,7 +330,7 @@ def gate_mode(gate: str, level: str) -> str:
 PROTECTED_PATTERNS: tuple[str, ...] = (
     "**/auth*", "**/*auth*.py", "**/*security*.py", "**/config/deploy*",
     "**/*.ci.yml", "**/.github/workflows/*", "**/AGENTS.md", "**/mission.md",
-    "**/factory-rules.md", "**/docs/2[0-9]-*.md",
+    "**/factory-rules.md", "**/docs/2[0-9]*-*.md",
 )
 
 
@@ -345,6 +345,38 @@ def protected_hits(ws: Path, paths: list[str]) -> list[str]:
                 out.append(str(rel))
                 break
     return sorted(set(out))
+
+
+def guard_write(ws: Path, rel: str, level: str | None = None) -> tuple[bool, str]:
+    """远端工具写盘前的统一守卫（§13.4 第 4 步：受保护区对远端只读）。
+
+    # 依据：开发文档 §13.4 第 4 步 + §11.2 L2——测试/契约/治理文件对远端工具必须只读，
+    # 否则「删测试」是最省力的变绿方式。PROTECTED_PATTERNS（auth/security/deploy/AGENTS.md/
+    # docs/2xxx 治理文档）命中即拒，杜绝远端绕过本地验收改判据。
+    返回 (allowed, reason)。命中受保护区时：本级 block 则拒绝，advisory 只告警放行。
+    level 缺省按工作区实测规模取（L 级以上才真正 block）。
+
+    为什么是「写路径」独自守卫：company._author_round 已经在模块级拦过一次，
+    但远端工具循环（remotetools）是另一条独立写路径，必须自己再查一遍，
+    不能假设下游已检查（实测：tools.write_file / author 写盘处都没查 protected_hits）。
+    """
+    if level is None:
+        try:
+            level = resolve("", Path(ws))["level"]
+        except Exception:                        # noqa: BLE001
+            level = "S"
+    mode = gate_mode("protected_zones", level)
+    hits = protected_hits(ws, [rel])
+    if hits:
+        if mode == "block":
+            return False, f"受保护区：{hits[0]} 不允许自动修改（{level} 级 block）"
+        return True, f"受保护区告警（{hits[0]}，但本级 {level} 为 advisory，放行）"
+    return True, ""
+
+
+def is_protected(rel: str) -> bool:
+    """仅按模式判断一个相对路径是否落在受保护区（不依赖工作区级别）。"""
+    return bool(protected_hits(None, [rel]))
 
 
 def upgrade_hint(measured: dict, level: str) -> dict:

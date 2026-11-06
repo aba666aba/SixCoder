@@ -525,6 +525,28 @@ def make_demo():
     return {"repo": str(p), "state": probe.classify(p)["state"]}
 
 
+# ---------------------------------------------------------------- 远端工具循环（§13.4 第 3/4 步）
+class RemoteToolReq(BaseModel):
+    """远端（或前端）调用工具循环的请求：在给定工作区跑一轮只读工具往返。"""
+    ws: str                      # 工作区绝对路径
+    instruction: str = ""        # 给远端的指令（会作为首条 user 消息）
+    level: str = "S"             # 规模级别（决定受保护区 block 策略）
+    max_rounds: int = 6          # 工具往返上限
+
+
+@app.post("/v1/remote/tool")
+def remote_tool(req: RemoteToolReq):
+    ws = Path(req.ws)
+    if not ws.exists():
+        raise HTTPException(400, f"工作区不存在：{req.ws}")
+    # 真实运行：complete_fn 缺省走 remote.complete（需已配置远端 API）。
+    # 受保护区（测试/契约/治理）对工具循环只读，写入在 _tool_allow_write 里被拒。
+    from core import remotetools
+    loop = remotetools.ToolLoop(ws, level=req.level, max_rounds=req.max_rounds)
+    result = loop.run(req.instruction)
+    return result
+
+
 # ---------------------------------------------------------------- 任务
 
 @app.post("/v1/tasks")

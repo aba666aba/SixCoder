@@ -1484,7 +1484,8 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                   budget_left: float = 600.0, dec_used: dict | None = None,
                   write_used: dict | None = None, write_per_tier: int = 0,
                   requirement: str = "", start_tier: int = 0,
-                  effort_mode: str = "ladder") -> dict:
+                  effort_mode: str = "ladder",
+                  oracle_specs: dict | None = None) -> dict:
     """**新路径（唯一）**：按模块整文件生成 → 本地全判据验收 → 窄证据重试 → 失败升档。
 
     旧路径（逐符号本地写 + 远端救单）已废弃：它把最弱的一环放在写代码的位置上，
@@ -1522,7 +1523,8 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
         行级补丁这条路一旦真用上就 NameError（用静态未定义名字检查抓到的）。
         """
         try:
-            st = iterate.inspect(ws, {path: contracts.get(path)})
+            st = iterate.inspect(ws, {path: contracts.get(path)},
+                                 specs=(oracle_specs or {}))
             cur = st.get(path) or {}
             total = int(cur.get("funcs") or 0)
             verified = int(cur.get("verified") or 0)
