@@ -335,11 +335,30 @@ def usage_summary(task_id: str = "") -> dict:
     # 实测把 GET /v1/settings/remote 拖到超时、前端配置面板根本打不开。
     model_steps = {str(s.get("model") or ""): s
                    for s in ladder() if str(s.get("model") or "").strip()}
+    # 价格表：**每个出现过的模型只查一次**。换过厂商后，用量库里的历史模型全都
+    # 不在当前阶梯里，cost_cny(None) 会逐行调 pricing_for() → 重读 settings.json，
+    # 实测 2112 行产生 16895 次 IO / 9.6s，把设置面板拖到超时。
+    # 口径不变：没有档案的历史模型仍不分闲忙、统一用 pricing_for 的顶层价。
+    _prices: dict[str, dict] = {}
+
+    def prices_for(model: str) -> dict:
+        if model not in _prices:
+            step = model_steps.get(model)
+            if step and step.get("pricing"):
+                _prices[model] = step["pricing"]
+            else:
+                p = pricing_for(model)
+                same = {k: p.get(k) for k in ("in_miss", "in_hit", "out")}
+                _prices[model] = {"offpeak": same, "peak": same}
+        return _prices[model]
 
     def cost_of(r: dict) -> float:
-        step = model_steps.get(r.get("model") or "")
-        return cost_cny(step, r["prompt_tokens"] or 0, r["cache_hit_tokens"] or 0,
-                        r["completion_tokens"] or 0, offpeak=bool(r.get("offpeak")))
+        price = prices_for(r.get("model") or "")[
+            "offpeak" if r.get("offpeak") else "peak"]
+        miss = max(0, int(r["prompt_tokens"] or 0) - int(r["cache_hit_tokens"] or 0))
+        return (miss / 1e6 * float(price.get("in_miss") or 0)
+                + int(r["cache_hit_tokens"] or 0) / 1e6 * float(price.get("in_hit") or 0)
+                + int(r["completion_tokens"] or 0) / 1e6 * float(price.get("out") or 0))
 
     def agg(subset: list[dict]) -> dict:
         prompt = sum(r["prompt_tokens"] or 0 for r in subset)
@@ -360,11 +379,10 @@ def usage_summary(task_id: str = "") -> dict:
     # 缓存省下来的钱：命中部分若按未命中价计会多花多少
     saved = 0.0
     for r in rows:
-        step = model_steps.get(r.get("model") or "")
-        if not step:
+        if not model_steps.get(r.get("model") or ""):
             continue
-        prices = step.get("pricing") or {}
-        price = prices.get("offpeak" if r.get("offpeak") else "peak") or {}
+        price = prices_for(r.get("model") or "")[
+            "offpeak" if r.get("offpeak") else "peak"]
         hit = r["cache_hit_tokens"] or 0
         saved += hit / 1e6 * (float(price.get("in_miss") or 0) - float(price.get("in_hit") or 0))
     total["cache_saved_cny"] = round(saved, 6)
