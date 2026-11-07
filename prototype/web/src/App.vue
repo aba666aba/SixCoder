@@ -212,14 +212,19 @@ async function clearRemoteKey() {
   } catch (e) { errMsg.value = '[FAIL] ' + e.message }
 }
 
-/* 价目表：改成跟着模型档案走（价格在档案里，人民币口径），这里只留闲时窗口 */
-const windowForm = reactive({ start: '00:30', end: '08:30', tz: 'UTC' })
+/* 闲时判定：高峰时段之外都算闲时（半价）。
+   注意必须写 peak_window —— is_offpeak() 读的就是它；
+   旧界面写 offpeak_window 是死字段，填了不生效。 */
+const windowForm = reactive({ range1: '09:00-12:00', range2: '14:00-18:00',
+                              weekdays_only: true, tz: 'Asia/Shanghai' })
 
 function loadPricing(d) {
-  const w = (d && d.remote && d.remote.offpeak_window) || {}
-  windowForm.start = w.start || '00:30'
-  windowForm.end = w.end || '08:30'
-  windowForm.tz = w.tz || 'UTC'
+  const w = (d && d.remote && d.remote.peak_window) || {}
+  const rs = w.ranges || ['09:00-12:00', '14:00-18:00']
+  windowForm.range1 = rs[0] || ''
+  windowForm.range2 = rs[1] || ''
+  windowForm.weekdays_only = w.weekdays_only !== false
+  windowForm.tz = w.tz || 'Asia/Shanghai'
 }
 
 /* 当前模型的连接参数一起保存（模型名 / 接口 / 协议 / key） */
@@ -233,22 +238,26 @@ async function saveCurrentModel() {
 
 /* 切换当前模型（单模型：切换 = 整条阶梯换成它） */
 async function useProfile(p) {
+  if (p._draft) { errMsg.value = '请先保存这张新档案，再设为当前模型'; return }
   try {
     const d = await api('/v1/settings/remote', { method: 'POST',
       body: JSON.stringify({ active_model: p.id }) })
     remote.value = d
     await loadRemote()
-    errMsg.value = `当前模型已切换为 ${p.id}（思考强度仍由系统自动选）`
+    errMsg.value = `当前模型已切换为 ${p.label || p.id}（思考强度仍由系统自动选）`
   } catch (e) { errMsg.value = '[FAIL] ' + e.message }
 }
 
 async function savePricingWindow() {
+  const ranges = [windowForm.range1.trim(), windowForm.range2.trim()].filter(Boolean)
   try {
     const d = await api('/v1/settings/remote', { method: 'POST',
-      body: JSON.stringify({ offpeak_window: { ...windowForm } }) })
+      body: JSON.stringify({ peak_window: {
+        ranges, weekdays_only: !!windowForm.weekdays_only, tz: windowForm.tz,
+      } }) })
     remote.value = d
     loadPricing(d)
-    errMsg.value = '闲时窗口已保存'
+    errMsg.value = '闲时时段已保存（高峰之外均为半价）'
   } catch (e) { errMsg.value = '[FAIL] ' + e.message }
 }
 
@@ -564,65 +573,150 @@ const night = reactive({ hours: 6, plan: '', taskId: '', busy: false, info: null
 let nightEs = null
 const isClientMode = computed(() => currentMode.value?.id === 'client')
 
-/* ---------------- 模型档案（八档阶梯，可增删改） ---------------- */
+/* ---------------- 远端模型：按协议分两类，列表 → 点开详情 ----------------
+   DeepSeek 类：四档思考强度（off / low / high / max），走思考强度切换机制。
+   OpenAI 兼容类：只提供通用框架，固定单档（不切思考强度）。
+--------------------------------------------------------------------------- */
 const remoteModels = ref([])
 const remoteLadder = ref([])
 const escalateAfter = ref(2)
+const openProfileId = ref('')            // 一次只展开一个，避免长列表刷屏
+
+const EFFORT_DEFS = [
+  { v: 'none', label: 'off', hint: '不思考（简单样板 / 校验 / 日志）' },
+  { v: 'low', label: 'low', hint: '轻思考' },
+  { v: 'high', label: 'high', hint: '深思考（写代码常规档）' },
+  { v: 'max', label: 'max', hint: '最深（规格 / 方案 / 卡住时升档）' },
+]
+
+/* compat 为空 = 跟随全局默认（deepseek）；显式 openai = OpenAI 兼容类 */
+function isOpenAI(p) { return String(p?.compat || '').toLowerCase() === 'openai' }
+function kindLabel(p) { return isOpenAI(p) ? 'OpenAI 兼容' : 'DeepSeek' }
+function effortSummary(p) {
+  if (isOpenAI(p)) return '单档（通用框架）'
+  const n = (p.efforts || []).length
+  return n ? `${n} 档：${(p.efforts || []).map(e => e === 'none' ? 'off' : e).join(' / ')}` : '未设档位'
+}
+
+function blankPricing() {
+  return { offpeak: { in_miss: 0, in_hit: 0, out: 0 },
+           peak: { in_miss: 0, in_hit: 0, out: 0 } }
+}
+
+function normalizeProfile(p) {
+  const pr = p.pricing || {}
+  const block = (b) => ({ in_miss: Number(b?.in_miss) || 0,
+                          in_hit: Number(b?.in_hit) || 0,
+                          out: Number(b?.out) || 0 })
+  // 后端已脱敏：只有 key_configured / key_masked，没有明文 api_key
+  return {
+    ...p,
+    _draft: false,
+    keyInput: '',                        // 新输入的 key；留空 = 不修改已有 key
+    efforts: isOpenAI(p) ? ['none'] : (p.efforts || []),
+    temperature: Number(p.temperature ?? 0.2),
+    pricing: { offpeak: block(pr.offpeak), peak: block(pr.peak || pr.offpeak) },
+  }
+}
 
 async function loadProfiles() {
   try {
     const d = await api('/v1/settings/remote/models')
-    remoteModels.value = (d.models || []).map((p) => ({
-      ...p,
-      effortsText: (p.efforts || []).join(','),
-      pricing: p.pricing || { offpeak: { in_miss: 0, in_hit: 0, out: 0 },
-                              peak: { in_miss: 0, in_hit: 0, out: 0 } },
-    }))
+    remoteModels.value = (d.models || []).map(normalizeProfile)
     remoteLadder.value = d.ladder || []
     escalateAfter.value = d.escalate_after ?? 2
   } catch (e) { /* 设置没打开时不必打扰用户 */ }
 }
 
+const dsModels = computed(() => remoteModels.value.filter((p) => !isOpenAI(p)))
+const oaModels = computed(() => remoteModels.value.filter((p) => isOpenAI(p)))
+const modelGroups = computed(() => [
+  { key: 'deepseek', title: 'DeepSeek', tag: '四档思考强度',
+    desc: 'off / low / high / max，系统按难度自动切、失败时逐档升。',
+    items: dsModels.value },
+  { key: 'openai', title: 'OpenAI 兼容', tag: '单档通用框架',
+    desc: '只提供基础请求能力，固定一个档位，不做思考强度切换。',
+    items: oaModels.value },
+])
+
+function isCurrent(p) { return (remote.value?.remote?.active_model || '') === p.id }
+function toggleProfile(p) { openProfileId.value = openProfileId.value === p.id ? '' : p.id }
+function priceLine(p) {
+  const o = p.pricing?.offpeak || {}
+  return `¥${o.in_miss ?? 0} / ¥${o.in_hit ?? 0} / ¥${o.out ?? 0}`
+}
+
+function toggleEffort(p, v) {
+  if (isOpenAI(p)) return                 // OpenAI 兼容类固定单档，不允许切
+  const cur = new Set(p.efforts || [])
+  if (cur.has(v)) {
+    if (cur.size <= 1) { errMsg.value = '至少要保留一个档位'; return }
+    cur.delete(v)
+  } else cur.add(v)
+  p.efforts = EFFORT_DEFS.filter((d) => cur.has(d.v)).map((d) => d.v)
+}
+
+function setKind(p, openai) {
+  p.compat = openai ? 'openai' : 'deepseek'
+  p.efforts = openai ? ['none'] : ['none', 'low', 'high', 'max']
+}
+
 async function saveProfile(p) {
+  if (!String(p.model || '').trim()) { errMsg.value = '模型名不能为空'; return }
+  const body = {
+    id: p.id, model: p.model, label: p.label || p.id,
+    base_url: p.base_url || '', compat: p.compat || '',
+    priority: Number(p.priority), enabled: !!p.enabled,
+    // OpenAI 兼容端点不认 reasoning_effort，强制单档
+    efforts: isOpenAI(p) ? ['none'] : (p.efforts || []),
+    max_output_tokens: Number(p.max_output_tokens),
+    temperature: Number(p.temperature),
+    pricing: p.pricing,
+  }
+  // 留空不传：后端 upsert 收到空 api_key 会把已存的 key 清掉
+  if (p.keyInput && p.keyInput.trim()) body.api_key = p.keyInput.trim()
   try {
-    const d = await api('/v1/settings/remote/models', { method: 'POST', body: JSON.stringify({
-      id: p.id, model: p.model, label: p.label, priority: Number(p.priority),
-      enabled: !!p.enabled, efforts: (p.effortsText || '').split(',').map((s) => s.trim()).filter(Boolean),
-      max_output_tokens: Number(p.max_output_tokens), pricing: p.pricing,
-    }) })
+    const d = await api('/v1/settings/remote/models', { method: 'POST', body: JSON.stringify(body) })
     remoteLadder.value = d.ladder || []
-    errMsg.value = `模型档案「${p.id}」已保存，下一次请求立即生效`
-    loadRemote()
-  } catch (e) { errMsg.value = e.message }
-}
-
-async function addProfile() {
-  const id = window.prompt('新档案 id（短名字，例如 pro2）')
-  if (!id) return
-  const model = window.prompt('模型名（DeepSeek 目前只认 deepseek-flash / deepseek-v4-pro）',
-                              'deepseek-flash')
-  if (!model) return
-  try {
-    const d = await api('/v1/settings/remote/models', { method: 'POST', body: JSON.stringify({
-      id, model, label: id, priority: 90, enabled: true,
-      efforts: ['none', 'low', 'high', 'max'], max_output_tokens: 8000,
-    }) })
-    remoteModels.value = d.models || []
-    remoteLadder.value = d.ladder || []
+    p.keyInput = ''
+    p._draft = false
+    errMsg.value = `模型「${p.label || p.id}」已保存，下一次请求立即生效`
     await loadProfiles()
-    errMsg.value = `已新增模型档案「${id}」`
-  } catch (e) { errMsg.value = e.message }
+    await loadRemote()
+  } catch (e) { errMsg.value = '[FAIL] ' + e.message }
 }
 
-async function deleteProfile(id) {
-  if (!window.confirm(`删除模型档案「${id}」？删完阶梯里就没有它了。`)) return
+function addProfile(openai) {
+  const id = `${openai ? 'oai' : 'ds'}-${Date.now().toString(36).slice(-5)}`
+  const p = normalizeProfile({
+    id, label: '', model: '', compat: openai ? 'openai' : 'deepseek',
+    base_url: openai ? '' : 'https://api.deepseek.com', enabled: true,
+    priority: 90, efforts: openai ? ['none'] : ['none', 'low', 'high', 'max'],
+    max_output_tokens: 8000, temperature: 0.2, pricing: blankPricing(),
+    key_configured: false, key_masked: '',
+  })
+  p._draft = true
+  remoteModels.value = [...remoteModels.value, p]
+  openProfileId.value = id
+  errMsg.value = `已加一张 ${kindLabel(p)} 空档案：填好模型名后点「保存」才会写入设置`
+}
+
+async function deleteProfile(p) {
+  if (p._draft) {
+    remoteModels.value = remoteModels.value.filter((x) => x !== p)
+    openProfileId.value = ''
+    return
+  }
+  if (!window.confirm(`删除模型「${p.label || p.id}」？删完阶梯里就没有它了。`)) return
   try {
-    const d = await api(`/v1/settings/remote/models/${encodeURIComponent(id)}`,
+    const d = await api(`/v1/settings/remote/models/${encodeURIComponent(p.id)}`,
                         { method: 'DELETE' })
     remoteModels.value = d.models || []
     remoteLadder.value = d.ladder || []
-    errMsg.value = `已删除「${id}」`
-  } catch (e) { errMsg.value = e.message }
+    if (openProfileId.value === p.id) openProfileId.value = ''
+    errMsg.value = `已删除「${p.id}」`
+    await loadRemote()
+  } catch (e) { errMsg.value = '[FAIL] ' + e.message }
 }
 
 function nightBrief(p) {
@@ -1622,57 +1716,187 @@ onUnmounted(() => {
           <button class="ghost tiny" @click="showRemoteModal = false">关闭 ✕</button>
         </div>
         <div class="modal-body">
-          <div class="dim" style="font-size:12px;margin-bottom:10px">
-            <b>一次只用这一个模型。</b>下面是它的连接参数；思考强度不用你填 —— 系统按需求自动挑。
-            key 只存本机设置文件，界面只显示掩码。
+          <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.6">
+            下面是<b>已保存的模型</b>，按协议分成两类。点开任意一个就能改它的连接、参数、key、价格与闲时设置。
+            <b>一次运行只用它标着「当前」的那一个</b>；其余只是存着备用。key 只存本机设置文件，界面只显示掩码。
           </div>
 
-          <!-- ① 当前模型：唯一的连接参数填写处 -->
-          <div class="panel-title">当前模型</div>
-          <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
-            <span class="dim" style="font-size:11px;width:64px">模型名</span>
-            <input v-model="remoteForm.model" placeholder="deepseek-flash" style="width:190px" />
-            <span class="dim" style="font-size:11px;width:48px">接口</span>
-            <input v-model="remoteForm.base_url" placeholder="https://api.deepseek.com" style="flex:1" />
-          </div>
-          <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
-            <span class="dim" style="font-size:11px;width:64px">API key</span>
-            <input v-model="remoteForm.api_key" type="password" placeholder="sk-...（留空则不修改）"
-                   style="flex:1" @keyup.enter="saveCurrentModel()" />
-            <button class="ghost tiny" @click="revealRemoteKey()">{{ remoteForm.api_key ? '隐藏' : '显示' }}</button>
-            <button class="ghost tiny" @click="clearRemoteKey()">清除</button>
-          </div>
-          <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
-            <span class="dim" style="font-size:11px;width:64px">协议</span>
-            <select v-model="remoteForm.compat" style="width:190px">
-              <option value="deepseek">DeepSeek（默认）</option>
-              <option value="openai">OpenAI 兼容</option>
-            </select>
-            <span class="dim" style="font-size:11px">非 DeepSeek 端点选「OpenAI 兼容」；普通 chat 模型把该档案档位设为 none</span>
-          </div>
-          <div class="row" style="gap:8px;align-items:center">
-            <button class="primary tiny" @click="saveCurrentModel()">保存当前模型</button>
-            <span class="badge" :class="remote.available ? 'b-ok' : 'b-dim'">
-              {{ remote.available ? '可用' : '未配置' }}</span>
-            <span v-if="remote.reason" class="dim" style="font-size:11.5px">{{ remote.reason }}</span>
+          <!-- ① 已保存的模型：两类分组的卡片列表，点开看完整配置 -->
+          <div class="row" style="gap:8px;align-items:center;margin-bottom:10px">
+            <button class="ghost tiny" @click="addProfile(false)">＋ DeepSeek 模型</button>
+            <button class="ghost tiny" @click="addProfile(true)">＋ OpenAI 兼容模型</button>
             <span class="spacer"></span>
-            <span class="dim mono" style="font-size:11px">
-              key：{{ remote.remote?.key_masked || '—' }}（{{ remote.remote?.key_source || '无' }}）
-            </span>
+            <span class="dim" style="font-size:11px">共 {{ remoteModels.length }} 个</span>
           </div>
 
-          <!-- ② 思考强度：只读，系统自动选 -->
-          <div class="panel-title" style="margin-top:14px">思考强度（系统自动，无需填写）</div>
-          <div class="dim" style="font-size:11.5px;line-height:1.7">
-            当前模型支持的档位：<span class="mono">
-              {{ (remoteLadder || []).map(x => x.effort).join(' → ') || '（未配置）' }}</span><br />
-            选档规则：<b>规格/方案 → 最深一档</b>（决定后面每个模块的对错）；<b>样板/校验/日志/适配 → 不思考</b>；
-            <b>写代码 → 按难度自动挑</b>（依据：依赖数、函数数、契约示例数、历史失败次数、是否还是空桩）。<br />
-            失败时只在<b>同一个模型</b>内升档；升到最深还不过，就是"这个模型到极限了"，换模型由你决定。
+          <div v-for="g in modelGroups" :key="g.key" class="mp-group">
+            <div class="mp-group-head">
+              <b>{{ g.title }}</b>
+              <span class="badge b-acc">{{ g.tag }}</span>
+              <span class="dim" style="font-size:11px">{{ g.items.length }} 个</span>
+              <span class="spacer"></span>
+              <span class="dim" style="font-size:10.5px">{{ g.desc }}</span>
+            </div>
+            <div v-if="!g.items.length" class="dim" style="font-size:11px;padding:6px 2px">
+              这一类还没有保存的模型，点上面的按钮加一个。
+            </div>
+
+            <div v-for="p in g.items" :key="p.id" class="mp-card" :class="{ 'is-open': openProfileId === p.id }">
+              <!-- 卡片头：一眼看清是谁、什么类型、当前用哪个、档位与价格摘要 -->
+              <div class="mp-head" @click="toggleProfile(p)">
+                <span class="mp-caret">{{ openProfileId === p.id ? '▾' : '▸' }}</span>
+                <div class="mp-head-main">
+                  <div class="mp-title">
+                    {{ p.label || p.id }}
+                    <span v-if="isCurrent(p)" class="badge b-ok">当前</span>
+                    <span v-if="p._draft" class="badge b-warn">未保存</span>
+                    <span v-else-if="!p.enabled" class="badge b-dim">停用</span>
+                  </div>
+                  <div class="dim mono" style="font-size:10.5px">
+                    {{ p.id }} · {{ p.model || '（未填模型名）' }}
+                  </div>
+                </div>
+                <div class="mp-head-meta">
+                  <div class="dim" style="font-size:10.5px">{{ effortSummary(p) }}</div>
+                  <div class="mono" style="font-size:10.5px">闲时 ¥{{ priceLine(p) }}</div>
+                </div>
+              </div>
+
+              <!-- 展开：这个模型的全部配置 -->
+              <div v-if="openProfileId === p.id" class="mp-body">
+                <div class="mp-sec">
+                  <div class="mp-sec-t">协议类型</div>
+                  <div class="row" style="gap:8px;margin-bottom:0">
+                    <button class="ghost tiny" :class="{ 'sel': !isOpenAI(p) }" @click="setKind(p, false)">DeepSeek（四档）</button>
+                    <button class="ghost tiny" :class="{ 'sel': isOpenAI(p) }" @click="setKind(p, true)">OpenAI 兼容（单档）</button>
+                    <span class="dim" style="font-size:10.5px">切换会重置档位，改完记得保存</span>
+                  </div>
+                </div>
+
+                <div class="mp-sec">
+                  <div class="mp-sec-t">连接</div>
+                  <div class="mp-grid">
+                    <label><span>显示名</span><input v-model="p.label" placeholder="给这个模型起个名字" /></label>
+                    <label><span>模型名</span><input v-model="p.model" class="mono" placeholder="deepseek-flash / gpt-4o" /></label>
+                    <label style="grid-column:1/-1"><span>请求网址</span>
+                      <input v-model="p.base_url" class="mono" placeholder="https://api.deepseek.com（留空则用默认）" /></label>
+                    <label style="grid-column:1/-1"><span>API key</span>
+                      <input v-model="p.keyInput" type="password" placeholder="sk-...（留空 = 不修改已有 key）" /></label>
+                  </div>
+                  <div class="dim" style="font-size:10.5px;margin-top:4px">
+                    已保存的 key：
+                    <span class="mono">{{ p.key_masked || (p.key_configured ? '已配置' : '未设置（将用全局 key）') }}</span>
+                  </div>
+                </div>
+
+                <div class="mp-sec">
+                  <div class="mp-sec-t">请求参数</div>
+                  <div class="mp-grid">
+                    <label><span>最大输出 token</span>
+                      <input type="number" min="0" v-model.number="p.max_output_tokens" />
+                      <small class="dim">0 = 由引擎按任务规模算</small></label>
+                    <label><span>temperature</span>
+                      <input type="number" min="0" max="2" step="0.1" v-model.number="p.temperature" /></label>
+                    <label><span>优先级</span>
+                      <input type="number" step="1" v-model.number="p.priority" />
+                      <small class="dim">数字小 = 自动挑选时优先</small></label>
+                    <label class="mp-check"><span>启用</span>
+                      <input type="checkbox" v-model="p.enabled" style="width:auto" /></label>
+                  </div>
+                </div>
+
+                <div class="mp-sec">
+                  <div class="mp-sec-t">思考强度</div>
+                  <template v-if="!isOpenAI(p)">
+                    <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:4px">
+                      <label v-for="d in EFFORT_DEFS" :key="d.v" class="mp-effort"
+                             :title="d.hint">
+                        <input type="checkbox" style="width:auto"
+                               :checked="(p.efforts || []).includes(d.v)"
+                               @change="toggleEffort(p, d.v)" />
+                        <span class="mono">{{ d.label }}</span>
+                      </label>
+                    </div>
+                    <div class="dim" style="font-size:10.5px;line-height:1.6">
+                      勾上的档位组成这个模型的阶梯：系统按难度自动挑，同一档连续失败到阈值就升下一档，
+                      升到最深仍不过就停下来交报告。至少要留一个档位。
+                    </div>
+                  </template>
+                  <div v-else class="dim" style="font-size:11px;line-height:1.6">
+                    <span class="badge b-dim">固定单档 off</span>
+                    OpenAI 兼容端点不认 reasoning_effort 多档切换，这里只提供基础请求框架，
+                    不参与思考强度升降。适用于智谱 / 混元 / 其它 OpenAI 兼容服务。
+                  </div>
+                </div>
+
+                <div class="mp-sec">
+                  <div class="mp-sec-t">价格（人民币 / 每百万 token）</div>
+                  <div class="mp-price-t dim">闲时价</div>
+                  <div class="mp-grid3">
+                    <label><span>未命中输入</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.offpeak.in_miss" /></label>
+                    <label><span>命中输入</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.offpeak.in_hit" /></label>
+                    <label><span>输出</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.offpeak.out" /></label>
+                  </div>
+                  <div class="mp-price-t dim">高峰价</div>
+                  <div class="mp-grid3">
+                    <label><span>未命中输入</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.peak.in_miss" /></label>
+                    <label><span>命中输入</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.peak.in_hit" /></label>
+                    <label><span>输出</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.peak.out" /></label>
+                  </div>
+                  <div class="dim" style="font-size:10.5px;margin-top:4px">
+                    价格只用于"算钱"和报告，不影响实际调用。下方「闲时设置」决定哪些时段按闲时价计。
+                  </div>
+                </div>
+
+                <div class="mp-sec">
+                  <div class="mp-sec-t">闲时设置 <span class="dim" style="font-weight:400;font-size:10.5px">（全局共用，改一次对所有模型生效）</span></div>
+                  <div class="row" style="gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+                    <span class="dim" style="font-size:10.5px">高峰时段</span>
+                    <input v-model="windowForm.range1" class="mono" placeholder="09:00-12:00" style="width:110px" />
+                    <input v-model="windowForm.range2" class="mono" placeholder="14:00-18:00" style="width:110px" />
+                    <label class="dim mp-effort" style="font-size:10.5px">
+                      <input type="checkbox" v-model="windowForm.weekdays_only" style="width:auto" /> 仅工作日
+                    </label>
+                  </div>
+                  <div class="dim" style="font-size:10.5px;margin-bottom:4px">
+                    上面之外的时间（含周末）都按闲时价；时区固定按北京时间判断。
+                  </div>
+                  <button class="ghost tiny" @click="savePricingWindow()">保存闲时时段</button>
+                </div>
+
+                <div class="row" style="gap:8px;margin:10px 0 0">
+                  <button class="primary tiny" @click="saveProfile(p)">保存这个模型</button>
+                  <button class="ghost tiny" @click="useProfile(p)" :disabled="isCurrent(p) || p._draft">
+                    {{ isCurrent(p) ? '已是当前' : '设为当前' }}</button>
+                  <span class="spacer"></span>
+                  <button class="ghost tiny danger" @click="deleteProfile(p)">{{ p._draft ? '丢弃草稿' : '删除模型' }}</button>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="dim mono" style="font-size:11px;margin-top:4px">
-            完整阶梯：{{ (remoteLadder || []).map(x => x.profile_id + ':' + x.effort).join(' → ') || '（空）' }}
-          </div>
+
+          <!-- ② 运行规则：只读说明 + 升档阈值 -->
+          <details style="margin-top:14px">
+            <summary class="dim" style="font-size:12px;cursor:pointer;font-weight:600">
+              运行规则：档位怎么切、何时升档
+            </summary>
+            <div class="dim" style="font-size:11.5px;line-height:1.7;margin-top:6px">
+              当前模型支持的档位：<span class="mono">
+                {{ (remoteLadder || []).map(x => x.effort).join(' → ') || '（未配置）' }}</span><br />
+              选档规则：<b>规格/方案 → 最深一档</b>；<b>样板/校验/日志/适配 → 不思考</b>；
+              <b>写代码 → 按难度自动挑</b>（依据：依赖数、函数数、契约示例数、历史失败次数、是否还是空桩）。<br />
+              失败时只在<b>同一个模型</b>内升档；升到最深还不过就停下来交报告。
+            </div>
+            <div class="dim mono" style="font-size:11px;margin-top:4px">
+              完整阶梯：{{ (remoteLadder || []).map(x => x.profile_id + ':' + x.effort).join(' → ') || '（空）' }}
+            </div>
+            <div class="row" style="gap:8px;align-items:center;margin-top:8px">
+              <span class="dim" style="font-size:11px">升档阈值</span>
+              <input type="number" min="1" max="9" v-model.number="escalateAfter"
+                     style="width:56px" @change="saveRemote({escalate_after: escalateAfter})" />
+              <span class="dim" style="font-size:11px">次（同一档连续失败几次才升思考强度）</span>
+            </div>
+          </details>
 
           <div v-if="currentMode?.id === 'developer'" class="row" style="gap:8px;align-items:center;margin-top:10px">
             <label class="dim" style="font-size:11.5px;display:flex;align-items:center;gap:6px">
@@ -1726,78 +1950,6 @@ onUnmounted(() => {
                 <td class="mono">¥{{ (v.cost_cny ?? 0).toFixed(4) }}</td>
               </tr>
             </table>
-          </details>
-
-          <!-- ④ 其它模型 + 价格：都折叠，默认不干扰 -->
-          <details style="margin-top:14px">
-            <summary class="dim" style="font-size:12px;cursor:pointer;font-weight:600">
-              其它模型（可存多个，一次仍只用一个）　〔{{ (remoteModels || []).length }} 个〕
-            </summary>
-            <div class="dim" style="font-size:11.5px;margin:6px 0">
-              每个模型各自带自己的接口地址 / key / 档位。点「用这个」= 切换当前模型；
-              没点的那几个只是保存着，不参与运行。
-            </div>
-            <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
-              <button class="ghost tiny" @click="addProfile()">＋ 新增模型</button>
-              <span class="dim" style="font-size:11px">升档阈值</span>
-              <input type="number" min="1" max="9" v-model.number="escalateAfter"
-                     style="width:56px" @change="saveRemote({escalate_after: escalateAfter})" />
-              <span class="dim" style="font-size:11px">次（同一档连续失败几次才升思考强度）</span>
-            </div>
-            <div class="table-wrap" style="max-height:260px">
-              <table>
-                <tr><th>id</th><th>模型名</th><th style="width:130px">思考档位</th>
-                    <th style="width:44px">启用</th><th style="width:62px"></th><th style="width:44px"></th></tr>
-                <tr v-for="p in remoteModels" :key="p.id">
-                  <td class="mono">{{ p.id }}
-                    <span v-if="(remote.remote?.active_model || '') === p.id" class="badge b-ok"
-                          style="margin-left:4px">当前</span></td>
-                  <td><input v-model="p.model" style="width:150px" @change="saveProfile(p)" /></td>
-                  <td><input v-model="p.effortsText" style="width:120px"
-                             title="用逗号分隔：none,low,high,max"
-                             @change="p.efforts = p.effortsText.split(',').map(s => s.trim()).filter(Boolean); saveProfile(p)" /></td>
-                  <td><input type="checkbox" v-model="p.enabled" style="width:auto"
-                             @change="saveProfile(p)" /></td>
-                  <td><button class="ghost tiny" @click="useProfile(p)"
-                              :disabled="(remote.remote?.active_model || '') === p.id">用这个</button></td>
-                  <td><button class="ghost tiny" @click="deleteProfile(p.id)" title="删掉这个档案">删除</button></td>
-                </tr>
-              </table>
-            </div>
-            <div class="dim" style="font-size:11px;margin-top:6px">
-              不填价格就用内置价目估算费用；价格只在"算钱"时用，不影响调用。
-            </div>
-          </details>
-
-          <details style="margin-top:10px">
-            <summary class="dim" style="font-size:12px;cursor:pointer;font-weight:600">
-              价格与闲时窗口（可选）
-            </summary>
-            <div class="dim" style="font-size:11.5px;margin:6px 0">
-              单位：<b>人民币 / 每百万 token</b>。高峰价 = 闲时价 × 2；改价只影响"花费"怎么算。
-            </div>
-            <table>
-              <tr><th>模型</th><th style="width:92px">未命中输入</th><th style="width:80px">命中输入</th>
-                  <th style="width:70px">输出</th><th style="width:70px">闲时</th></tr>
-              <tr v-for="p in remoteModels" :key="'pz' + p.id">
-                <td class="mono">{{ p.id }}</td>
-                <td><input type="number" step="0.01" v-model.number="p.pricing.offpeak.in_miss"
-                           style="width:80px" @change="saveProfile(p)" /></td>
-                <td><input type="number" step="0.01" v-model.number="p.pricing.offpeak.in_hit"
-                           style="width:70px" @change="saveProfile(p)" /></td>
-                <td><input type="number" step="0.01" v-model.number="p.pricing.offpeak.out"
-                           style="width:60px" @change="saveProfile(p)" /></td>
-                <td class="dim mono" style="font-size:10.5px">高峰 ×2</td>
-              </tr>
-            </table>
-            <div class="row" style="gap:8px;align-items:center;margin-top:8px">
-              <span class="dim" style="font-size:11px">闲时窗口</span>
-              <input v-model="windowForm.start" placeholder="00:30" style="width:80px" />
-              <span class="dim">–</span>
-              <input v-model="windowForm.end" placeholder="08:30" style="width:80px" />
-              <input v-model="windowForm.tz" placeholder="UTC" style="width:70px" />
-              <button class="ghost tiny" @click="savePricingWindow()">保存闲时窗口</button>
-            </div>
           </details>
 
           <details style="margin-top:10px">
@@ -2172,14 +2324,15 @@ onUnmounted(() => {
                     <span class="dim" style="font-size:11px">（DeepSeek 前缀缓存，命中部分约 1/10 价）</span></td></tr>
               <tr><td class="dim">同证据复用</td><td class="mono">{{ remote.usage?.cached_replies ?? 0 }} 次（0 token）</td></tr>
               <tr><td class="dim">reasoning tokens</td><td class="mono">{{ remote.usage?.reasoning_tokens ?? 0 }}</td></tr>
-            <tr><td class="dim">忙时（全价）</td>
-                <td class="mono">{{ remote.usage?.peak?.calls ?? 0 }} 次 · {{ remote.usage?.peak?.prompt_tokens ?? 0 }}p / {{ remote.usage?.peak?.completion_tokens ?? 0 }}c · ${{ (remote.usage?.peak?.cost_usd ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">闲时（折扣）</td>
-                <td class="mono">{{ remote.usage?.offpeak?.calls ?? 0 }} 次 · {{ remote.usage?.offpeak?.prompt_tokens ?? 0 }}p / {{ remote.usage?.offpeak?.completion_tokens ?? 0 }}c · ${{ (remote.usage?.offpeak?.cost_usd ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">总成本</td><td class="mono">${{ (remote.usage?.cost_usd ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">缓存省下</td><td class="mono">${{ (remote.usage?.cache_saved_usd ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">闲时窗口</td>
-                <td class="mono">{{ remote.usage?.window?.start || '00:30' }}–{{ remote.usage?.window?.end || '08:30' }} {{ remote.usage?.window?.tz || 'UTC' }}</td></tr>
+            <tr><td class="dim">高峰（全价）</td>
+                <td class="mono">{{ remote.usage?.peak?.calls ?? 0 }} 次 · ¥{{ (remote.usage?.peak?.cost_cny ?? 0).toFixed(4) }}</td></tr>
+            <tr><td class="dim">闲时（半价）</td>
+                <td class="mono">{{ remote.usage?.offpeak?.calls ?? 0 }} 次 · ¥{{ (remote.usage?.offpeak?.cost_cny ?? 0).toFixed(4) }}</td></tr>
+            <tr><td class="dim">总花费</td><td class="mono">¥{{ (remote.usage?.cost_cny ?? 0).toFixed(4) }}</td></tr>
+            <tr><td class="dim">缓存省下</td><td class="mono">¥{{ (remote.usage?.cache_saved_cny ?? 0).toFixed(4) }}</td></tr>
+            <tr><td class="dim">高峰时段</td>
+                <td class="mono">{{ (remote.usage?.window?.ranges || []).join('、') || '09:00-12:00、14:00-18:00' }}
+                  （北京时间工作日；其余半价）</td></tr>
             </table>
             <div class="dim" style="font-size:11.5px;margin-top:8px">
               命令行等价操作：<code>python cli.py remote --key sk-...</code>；

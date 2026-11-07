@@ -163,6 +163,36 @@ def _norm_window(raw: dict) -> dict:
             "tz": str(raw.get("tz") or "UTC")[:16]}
 
 
+def _norm_peak_window(raw: dict) -> dict:
+    """高峰时段（is_offpeak 真正读的字段）：ranges / weekdays_only / tz。
+
+    规范化到可判定形态，非法区间一律丢弃（不许界面手滑把时段写坏导致全天空闲，
+    那样成本会静默算错）。空 ranges = 用默认两段。
+    """
+    raw = raw or {}
+    ranges: list[str] = []
+    for item in (raw.get("ranges") or []):
+        try:
+            a, b = str(item).split("-")
+            ha, ma = (int(x) for x in a.strip().split(":"))
+            hb, mb = (int(x) for x in b.strip().split(":"))
+            if not (0 <= ha < 24 and 0 <= ma < 60 and 0 <= hb < 24 and 0 <= mb < 60):
+                continue
+            if hb * 60 + mb <= ha * 60 + ma:
+                continue
+            ranges.append(f"{ha:02d}:{ma:02d}-{hb:02d}:{mb:02d}")
+        except (ValueError, AttributeError, TypeError):
+            continue
+    if not ranges:
+        ranges = ["09:00-12:00", "14:00-18:00"]
+    return {"ranges": ranges[:8], "weekdays_only": bool(raw.get("weekdays_only", True)),
+            "tz": str(raw.get("tz") or "Asia/Shanghai")[:32]}
+
+
+DEFAULT_PEAK_WINDOW = {"ranges": ["09:00-12:00", "14:00-18:00"],
+                       "weekdays_only": True, "tz": "Asia/Shanghai"}
+
+
 EFFORTS = ("none", "low", "high", "max")
 EFFORT_ALIAS = {"off": "none", "minimal": "low", "medium": "high", "xhigh": "high",
                 "disabled": "none", "enabled": "high", "": "none"}
@@ -424,6 +454,8 @@ def update_remote(patch: dict) -> tuple[dict, list[str]]:
                 continue
         elif k == "offpeak_window":
             v = _norm_window(v)
+        elif k == "peak_window":
+            v = _norm_peak_window(v)
         old = remote.get(k)
         if k == "configured_at":
             remote[k] = v

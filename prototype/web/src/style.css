@@ -283,3 +283,39 @@ button.danger:hover { filter: brightness(1.12); }
   margin-bottom: 8px;
   line-height: 1.45;
 }
+
+/* ---------- 远端模型卡片：分组列表 + 点开详情 ---------- */
+.mp-group { margin-bottom: 14px; }
+.mp-group-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 5px 2px 6px; border-bottom: 1px solid var(--line); margin-bottom: 6px;
+  font-size: 12px;
+}
+.mp-card {
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel2); margin-bottom: 6px; overflow: hidden;
+}
+.mp-card.is-open { border-color: var(--accent); }
+.mp-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; cursor: pointer; user-select: none;
+}
+.mp-head:hover { background: rgba(79,140,255,.07); }
+.mp-caret { color: var(--dim); width: 12px; flex: 0 0 12px; }
+.mp-head-main { min-width: 0; flex: 1; }
+.mp-title { font-size: 12.5px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mp-head-meta { text-align: right; flex: 0 0 auto; line-height: 1.5; }
+.mp-body { padding: 4px 12px 12px; border-top: 1px solid var(--line); }
+.mp-sec { padding: 9px 0; border-bottom: 1px dashed var(--line); }
+.mp-sec:last-of-type { border-bottom: 0; }
+.mp-sec-t { font-size: 11px; color: var(--dim); letter-spacing: .4px; margin-bottom: 6px; font-weight: 500; }
+.mp-grid, .mp-grid3 { display: grid; gap: 8px; }
+.mp-grid { grid-template-columns: 1fr 1fr; }
+.mp-grid3 { grid-template-columns: repeat(3, 1fr); margin-bottom: 6px; }
+.mp-grid > label, .mp-grid3 > label { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.mp-grid > label > span, .mp-grid3 > label > span { font-size: 10.5px; color: var(--dim); }
+.mp-grid label small { font-size: 10px; }
+.mp-grid .mp-check { flex-direction: row; align-items: center; gap: 8px; align-self: end; padding-bottom: 7px; }
+.mp-price-t { font-size: 10.5px; margin: 6px 0 4px; }
+.mp-effort { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text); }
+button.ghost.sel { border-color: var(--accent); color: var(--accent); }

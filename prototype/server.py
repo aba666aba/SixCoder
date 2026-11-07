@@ -324,6 +324,7 @@ class RemoteSettingsReq(BaseModel):
     active_model: Optional[str] = None      # 当前使用的那**一个**模型档案 id（空 = 自动解析）
     pricing: Optional[dict] = None          # 旧价目表（美元）；新逻辑用 models[].pricing
     offpeak_window: Optional[dict] = None   # 旧字段，保留兼容
+    peak_window: Optional[dict] = None      # 闲时判定真正读的字段：ranges / weekdays_only / tz
     models: Optional[list] = None           # 模型档案整表（增/删/改都走这里）
 
 
@@ -343,6 +344,17 @@ class ModelProfileReq(BaseModel):
     pricing: Optional[dict] = None
 
 
+def _public_model_view(settings_store) -> dict:
+    """模型档案对外视图的**唯一出口**：api_key 一律剥掉，阶梯只回展示字段。
+
+    四个端点（GET / 增改 / 删除 / 设优先）都必须走这里。运行期 ladder() 内部
+    带 api_key 是必要的（发请求要用），但那不等于可以把它回给界面。
+    """
+    return {"models": [settings_store.sanitize_profile(p) for p in settings_store.models()],
+            "ladder": [{"profile_id": s.get("profile_id"), "model": s.get("model"),
+                        "effort": s.get("effort")} for s in settings_store.ladder()]}
+
+
 @app.get("/v1/settings/remote/models")
 def get_model_profiles():
     """模型档案 + 由它摊出来的执行阶梯。
@@ -351,7 +363,7 @@ def get_model_profiles():
     一次运行只用一个模型，强度由 core/effort.py 按需求/难度自动切。
     """
     from core import settings_store
-    return {"models": settings_store.models(), "ladder": settings_store.ladder(),
+    return {**_public_model_view(settings_store),
             "escalate_after": int(settings_store.get_remote().get("escalate_after") or 2),
             "efforts": list(settings_store.EFFORTS)}
 
@@ -373,8 +385,8 @@ def upsert_model_profile(req: ModelProfileReq):
         hit.update({k: v for k, v in raw.items() if k != "pricing"})
         if raw.get("pricing"):
             hit["pricing"] = raw["pricing"]
-    saved = settings_store.save_models(profs)
-    return {"ok": True, "models": saved, "ladder": settings_store.ladder()}
+    settings_store.save_models(profs)
+    return {"ok": True, **_public_model_view(settings_store)}
 
 
 @app.delete("/v1/settings/remote/models/{model_id}")
@@ -384,8 +396,8 @@ def delete_model_profile(model_id: str):
     profs = [p for p in settings_store.models() if p["id"] != model_id]
     if not profs:
         raise HTTPException(400, "至少要留一个模型档案，否则夜班没有可用模型")
-    saved = settings_store.save_models(profs)
-    return {"ok": True, "models": saved, "ladder": settings_store.ladder()}
+    settings_store.save_models(profs)
+    return {"ok": True, **_public_model_view(settings_store)}
 
 
 @app.post("/v1/settings/remote/models/primary/{model_id}")
@@ -399,8 +411,8 @@ def set_primary_model(model_id: str):
     for p in profs:
         if p["id"] == model_id:
             p["priority"] = top
-    saved = settings_store.save_models(profs)
-    return {"ok": True, "models": saved, "ladder": settings_store.ladder()}
+    settings_store.save_models(profs)
+    return {"ok": True, **_public_model_view(settings_store)}
 
 
 @app.get("/v1/settings/remote/usage")
