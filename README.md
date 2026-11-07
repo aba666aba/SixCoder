@@ -3,7 +3,7 @@
 **让 AI 替你写代码 —— 但不许它骗你。**
 
 ![python](https://img.shields.io/badge/python-3.12-3776AB)
-![checks](https://img.shields.io/badge/自检-71%20项-brightgreen)
+![checks](https://img.shields.io/badge/自检-99%20项-brightgreen)
 ![acceptance](https://img.shields.io/badge/真实项目-44%2F44%20机械验收-success)
 ![license](https://img.shields.io/badge/license-见%20LICENSE-blue)
 
@@ -41,7 +41,7 @@
 ✓ 能力上限台账           八项上限的当前值 + 差在哪 + 下一步
 ```
 
-而且**这些数字都能自己复核**：`python checks\run_all.py`（72 项自检，全绿才算数）。
+而且**这些数字都能自己复核**：`python checks\run_all.py`（99 项自检，全绿才算数）。
 
 ---
 
@@ -167,6 +167,20 @@ sixcoder night --repo D:\myproj --goal "做一个 CSV 记账工具：能导入�
 5. **重新观测**：每片做完就**真跑一遍全部探针**，看整个项目到底做完没有（顺带获得项目级回归网）
 6. **停滞就重规划**：连续几片没有新进展，或某条能力反复失败 → 补能力 / 重连依赖 / 降级（降级必须写原因）
 7. **收工出报告**：`AUTONOMY.md` —— 覆盖矩阵、缺口、降级原因、每片账本、续跑命令
+
+### Web 目标（FastAPI / HTTP 服务）
+
+目标是 Web 服务时，验收不走 CLI，而是**真发 HTTP 请求**：`http` 探针支持多步链
+（注册 → 登录 → 带 token 访问）、跨进程回读（判数据真落盘）、并发 N 次 + 条数（判丢写）、
+幂等（重复提交必须 4xx）。路由、请求体模型、依赖安装、`.env` 都由引擎确定性生成，
+作者只写服务层函数——否则"路由没挂"会被记成"能力做不出来"。
+
+交付前另有一道体检：应用可导入 / `/docs` 200 / **uvicorn 真启动** / README / requirements /
+引擎生成的 pytest。
+
+> 诚实边界：这一层是 2026-11-07 才补齐的。实测 17 条能力（9 业务 + 8 机制）中 **6 条通过**，
+> 剩余归因都在远端能力侧；产物约 220 行，离 XL（≥10000 行 + 前端）还很远。
+> 机制细节与标定数据见 [docs/27](./docs/27-Web项目的验收与交付机制.md)。
 
 看进度与溯源（都不花一次远端调用）：
 
@@ -329,7 +343,7 @@ sixcoder night --repo D:\myproj --goal "…" --answers .sixcoder/answers.json --
 3. **业务流 e2e** —— 跑通一条端到端业务链，断言四类通用不变量（唯一性 / 容量上限 / 优先级 / 汇总口径）。
 4. **能力上限台账** —— 八项上限现算现报，测不了就写"测不了"，绝不冒充通过。
 
-**铁律**：每修一个真实 bug，就留一条断言。所以自检只会越来越多（现在 72 项），不会越来越少。
+**铁律**：每修一个真实 bug，就留一条断言。所以自检只会越来越多（现在 99 项），不会越来越少。
 
 ---
 
@@ -361,7 +375,7 @@ sixcoder night --repo D:\myproj --goal "…" --answers .sixcoder/answers.json --
 SixCoder/
 ├── prototype/            # 引擎本体
 │   ├── core/             # 夜班主循环 / 判据 / 门禁 / 隔离 / 业务流 / 能力上限台账
-│   ├── checks/           # 72 项自检（每个真 bug 一条断言）
+│   ├── checks/           # 99 项自检（每个真 bug 一条断言）
 │   ├── web/              # 前端（Vue3 + Vite）
 │   ├── server.py         # 本地服务（FastAPI + SSE）
 │   └── cli.py            # 命令行入口

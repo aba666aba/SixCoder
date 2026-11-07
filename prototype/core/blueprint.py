@@ -34,7 +34,13 @@ AUDIT_CACHE_FILE = ".sixcoder/audit_cache.json"
 # 改 AUDIT_PROMPT / AUDIT_DIFF_PROMPT 时递增，旧结论自动失效
 AUDIT_CACHE_VERSION = "1"
 MAX_CAPS = 200                    # 超过说明粒度太细，切片会碎成沙子
-PROBE_KINDS = ("cli", "py_call")  # 已有执行器的种类（见 core/probe.py）
+# 两级蓝图（开发文档 §18.7 第 1 件）：能力数超过 SUBSYS_TRIGGER_CAPS 时按模块域分组，
+# 每组 ≤ SUBSYS_MAX_CAPS 条，切片不跨子系统（接口先冻结）；分组后蓝图能装到
+# MAX_CAPS_WITH_SUBSYS（≈ 2 万函数 / 50 万行，L 档下沿）。
+SUBSYS_TRIGGER_CAPS = 60          # 能力数超过它 → 自动 split_subsystems
+SUBSYS_MAX_CAPS = 40              # 单组能力上限（一张能力表仍可管理、可审计）
+MAX_CAPS_WITH_SUBSYS = 2000       # 分组后蓝图的硬上限
+PROBE_KINDS = ("cli", "py_call", "pytest", "http")  # 已有执行器的种类（见 core/probe.py）
 CAP_ID_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
 DEFAULT_FUNCS = 4                 # 没给估算时按 4 个函数算（宁可保守）
 # 每函数花费：两个实测形态反推出来的（302 行/20 函数/¥0.33；200 行/8 函数/¥0.21），
@@ -95,10 +101,36 @@ class Cap:
 
 
 @dataclass
+class Subsystem:
+    """一个子系统 = 一组能力（按落点模块域聚合）+ 对其它子系统的依赖。
+
+    "两级蓝图"的第二级是能力 DAG（就是 bp.caps 那张表）；第一级是子系统 DAG
+    （本类）。切片不跨子系统 → 每片只碰一个子系统的文件面，等价于"接口先冻结"：
+    写 A 子系统时，B 子系统的文件不会出现在同一片里被顺手改坏。
+    """
+    name: str
+    cap_ids: list[str] = field(default_factory=list)
+    deps: list[str] = field(default_factory=list)
+    frozen: list[str] = field(default_factory=list)   # 冻结的对外接口（能力 id）
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "cap_ids": list(self.cap_ids),
+                "deps": list(self.deps), "frozen": list(self.frozen)}
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Subsystem":
+        return cls(name=str(raw.get("name") or ""),
+                   cap_ids=[str(x) for x in (raw.get("cap_ids") or [])],
+                   deps=[str(x) for x in (raw.get("deps") or [])],
+                   frozen=[str(x) for x in (raw.get("frozen") or [])])
+
+
+@dataclass
 class Blueprint:
     goal: str = ""
     version: int = 1
     caps: list[Cap] = field(default_factory=list)
+    subsystems: list[Subsystem] = field(default_factory=list)
     total_budget_cny: float = 0.0
     created_at: float = 0.0
     notes: list[str] = field(default_factory=list)
@@ -119,9 +151,17 @@ class Blueprint:
     def pending(self) -> list[Cap]:
         return [c for c in self.caps if c.status not in ("done", "descoped")]
 
+    def subsystem_of(self, cid: str) -> str:
+        for s in self.subsystems:
+            if cid in s.cap_ids:
+                return s.name
+        return ""
+
     # --- 变换（都返回是否真的改动了，便于留痕）---
     def add(self, cap: Cap) -> bool:
-        if not cap.id or self.by_id(cap.id) or len(self.caps) >= MAX_CAPS:
+        # 分组后蓝图的容量上限抬高：两级蓝图正是为了破"扁平 200 条"这堵墙。
+        limit = MAX_CAPS_WITH_SUBSYS if self.subsystems else MAX_CAPS
+        if not cap.id or self.by_id(cap.id) or len(self.caps) >= limit:
             return False
         self.caps.append(cap)
         return True
@@ -145,6 +185,7 @@ class Blueprint:
     def to_dict(self) -> dict:
         return {"goal": self.goal, "version": self.version,
                 "caps": [c.to_dict() for c in self.caps],
+                "subsystems": [s.to_dict() for s in self.subsystems],
                 "total_budget_cny": round(self.total_budget_cny, 4),
                 "created_at": self.created_at, "notes": list(self.notes)}
 
@@ -154,6 +195,8 @@ class Blueprint:
                    version=int(raw.get("version") or 1),
                    caps=[Cap.from_dict(c) for c in (raw.get("caps") or [])
                          if isinstance(c, dict)],
+                   subsystems=[Subsystem.from_dict(s) for s in (raw.get("subsystems") or [])
+                               if isinstance(s, dict)],
                    total_budget_cny=float(raw.get("total_budget_cny") or 0.0),
                    created_at=float(raw.get("created_at") or 0.0),
                    notes=[str(x) for x in (raw.get("notes") or [])])
@@ -247,8 +290,10 @@ def validate(bp: Blueprint) -> list[str]:
     if not bp.caps:
         issues.append("蓝图里一条能力都没有（等于没有验收对象）")
         return issues
-    if len(bp.caps) > MAX_CAPS:
-        issues.append(f"能力数 {len(bp.caps)} 超过 {MAX_CAPS}：粒度太细，先合并")
+    _cap_limit = MAX_CAPS_WITH_SUBSYS if bp.subsystems else MAX_CAPS
+    if len(bp.caps) > _cap_limit:
+        issues.append(f"能力数 {len(bp.caps)} 超过 {_cap_limit}：粒度太细，先合并")
+    issues += subsystem_issues(bp)
     seen: set[str] = set()
     for c in bp.caps:
         if c.id in seen:
@@ -268,6 +313,150 @@ def validate(bp: Blueprint) -> list[str]:
             issues.append(f"估算花费 ¥{est:.2f} 超过总预算 ¥{bp.total_budget_cny:.2f}："
                           "先砍范围（降级是记录在案的决策，不是静默缺失）")
     return issues
+
+
+# ---------------------------------------------------------------- 两级蓝图（L1 子系统层）
+def _cap_domain(cap: Cap) -> str:
+    """一条能力属于哪个"模块域"（决定它进哪个子系统）。
+
+    口径：落点模块去掉 .py / __init__ 后的**最后一段**（文件名 stem）。
+    `app/auth.py` → `auth`、`app/tickets.py` → `tickets`、`auth.py` → `auth`。
+    这是"接口冻结"的最细粒度：一片只碰一个文件域，跨文件的顺带改坏从结构上不可能。
+    注：目录级聚合（把 app/auth/ 下多个文件归成一个 auth 子系统）是后续细化，
+    文件名粒度已能给出正确的 L1 分组与切片边界，且完全确定性。
+    """
+    m = (cap.modules or [""])[0] or ""
+    m = m.replace("\\", "/")
+    if m.endswith(".py"):
+        m = m[:-3]
+    seg = [p for p in m.split("/") if p and p != "__init__"]
+    if seg:
+        return seg[-1].lower()
+    parts = (cap.id or "").split(".")
+    if len(parts) >= 2 and parts[1]:
+        return parts[1].lower()
+    return "misc"
+
+
+def _subsystem_cycle(subs: list[Subsystem]) -> list[str] | None:
+    """子系统依赖环（返回环上的名字列表；无环返回 None）。"""
+    graph = {s.name: [d for d in s.deps if any(o.name == d for o in subs)]
+             for s in subs}
+    WHITE, GREY, BLACK = 0, 1, 2
+    color: dict[str, int] = {n: WHITE for n in graph}
+    path: list[str] = []
+
+    def visit(n: str):
+        color[n] = GREY
+        path.append(n)
+        for d in graph.get(n, []):
+            if color.get(d) == GREY:
+                return list(path[path.index(d):])
+            if color.get(d) == WHITE:
+                r = visit(d)
+                if r:
+                    return r
+        path.pop()
+        color[n] = BLACK
+        return None
+
+    for n in sorted(graph):
+        if color[n] == WHITE:
+            r = visit(n)
+            if r:
+                return r
+    return None
+
+
+def split_subsystems(bp: Blueprint, *, max_caps: int = SUBSYS_MAX_CAPS) -> list[Subsystem]:
+    """能力表 → 子系统 DAG（确定性，同输入同输出）。返回分组并写回 bp.subsystems。
+
+    分组：按 _cap_domain 聚合；超 max_caps 的域按序切成 max_caps 一块。
+    组间依赖：能力的 deps 落在别的组 → 该组依赖那个组。
+    环消解：组间依赖成环（A→B→A）时，把环内组合并成一个（保留字典序最小的名字），
+    直到无环 —— 子系统必须是 DAG，否则"先冻结接口"无从谈起。
+    """
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for c in bp.caps:
+        d = _cap_domain(c)
+        if d not in groups:
+            groups[d] = []
+            order.append(d)
+        groups[d].append(c.id)
+    subs: list[Subsystem] = []
+    for d in order:
+        ids = groups[d]
+        if len(ids) <= max_caps:
+            subs.append(Subsystem(name=d, cap_ids=list(ids)))
+        else:
+            for i in range(0, len(ids), max_caps):
+                subs.append(Subsystem(name=f"{d}.{i // max_caps + 1}",
+                                      cap_ids=list(ids[i:i + max_caps])))
+    cap_to_sub = {cid: s.name for s in subs for cid in s.cap_ids}
+    for s in subs:
+        deps: list[str] = []
+        for cid in s.cap_ids:
+            c = bp.by_id(cid)
+            for d in (c.deps if c else []):
+                owner = cap_to_sub.get(d)
+                if owner and owner != s.name and owner not in deps:
+                    deps.append(owner)
+        s.deps = deps
+    # 环消解：合并环内组（确定性）
+    while True:
+        cycle = _subsystem_cycle(subs)
+        if not cycle:
+            break
+        keep = min(cycle)
+        merged_caps: list[str] = []
+        merged_deps: list[str] = []
+        for s in subs:
+            if s.name in cycle:
+                for cid in s.cap_ids:
+                    if cid not in merged_caps:
+                        merged_caps.append(cid)
+                for d in s.deps:
+                    if d not in cycle and d not in merged_deps:
+                        merged_deps.append(d)
+        subs = [s for s in subs if s.name not in cycle]
+        subs.append(Subsystem(name=keep, cap_ids=merged_caps, deps=merged_deps))
+        for s in subs:
+            if s.name == keep:
+                continue
+            s.deps = [keep if d in cycle else d for d in s.deps]
+    bp.subsystems = subs
+    return subs
+
+
+def subsystem_issues(bp: Blueprint) -> list[str]:
+    """子系统结构校验：归属唯一、组间依赖有效、无环、容量不越界。"""
+    out: list[str] = []
+    if not bp.subsystems:
+        return out
+    cap_to_sub: dict[str, str] = {}
+    names: set[str] = set()
+    for s in bp.subsystems:
+        if not s.name:
+            out.append("子系统缺名")
+        if s.name in names:
+            out.append(f"子系统重名：{s.name}")
+        names.add(s.name)
+        if len(s.cap_ids) > SUBSYS_MAX_CAPS:
+            out.append(f"{s.name}: 组内能力 {len(s.cap_ids)} 超过 {SUBSYS_MAX_CAPS}")
+        for cid in s.cap_ids:
+            if cid in cap_to_sub:
+                out.append(f"{cid}: 能力归属到多个子系统")
+            cap_to_sub[cid] = s.name
+        for d in s.deps:
+            if not any(o.name == d for o in bp.subsystems):
+                out.append(f"{s.name}: 依赖不存在的子系统 {d}")
+    for c in bp.caps:
+        if c.id not in cap_to_sub:
+            out.append(f"{c.id}: 没有子系统归属")
+    if _subsystem_cycle(bp.subsystems):
+        out.append("子系统依赖成环")
+    return out
 
 
 def fatal(issues: list[str]) -> list[str]:
@@ -370,13 +559,23 @@ DERIVE_PROMPT = """你是软件架构师。把下面这一句**目标**变成一
 【每条能力必须带】
 - id：小写点分，如 `cap.csv.count`，全表唯一
 - desc：一句话，写清"输入什么 → 观测到什么"
-- probe：怎么观测，三选一
+- probe：怎么观测，四选一
     {"kind": "cli", "entry": "main.py", "args": ["count", "--file", "d.csv"],
      "files": {"d.csv": "name,age\\n山田,20\\n佐藤,30\\n"}, "stdout_has": "2"}
     {"kind": "py_call", "module": "calc", "func": "add", "args": [2, 3], "expect": 5}
     {"kind": "pytest", "args": ["tests/test_main.py"],
      "stdout_has": ["test_happy", "test_error"]}
-  · **不许只判退出码**：至少有 stdout_has 或 expect，否则空壳 `print(0)` 也能过
+    {"kind": "http", "app": "app.main:app", "steps": [
+      {"method": "POST", "path": "/auth/register",
+       "json": {"username": "u1", "password": "p1"},
+       "expect_status": 201, "expect_json": {"username": "u1"}},
+      {"method": "POST", "path": "/auth/login",
+       "json": {"username": "u1", "password": "p1"},
+       "save": {"token": "token"}, "expect_json": {"username": "u1"}},
+      {"method": "GET", "path": "/tickets",
+       "headers": {"Authorization": "Bearer ${token}"},
+       "expect_status": 200, "expect_json": {}}]}
+  · **不许只判退出码**：至少有 stdout_has 或 expect 或 expect_json，否则空壳 `print(0)` 也能过
   · cli 的 **entry 必须是仓库里的脚本文件**（如 main.py）。写 `python` / `pytest` 这类
     解释器命令当 entry，这条能力永远无法被观测（会被当成仓库里一个叫 python 的文件）
   · pytest 必须写明要看到哪些**用例名**：只判"有没有 passed"的话，一个
@@ -391,9 +590,25 @@ DERIVE_PROMPT = """你是软件架构师。把下面这一句**目标**变成一
 - funcs_est：这条能力大约要写几个函数（整数，别虚报）
 - modules：大致落在哪些文件（可以空）
 
+【Web / HTTP 项目（看到就照做，这条优先级最高）】
+目标里只要出现 Web、网站、页面、前端、HTTP、REST、API、接口、服务、uvicorn、FastAPI、
+Flask、Django、登录页、看板 等字样，就**一律用 http 探针，不许用 cli 探针**
+（"python main.py register" 对 Web 服务毫无意义，会把整个项目做歪）。规则：
+1. `app` 全表固定写同一个：`app.main:app`（产物必须在这个位置暴露名为 `app` 的 ASGI 应用）。
+2. 一条能力 = 一条**自包含**的请求链。需要登录态的，就在同一条 steps 里先 register 再 login，
+   用 `"save": {"token": "token"}` 配 `${token}` 传递；**不许依赖别的能力留下的数据**
+   （每条能力在独立进程里跑，进程之间不共享内存，也不保证顺序）。
+3. 判据必须确定：`expect_status` + `expect_json`（值要写死，不许写 "any"/"*"）。
+   列表型响应判不了全量时，改判总数/某一条的具体字段，或换成一条按 id 查询的能力。
+4. 错误路径要单列能力：未授权 401、参数非法 422、资源不存在 404。
+5. 前端：用 `{"kind":"http","app":"app.main:app","method":"GET","path":"/",
+   "body_has":["<title 里的字>","登录"]}` 判页面真的挂了什么。
+6. modules 要写清分层（如 app/main.py、app/auth.py、app/models.py、app/schemas.py），
+   一条能力 3~8 个函数，别把全部路由塞进 main.py。
+
 【硬要求】
 1. 每条都必须能**独立观测**：不许出现"写完 A 才能观测 B，但 A 本身观测不到"的链条。
-2. 必须包含**端到端**能力：至少一条从入口（命令行/主流程）走完，不是只有零件。
+2. 必须包含**端到端**能力：至少一条从入口（命令行/主流程/HTTP 请求链）走完，不是只有零件。
 3. 必须包含**非功能类**（按目标判断，缺就补）：数据持久化、错误输入的处理、测试。
 4. 粒度：一条能力 ≈ 一次能做完并验收的量（3~8 个函数）。太细会碎，太粗会堵。
 5. 依赖不许成环。
@@ -434,6 +649,10 @@ AUDIT_PROMPT = """你是独立评审，不是这张表的作者。下面是**目
 
 顺带检查：有没有一条能力"观测的是另一条能力的总和"（e2e 大杂烩）？如果有，
 把它拆成各自独立的命令，或者在 rewire 里把不该有的依赖去掉。
+
+注意：`{"kind":"http", ...}` 是合法且推荐的 Web 观测方式（真发请求、比状态码与 JSON 字段）。
+只要它写了 expect_status 或 expect_json / body_has，就**不是** fake_probe；
+反过来，Web 项目里出现 `python main.py xxx` 这类 cli 探针，应当报 fake_probe 或 missing。
 
 输出 JSON：
 {"issues": [{"kind": "missing|dup|broken_dep|fake_probe", "cap": "涉及的 id",
@@ -585,6 +804,300 @@ def _n_funcs_for(budget: float) -> int:
 
 # ---------------------------------------------------------------- 推导 / 审计 / 修补
 
+def _probe_paths(probe: dict) -> list[str]:
+    steps = (probe or {}).get("steps") or []
+    if steps:
+        return [str((s or {}).get("path") or "") for s in steps]
+    return [str((probe or {}).get("path") or "")]
+
+
+def _jtext(x) -> str:
+    try:
+        return json.dumps(x, ensure_ascii=False)
+    except Exception:                                    # noqa: BLE001
+        return str(x)
+
+
+def _cap_for(caps: list, needle: str):
+    return next((c for c in caps if any(needle in p for p in _probe_paths(c.probe))), None)
+
+
+def _auth_step(cap, needle: str, user: str, want_token: bool) -> dict | None:
+    """从注册/登录能力里复制出错的一步，换上本链专用的用户名。"""
+    for st in ((cap.probe or {}).get("steps") or []):
+        st = st or {}
+        if needle not in str(st.get("path") or ""):
+            continue
+        step = {"method": str(st.get("method") or "POST").upper(),
+                "path": str(st.get("path") or "")}
+        body = st.get("json") if st.get("json") is not None else st.get("data")
+        if isinstance(body, dict):
+            body = dict(body)
+            for k in list(body):
+                if "user" in k.lower() or "name" in k.lower() or "email" in k.lower():
+                    body[k] = user
+                elif "pass" in k.lower():
+                    body[k] = "p1"
+            step["json"] = body
+        if needle == "/register":
+            step["expect_status"] = [200, 201, 409]      # 已存在也算链能继续（幂等）
+            # 注册响应里的 id 就是后续 /users/{user_id}/... 要用的实体 id
+            step["save"] = {"user_id": "id", "uid": "id", "id": "id"}
+        if want_token:
+            step["save"] = {"token": "token"}
+        return step
+    return None
+
+
+def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
+    """把 http 探针改造成**自包含**的请求链（确定性修补，不花 token）。
+
+    为什么必须有（2026-11-07 实测）：蓝图给 Web 项目生成的探针长这样——
+        cap.user.login:    POST /auth/login  {"username":"u1"}     # u1 从没注册过
+        cap.ticket.create: POST /tickets     Bearer ${token}       # token 从没 save 过
+        cap.ticket.update: PUT  /tickets/{ticket_id}               # 字面占位符，id 不存在
+    三条都看起来合理，但**永远不可能通过**（每条探针是独立进程，内存不共享）。
+    这种探针比没有更糟：它会把"这条能力做不出来"写进蓝图，然后被降级、被报告成需求的问题。
+    所以这里机械补齐：同链内先注册再登录、先建资源再改它，用 save/${var} 串起来。
+    """
+    caps = [c for c in bp.caps if str((c.probe or {}).get("kind") or "") == "http"]
+    if not caps:
+        return 0
+    reg, login = _cap_for(caps, "/register"), _cap_for(caps, "/login")
+    changed = 0
+    for c in caps:
+        probe = c.probe if isinstance(c.probe, dict) else {}
+        steps = probe.get("steps")
+        if not isinstance(steps, list) or not steps:
+            continue
+        new = json.loads(json.dumps(steps))
+        user = "u_" + re.sub(r"[^a-z0-9]+", "_", str(c.id).lower())[:20]
+        pre: list[dict] = []
+        joined = _jtext(new)
+        need_auth = "${token" in joined
+        has_reg = any("/register" in str((s or {}).get("path") or "") for s in new)
+        has_login = any("/login" in str((s or {}).get("path") or "") for s in new)
+        # ① 链里有登录，却没有注册 → 先注册（否则登录必然 401）
+        if has_login and not has_reg and reg is not None:
+            st = _auth_step(reg, "/register", user, want_token=False)
+            if st:
+                pre.append(st)
+        # ② 用到 ${token}，却没有登录 → 补注册 + 登录
+        if need_auth and not has_login and login is not None:
+            if not has_reg and reg is not None:
+                st = _auth_step(reg, "/register", user, want_token=False)
+                if st:
+                    pre.append(st)
+            st = _auth_step(login, "/login", user, want_token=True)
+            if st:
+                pre.append(st)
+        # ④ 本链里的账号必须统一：注册用谁，登录就得用谁。
+        #    否则链是"注册 u_xxx → 登录 u1"，永远 401（实测 2026-11-07 参考实现 8/9）。
+        if has_login:
+            for st in new:
+                pth = str((st or {}).get("path") or "")
+                if "/login" not in pth and "/register" not in pth:
+                    continue
+                body = st.get("json")
+                if isinstance(body, dict):
+                    for k in list(body):
+                        lk = str(k).lower()
+                        if "user" in lk or "name" in lk or "email" in lk:
+                            body[k] = user
+                        elif "pass" in lk:
+                            body[k] = "p1"
+                ej = st.get("expect_json")
+                if isinstance(ej, dict):
+                    for k in list(ej):
+                        lk = str(k).lower()
+                        if "user" in lk or "name" in lk or "email" in lk:
+                            ej[k] = user
+        # ③ 路径里有 {var} / :var 占位符 → 先建一个资源，把 id 存进变量
+        for i, st in enumerate(new):
+            path = str((st or {}).get("path") or "")
+            if "${" in path:
+                continue          # 已经是 ${var} 形式（上一轮规整过的），别再动
+            m = re.search(r"\{(\w+)\}", path) or re.search(r":(\w+)(?=/|$)", path)
+            if not m:
+                continue
+            var = m.group(1)
+            base = re.split(r"[{:]", path, maxsplit=1)[0].rstrip("/")
+            maker = None
+            for cand in caps:
+                if cand is c:
+                    continue
+                for cs in ((cand.probe or {}).get("steps") or []):
+                    cs = cs or {}
+                    if (str(cs.get("method") or "").upper() == "POST"
+                            and str(cs.get("path") or "").rstrip("/") == base):
+                        maker = cs
+                        break
+                if maker:
+                    break
+            if maker is not None:
+                mstep = json.loads(json.dumps(maker))
+                mstep["save"] = {var: "id"}
+                if "expect_status" not in mstep:
+                    mstep["expect_status"] = [200, 201]
+                pre.append(mstep)
+                new[i]["path"] = re.sub(r"\{%s\}" % re.escape(var), "${%s}" % var, path)
+                new[i]["path"] = re.sub(r":%s(?=/|$)" % re.escape(var),
+                                        "${%s}" % var, new[i]["path"])
+            else:
+                # 没有创建该实体的能力（如 /boards/{board_id}/tickets）：
+                # 用字面量 1 落死。简报里会把这个确切路径逐字写给作者，
+                # 作者照着实现路由即可 —— 比留一个永远 404 的 {board_id} 强得多。
+                fixed = re.sub(r"\{\w+\}", "1", path)
+                fixed = re.sub(r":\w+(?=/|$)", "1", fixed)
+                if fixed != path:
+                    new[i]["path"] = fixed
+                    if notes is not None:
+                        notes.append(f"{c.id}: 占位符 {var} 没有可创建的能力 → 固定成 {fixed}")
+        # ⑤ 读类能力需要**种子数据**：全新数据库里表都还没建出来，GET 会直接 500
+        #    （"no such table: tickets"）。找同资源的 POST 创建能力，插到最后一步之前。
+        last = (new[-1] if new else {})
+        lpath = str((last or {}).get("path") or "")
+        if str((last or {}).get("method") or "").upper() == "GET" and "/auth/" not in lpath:
+            has_post = any(str((sm or {}).get("method") or "").upper() == "POST"
+                           and str((sm or {}).get("path") or "") == lpath for sm in new)
+            if not has_post:
+                creator = None
+                for cand in caps:
+                    if cand is c:
+                        continue
+                    for cs in ((cand.probe or {}).get("steps") or []):
+                        cs = cs or {}
+                        cp = str(cs.get("path") or "")
+                        if (str(cs.get("method") or "").upper() == "POST" and cp.startswith("/")
+                                and "/auth/" not in cp and cp in lpath):
+                            creator = cs
+                            break
+                    if creator:
+                        break
+                if creator is not None:
+                    seed = json.loads(json.dumps(creator))
+                    seed["save"] = {k: ["id", "ticket_id", "pk"] for k in
+                                    ("ticket_id", "id", "user_id", "uid", "board_id")}
+                    seed.setdefault("expect_status", [200, 201, 409])
+                    new.insert(len(new) - 1, seed)
+                    # 只判 200 太弱：空实现直接返回 `[]` 也能过（实测 2026-11-07——
+                    # 列表返回硬编码的假数据照样绿）。把种子里那个可辨识的值写进判据。
+                    _sv = (seed.get("json") or {}).get("title")
+                    if _sv and not (new[-1] or {}).get("body_has"):
+                        new[-1]["body_has"] = str(_sv)
+                    if notes is not None:
+                        notes.append(f"{c.id}: 读接口前置一条种子数据（POST {seed.get('path')}）")
+        # ⑥ 登录必须**真的发放凭证**：只判 200 时，"只回 username、不发 token" 也能绿，
+        #    于是所有受保护接口等于没有鉴权（实测 2026-11-07）。
+        _last = (new[-1] if new else {})
+        if "/login" in str((_last or {}).get("path") or ""):
+            new[-1].setdefault("body_has_any", ["token"])
+        if pre or new != steps:
+            probe["steps"] = pre + new
+            c.probe = probe
+            changed += 1
+            if notes is not None:
+                notes.append(f"{c.id}: http 探针已补齐自包含链（+{len(pre)} 步："
+                             + "/".join(str(s.get('path')) for s in pre) + "）")
+    return changed
+
+
+def fill_http_modules(bp: "Blueprint") -> int:
+    """给 http 能力**确定性地**分配落点模块（模型写的 modules 经常是空的）。
+
+    为什么必须由引擎定：实测（2026-11-07）目标里写着 FastAPI，契约合成却输出了
+    `calc.py` —— 它把推导提示词里的**示例路径**抄了过来，还编了个 `main() == 'ok'`。
+    作者照着写两行就能"通过"函数级判据，但 HTTP 探针必然 404，整片白跑。
+    落点由 probe 的路径唯一决定（/auth/register → app/auth.py），不留想象空间。
+    """
+    seg_map = {"boards": "tickets", "board": "tickets", "comments": "tickets",
+               "tags": "tickets", "auth": "auth", "users": "users", "user": "users",
+               "tickets": "tickets", "dashboard": "dashboard", "": "web"}
+    changed = 0
+    for c in bp.caps:
+        if str((c.probe or {}).get("kind") or "") != "http":
+            continue
+        if c.modules:
+            continue
+        # 用**最后一步**的路径定落点（前面几步是自包含补齐的注册/登录，不代表这条能力）
+        paths = _probe_paths(c.probe)
+        seg = ""
+        for p in reversed(paths):
+            parts = [x for x in str(p).strip("/").split("/") if x and not x.startswith("$")]
+            if parts:
+                seg = parts[0]
+                break
+        c.modules = [f"app/{seg_map.get(seg, seg if re.fullmatch(r'[a-z_]+', seg) else 'web')}.py"]
+        changed += 1
+    return changed
+
+
+EXTEND_PROMPT = """你是软件架构师。下面这个项目**已经做完了这些能力**（不要重复）。
+现在要把它**继续长到目标规模**：请补充 {need} 条**新能力**，只输出 JSON。
+
+【已经做完的（不要重复，也不要换个说法重做）】
+{have}
+
+【补充要求】
+1. 必须落在目标里**还没被覆盖**的部分（前端页面、评论、标签、负责人指派、优先级、
+   密码修改、分页/排序、导出、审计日志、健康检查 …… 按目标实际缺的挑）。
+2. 每条能力都要能**独立观测**（方法/路径/请求体/期望结果都写死），写法与之前一致：
+   给 http 探针（写 steps，必要时自带注册/登录前置），或 py_call / pytest。
+3. 粒度 3~8 个函数，别把 20 个函数塞进一条。
+4. **不要和已有能力重复观测同一个行为**；也不要再造一遍"注册/登录"。
+5. 前端类能力用 `{{"kind":"http","app":"app.main:app","method":"GET","path":"/",
+   "body_has":["<html"]}}` 这种形状；多条前端能力请分别落在不同路径（/tickets 页面、/login 页面…）。
+
+【目标】
+{goal}
+
+只输出 JSON：
+{{"caps":[{{"id":"...","desc":"...","probe":{{...}},"deps":[],"funcs_est":4,"modules":[]}}],
+  "dropped":[{{"what":"...","why":"..."}}]}}
+"""
+
+
+def extend(bp: "Blueprint", goal: str, *, need: int = 4, llm=None, ws=None) -> dict:
+    """给"已完成"的蓝图**追加新能力**（规模机制）。
+
+    为什么需要（实测 2026-11-07）：目标写着"XL / ≥10000 行"，蓝图只排了 9 条能力，
+    做完 9 条就报 100% —— 交付物 400 行。**规模不是模型能力问题，是规划机制问题**：
+    没有人按"还差多少行"去要新能力。这里补这一环：按缺口要能力，反复调用就能长上去。
+    """
+    llm = llm or _default_llm
+    have = "\n".join(f"- {c.id}：{c.desc[:60]}（{describe_probe(c.probe)}）"
+                     for c in bp.caps) or "（还没有）"
+    prompt = (EXTEND_PROMPT.replace("{need}", str(max(1, int(need))))
+              .replace("{have}", have[:4000])
+              .replace("{goal}", (goal or bp.goal)[:4000]))
+    r = llm(prompt, json_mode=True, task_id="blueprint-extend", node_id="plan", max_out=12000)
+    if not r.get("ok"):
+        return {"ok": False, "why": f"远端调用失败：{r.get('error')}", "added": []}
+    data = _json_of(r.get("answer") or "") or {}
+    raw = data.get("caps") or []
+    added: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        c = Cap.from_dict(item)
+        if not c.id or bp.by_id(c.id):
+            continue
+        bp.add(c)
+        added.append(c.id)
+    fill_budget(bp)
+    if ws is not None:
+        save(bp, ws)
+    return {"ok": True, "added": added, "dropped": data.get("dropped") or []}
+
+
+def describe_probe(p) -> str:                                # 小工具，避免上层重复实现
+    try:
+        from . import probe as _p
+        return _p.describe(p if isinstance(p, dict) else {})
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
 def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = True,
            max_repair: int = 1, emit=None, ws=None) -> dict:
     """目标 → 蓝图（derive 一次 + audit 一次 + 机械修补）。
@@ -669,6 +1182,16 @@ def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = Tru
         changed = repair(bp, audit_result, notes=notes)
         if not changed:
             break
+
+    # http 探针必须能被真的跑通（自包含）：模型写出来的十条里有九条缺注册/缺 token/
+    # 缺占位符实体。这是确定性的活，交给机械修补，不要让远端重写（它只会再犯一次）。
+    _n_http = normalize_http(bp, notes)
+    if _n_http and emit:
+        emit("probe_normalized", {"probes": _n_http})
+    _n_mod = fill_http_modules(bp)
+    if _n_mod and emit:
+        emit("modules_assigned", {"caps": _n_mod,
+                                  "modules": sorted({m for c in bp.caps for m in (c.modules or [])})})
 
     issues = validate(bp)
     bad = fatal(issues)

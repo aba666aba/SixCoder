@@ -75,10 +75,9 @@ def integration_smoke(ws: Path, contracts: dict, timeout: int = 120) -> dict:
         return {"ok": False, "imports": {}, "calls": {},
                 "fails": [f"集成冒烟超时 {timeout}s"]}
     finally:
-        try:
-            runner.unlink()
-        except OSError:
-            pass
+        # 不删 runner：下一个回合会原地覆盖。每次调用都删一个文件，
+        # 长跑累计会撞上外层"单轮删除"保护（实测 2026-11-07 直接打断夜班）。
+        pass
     lines = [ln for ln in (p.stdout or "").strip().splitlines() if ln.strip()]
     if not lines:
         return {"ok": False, "imports": {}, "calls": {},
@@ -456,10 +455,9 @@ def business_flow(ws: Path, contracts: dict, timeout: int = 180) -> dict:
         return {"ok": False, "applicable": True, "passed": 0, "total": 0, "checks": [],
                 "fails": [f"业务流超时 {timeout}s"]}
     finally:
-        try:
-            runner.unlink()
-        except OSError:
-            pass
+        # 不删 runner：下一个回合会原地覆盖。每次调用都删一个文件，
+        # 长跑累计会撞上外层"单轮删除"保护（实测 2026-11-07 直接打断夜班）。
+        pass
     lines = [ln for ln in (p.stdout or "").strip().splitlines() if ln.strip()]
     if not lines:
         return {"ok": False, "applicable": True, "passed": 0, "total": 0, "checks": [],

@@ -197,10 +197,25 @@ def default_complete(system: str, user: str, effort: str) -> str:
     延迟 import，避免自检（check_clarify）也拉起远端栈。
     """
     from core import remote  # noqa: WPS433
+    from core import settings_store  # noqa: WPS433
 
-    # 强度：DeepSeek 默认 Max+思考开；OpenAI 兼容不分最强，直接走默认。
-    body: dict = {"system": system, "user": user}
+    # remote.complete 的契约：单轮用 prompt（system+user 拼成一段），
+    # 思考强度走 step_index（映射到阶梯档位），没有 system/user/effort 形参。
+    prompt = f"{system}\n\n{user}"
+    body: dict = {"prompt": prompt, "node_id": "clarify"}
     if effort and effort != "auto":
-        body["effort"] = effort
+        # effort 字符串（none/low/high/max）映射到阶梯档位 index；
+        # 找不到该档（如 OpenAI 单档只有 none）就退到最强档 index。
+        norm_eff = str(effort).strip().lower()
+        idx = None
+        for i, s in enumerate(settings_store.ladder()):
+            if str(s.get("effort") or "").lower() == norm_eff:
+                idx = i
+                break
+        if idx is None:
+            idx = settings_store.strongest_step_index()
+        body["step_index"] = idx
     result = remote.complete(**body)
-    return result.get("text", "") if isinstance(result, dict) else str(result)
+    if isinstance(result, dict):
+        return result.get("answer") or result.get("text") or ""
+    return str(result)

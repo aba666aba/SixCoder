@@ -14,13 +14,13 @@ SixCoder/
 │  ├─ cli.py               命令行入口（run / handoff / remote / clean / regressions ...）
 │  ├─ iterate_cli.py       迭代驱动器（工作单模式，工程式推进）
 │  ├─ core/                引擎（唯一实现处）
-│  ├─ checks/              自检脚本（python checks/run_all.py 一次全跑，17 个）
+│  ├─ checks/              自检脚本（python checks/run_all.py 一次全跑，99 个）
 │  ├─ tools/               fixtures / legacy（历史脚本）/ night_* · trace（运维工具）
 │  ├─ web/                 前端（Vue3 + Vite，构建产物在 web/dist）
 │  ├─ data/                运行期数据（settings.json / api_index.db / proto.db，均不入库）
 │  └─ workspaces/          任务工作区（可随时删，已 gitignore）
 ├─ shell/                  Electron 桌面壳（只依赖 prototype；缺 Electron 会自动装或退化为浏览器）
-├─ docs/                   当前实况（15–18 + 模型门槛）；`plan/` 计划基线 01–13；`legacy/` 旧产品 README
+├─ docs/                   当前实况（15–27 + 模型门槛）；`plan/` 计划基线 01–13；`legacy/` 旧产品 README
 ├─ projects/               真实夜班产物（含 DELIVERY.md / TRACE.md），见 projects/README.md
 ├─ tools/git-hooks/        pre-push 守卫：拦住"把密钥/运行期文件推上远端"
 ├─ _logs/                  运行日志（不入库）
@@ -56,13 +56,16 @@ SixCoder/
 | `remote.py` | 远端（DeepSeek）：前缀缓存友好的包体、思考关闭、用量与闲时/忙时计费 |
 | `handoff.py` | 远端接力：打包 → 远端符号编辑 → 本地渲染 + 闸门 |
 | `settings_store.py` | 设置存储（api key 明文存本地、永不回显、只写变化项） |
+| `probe.py` | **验收探针**：`cli` / `py_call` / `pytest` / `http`（多步链、`split` 跨进程、`parallel` 并发、`expect_count` 条数） |
+| `shipgate.py` | **Web 交付机制**：机制能力注入、`.env` 生成、引擎生成 pytest、上线体检（导入/`/docs`/uvicorn/README/pytest） |
+| `deps.py` | **依赖自举**：扫产物 import → 补装缺失包 → 写 `requirements.txt`（检测 FastAPI 自动带 uvicorn） |
 | `context.py` / `budget.py` / `skeleton.py` / `oracle.py` / `style.py` / `tools.py` / `db.py` | 上下文预算 / 尝试预算 / 骨架 / 计算校验 / 风格 / 工具与沙箱 / 存储 |
 
 ## 常用命令
 
 ```powershell
 cd SixCoder\prototype
-python checks\run_all.py                       # 全部自检（11 项）
+python checks\run_all.py                       # 全部自检（99 项）
 python cli.py run --repo <dir> --requirement-file <f> --model qwen2.5:7b
 python iterate_cli.py --repo <dir> --requirement-file <f> --model qwen2.5:7b --rounds 4
 python cli.py handoff <task_id> --node <n> --remote --apply
@@ -76,7 +79,7 @@ python server.py --port 8760                    # 起后端（或用 shell/ 的�
 - **代码只留产品需要的**：`reference/`（旧 Java/Vue/RAG）与 `graft_demo/`（符号图研究分支）已删除，
   可复用的部分**只保留知识与设计契约**（`docs/15`、`docs/18`）。
 - **一键启动在根目录**：`start.bat` / `start.ps1` / `stop.ps1`，路径与依赖都由脚本自己找。
-- 自检脚本集中到 `prototype/checks/`，统一入口 `run_all.py`（17 个，可任意 cwd 运行）。
+- 自检脚本集中到 `prototype/checks/`，统一入口 `run_all.py`（99 个，可任意 cwd 运行）。
 - 独立验收脚本提到 `prototype/tools/hq_verify.py`（与引擎不共享代码，是最终裁判）。
 - 运行期产物（`workspaces/`、`*.db`、`_logs/`、`node_modules/`、`dist/`）全部 gitignore，
   并把 `settings.json`（含明文 Key）从索引移除；`tools/git-hooks/pre-push` 负责拦住复发。

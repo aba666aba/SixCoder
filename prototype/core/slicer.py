@@ -13,6 +13,8 @@ DAG 顺序保证：能力在切片里的位置严格按拓扑序 → 依赖一�
 """
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 
 from . import blueprint as _bp
@@ -65,6 +67,7 @@ def pack(bp, *, done=None, max_funcs: int = DEFAULT_DOSE,
     cur: list = []
     cur_funcs = 0
     cur_mods: set[str] = set()
+    cur_sub = ""
     for c in ready:
         # 只按能力**显式声明**的模块数收口；没声明的当未知（函数数上限已经兜住了）。
         # 早先按"每条预留 2 个文件"估过一个版本：给不出模块提示的能力会把切片
@@ -72,9 +75,15 @@ def pack(bp, *, done=None, max_funcs: int = DEFAULT_DOSE,
         mods = set(c.modules or [])
         over_funcs = bool(cur) and cur_funcs + c.funcs > max_funcs
         over_mods = bool(cur) and len(cur_mods | mods) > max_modules
-        if over_funcs or over_mods:
+        # 两级蓝图：片不跨子系统。一片只碰一个子系统的文件面 = 接口先冻结，
+        # 写 A 子系统时 B 子系统的文件不会出现在同一片里被顺手改坏。
+        sub = bp.subsystem_of(c.id) if getattr(bp, "subsystems", None) else ""
+        over_sub = bool(cur) and bool(getattr(bp, "subsystems", None)) and sub != cur_sub
+        if over_funcs or over_mods or over_sub:
             packs.append(cur)
             cur, cur_funcs, cur_mods = [], 0, set()
+        if not cur:
+            cur_sub = sub
         cur.append(c)
         cur_funcs += c.funcs
         cur_mods |= mods
@@ -161,6 +170,24 @@ def cmd_line(probe: dict) -> str:
     if kind == "pytest":
         args = " ".join(_q(a) for a in (probe.get("args") or []))
         return "python -m pytest -v" + (f" {args}" if args else "")
+    if kind == "http":
+        # Web 能力：把请求链逐字写出来（作者要照着实现路由，路径/字段名一个都不许改）
+        steps = probe.get("steps") or []
+        if steps:
+            out = []
+            for st in steps:
+                st = st or {}
+                hdr = ""
+                hs = st.get("headers") or {}
+                if isinstance(hs, dict) and hs:
+                    hdr = "  " + " ".join(f"-H {k}:{v}" for k, v in hs.items())
+                body = ""
+                if st.get("json") is not None:
+                    body = "  -d '" + json.dumps(st.get("json"), ensure_ascii=False) + "'"
+                out.append(f"{str(st.get('method') or 'GET').upper()} "
+                           f"{st.get('path') or '/'}{hdr}{body}")
+            return "；然后 ".join(out)
+        return f"{str(probe.get('method') or 'GET').upper()} {probe.get('path') or '/'}"
     return ""
 
 
@@ -254,6 +281,45 @@ def _arch_block(bp) -> str:
     return "# 人已经拍板的架构安排（**与你的直觉冲突时以此为准**，不要自行更改）\n" + body + tail
 
 
+def web_route_spec(probes: list[dict]) -> list[str]:
+    """把 http 探针还原成**路线的硬要求**（方法/路径/请求体字段/状态码/返回字段）。
+
+    为什么必须写死在简报里（实测 2026-11-07）：契约只声明服务层函数
+    `register_user(username, password) -> dict`，作者就只写函数、不挂路由，
+    探针真发 `POST /auth/register` 时 404 → 整片红，然后重试还在同一个地方打转。
+    路由形状本来就是**探针决定的**，没有想象空间，所以机械翻译过来，不让远端猜。
+    """
+    out: list[str] = []
+    for p in probes:
+        if not isinstance(p, dict) or str(p.get("kind") or "") != "http":
+            continue
+        steps = p.get("steps") or []
+        if steps:
+            st = steps[-1] or {}
+            method = str(st.get("method") or "GET").upper()
+            path = str(st.get("path") or "/")
+            body = st.get("json")
+            status = st.get("expect_status")
+            want = st.get("expect_json")
+        else:
+            method = str(p.get("method") or "GET").upper()
+            path = str(p.get("path") or "/")
+            body = p.get("json")
+            status = p.get("expect_status")
+            want = p.get("expect_json")
+        bits = [f"{method} {path}"]
+        if isinstance(body, dict) and body:
+            bits.append("请求体 JSON 字段：" + "、".join(str(k) for k in body))
+        if isinstance(status, list):
+            bits.append("状态码 " + "/".join(map(str, status)))
+        elif status is not None:
+            bits.append(f"状态码 {status}")
+        if isinstance(want, dict) and want:
+            bits.append("返回必须含：" + "、".join(f"{k}={v!r}" for k, v in list(want.items())[:6]))
+        out.append("；".join(bits) + "（字段名逐字一致）")
+    return out
+
+
 def brief(sl: dict, bp, *, ws=None, done=None) -> str:
     """切片 → 交给契约合成的一段需求文本（这一轮的"考试范围"）。
 
@@ -277,6 +343,12 @@ def brief(sl: dict, bp, *, ws=None, done=None) -> str:
             continue
         probes.append(c.probe if isinstance(c.probe, dict) else {})
         lines.append(f"- {cid}：{c.desc}")
+        if c.modules:
+            lines.append(f"  落点模块（**必须逐字用这些路径**，不许自创 calc.py 之类）："
+                         + "、".join(c.modules))
+        if str((c.probe or {}).get("kind") or "") == "http":
+            lines.append("  Web：本模块要写 `router = APIRouter()` 并挂路由；"
+                         "**不要写 app/main.py**（引擎生成，你的 router 会自动挂上）")
         lines.append(f"  观测方式：{_probe.describe(c.probe)}")
         cmd = cmd_line(c.probe)
         if cmd:
@@ -291,6 +363,12 @@ def brief(sl: dict, bp, *, ws=None, done=None) -> str:
             lines.append("  依赖（应当已经可用）：" + "、".join(c.deps))
         if c.why and c.status != "done":
             lines.append(f"  上一次它这样红的（这次必须改掉）：{str(c.why)[:220]}")
+    _routes = web_route_spec(probes)
+    if _routes:
+        lines += ["", "# 本片必须实现的路由（探针会真的发这些请求：路径 / 字段名 / 状态码一个都不许改）",
+                  *[f"- {r}" for r in _routes],
+                  "- 请求体用 Pydantic 模型接收 JSON，再调用上面契约里的函数；"
+                  "路由挂在「落点模块」的 `router` 上，**不要写 app/main.py**（引擎生成）。"]
     ex = entry_example(probes)
     if ex:
         lines += ["", "# 入口脚本的硬要求",

@@ -464,7 +464,28 @@ def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool) -> 
 
 
 def _post(payload: dict, base: str, key: str, timeout: int = 300) -> tuple[dict | None, str, int]:
-    """发一次请求。返回 (响应JSON, 错误串, 耗时ms)。"""
+    """发请求，**瞬时错误自动退避重试**（429/5xx/超时）。
+
+    为什么必须有（实测 2026-11-07）：`_is_transient` 早就写好了，却**从来没人调用**。
+    限流一次就被上层当成"作者这一版没写出来"，白白消耗一轮自愈 —— 模型被冤枉成"能力不够"。
+    """
+    import os as _os
+    import time as _time
+    tries = max(1, int(_os.environ.get("SIXCODER_REMOTE_RETRY", "3")))
+    last = ""
+    for attempt in range(1, tries + 1):
+        data, err, ms = _post_once(payload, base, key, timeout)
+        if data is not None:
+            return data, "", ms
+        last = err
+        if attempt >= tries or not _is_transient(err):
+            return None, err, ms
+        _time.sleep(min(20, 2 ** attempt))           # 2s / 4s / 8s …
+    return None, last, 0
+
+
+def _post_once(payload: dict, base: str, key: str, timeout: int = 300) -> tuple[dict | None, str, int]:
+    """真正发一次请求。返回 (响应JSON, 错误串, 耗时ms)。"""
     req = urllib.request.Request(
         base + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),

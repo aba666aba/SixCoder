@@ -98,8 +98,19 @@ def main() -> int:
     check("报告写明 thread × 4", "thread" in lines[0] and "4" in lines[0], lines[0])
     _set(None)
 
+    print("[6] 夜班写模块路径确实经 parallel.map_calls 走（开发文档 P0-2 的接线）")
+    # 静态断言：_author_round 把写模块循环交给了 map_calls，且保留旧的 break 语义。
+    # 与 check_ui_build 同类（源码结构断言），行为等价性由上面的 [3] 保证。
+    src = (Path(__file__).resolve().parents[1] / "core" / "company.py").read_text(
+        encoding="utf-8", errors="replace")
+    check("_author_round 定义 _write_one 闭包", "def _write_one(rel):" in src)
+    check("写模块循环经 map_calls 迭代", "map_calls(mods, _write_one)" in src)
+    check("break 语义用 _stopped 保留（预算/截止到 → 后续模块跳过）",
+          "_stopped" in src and '"skipped"' in src)
+    check("并行执行时留痕（parallel_write 事件）", "parallel_write" in src)
+
     print(f"\n{'全部通过' if not FAILS else '失败：' + str(FAILS)}"
-          "（默认串行 / 夹取合法 / 结果一致 / 异常不炸批 / 报告如实）")
+          "（默认串行 / 夹取合法 / 结果一致 / 异常不炸批 / 报告如实 / 夜班已接线）")
     return 0 if not FAILS else 1
 
 

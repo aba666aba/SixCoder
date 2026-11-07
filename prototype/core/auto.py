@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -43,6 +44,7 @@ SLICE_RETRY_MARGIN = 1.6       # 按函数数估切片预算时的重试余量�
 CNY_PER_FUNC = blueprint.CNY_PER_FUNC   # 每函数花费口径只留一处定义（blueprint 里那份）
 DEFAULT_SLICE_HOURS = 0.5      # 单切片时间预算（没指定时）
 MAX_REPLANS = 6                # 一次运行最多重规划 6 次（再多说明计划本身站不住）
+MAX_CONTRACT_FAIL = 4          # 契约合成连续失败到几次就如实停（系统侧问题，不降级能力）
 MAX_ITERATIONS = 400           # 循环硬闸：无论如何不许转不出来
 SELFCHECK_STEPS = 3            # 片内自验最多几步（每步 = 一次远端 + 至多 2 条命令）
 
@@ -368,6 +370,647 @@ def write_entry_wrapper(ws, entry: str, force: bool = False) -> dict:
     return {"ok": True, "wrote": True, "why": "入口接线由引擎生成（cli_run → 打印 → 退出码）"}
 
 
+WEB_ENTRY_MARK = "由引擎生成（Web 入口）"
+
+WEB_ENTRY = '''"""ASGI 应用入口（**由引擎生成，不要改**）。
+
+为什么不让你写这个文件：路由是分模块长的（app/auth.py、app/tickets.py …），
+每加一片能力就重写一次入口 → 上一片的路由被抹掉、"覆盖数"来回摆（CLI 入口踩过这个坑）。
+所以入口只做一件事：把各模块里的 `router` 全部 include 进来。
+你只需要在每个功能模块里写 `router = APIRouter()` 并挂路由。
+"""
+from __future__ import annotations
+
+import importlib
+import importlib.util
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(title="SixCoder App")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
+
+# 引擎按蓝图填的模块清单；还没写出来的模块自动跳过（不影响已通过的能力）
+_ROUTER_MODULES = {modules!r}
+
+for _name in _ROUTER_MODULES:
+    try:
+        if importlib.util.find_spec(_name) is None:
+            continue
+    except (ImportError, ValueError):
+        continue
+    _mod = importlib.import_module(_name)
+    _router = getattr(_mod, "router", None)
+    if _router is not None:
+        app.include_router(_router)
+'''
+
+
+def _web_route_plan(bp, sl: dict, ctext: str) -> tuple[dict[str, list[dict]], dict[str, dict]]:
+    """切片 → {模块: [路由]} 与 {模块: {函数: [参数名]}}（都来自探针与契约，机械可得）。"""
+    from . import contract as _cm
+    parsed = _cm.parse_requirement(ctext) or {}
+    fmap: dict[str, dict] = {}
+    for mod, c in parsed.items():
+        fmap[mod] = {f.name: [p.name for p in (f.params or [])] for f in (c.funcs or [])}
+    plan: dict[str, list[dict]] = {}
+    for cid in (sl.get("caps") or []):
+        c = bp.by_id(cid)
+        if c is None or str((c.probe or {}).get("kind") or "") != "http":
+            continue
+        mod = (c.modules or ["app/main.py"])[0]
+        steps = (c.probe or {}).get("steps") or [{}]
+        st = steps[-1] or {}
+        names = list((fmap.get(mod) or {}).keys())
+        route = {"method": str(st.get("method") or "GET").upper(),
+                 "path": _fastapi_path(st.get("path") or "/"),
+                 "func": names[0] if names else "",
+                 "body_keys": list((st.get("json") or {}).keys()),
+                 "body_sample": st.get("json")}
+        stt = st.get("expect_status")
+        if isinstance(stt, int):
+            route["status"] = stt
+        plan.setdefault(mod, []).append(route)
+    return plan, fmap
+
+
+def _fastapi_path(path: str) -> str:
+    """`/tickets/${ticket_id}` → `/tickets/{ticket_id}`（探针用 ${} 传变量，路由用 {} 占位）。"""
+    return re.sub(r"\$\{(\w+)\}", r"{\1}", str(path or ""))
+
+
+def _module_signatures(src: str) -> dict[str, list[str]]:
+    """从源码 AST 取 {函数名: [参数名]}（跳过下划线私有与引擎自己的 handler）。
+
+    用 AST 而不是契约：路由接线发生在"作者可能刚把文件整篇重写"之后，
+    契约里记的函数名不一定还是现在这个文件里的名字。
+    """
+    import ast as _ast
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return {}
+    out: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            name = node.name
+            if name.startswith("_"):
+                continue
+            out[name] = [a.arg for a in node.args.args]
+    return out
+
+
+HELPER_WORDS = ("connection", "conn", "_db", "get_db", "cursor", "session", "close",
+                "helper", "setup", "initialize", "engine", "migrate", "table")
+
+
+def _pick_func(path: str, funcs: dict[str, list[str]], method: str = "GET") -> str:
+    """按 HTTP 语义选最像的**端点**函数（POST /tickets → create_ticket）。
+
+    两个坑（都是实测踩的）：
+      · 加权求和会让 `get_board_tickets` 凭一个 "get" 抢走 `GET /tickets`；
+      · 只按动作词匹配会让 `create_connection(db_file)` 抢走 `POST /tickets`
+        —— 它名字里有 "create"，但它是**数据库连接辅助函数**，接上去必然
+        `TypeError: expected str, bytes or os.PathLike object`（2026-11-07）。
+    所以：先按路径/方法的优先关键词组选出候选，再**剔除辅助函数**，最后优先资源词匹配。
+    """
+    p = str(path or "").lower()
+    m = str(method or "GET").upper()
+    groups: list[tuple[str, ...]] = []
+    if "search" in p:
+        groups.append(("search", "find", "query"))
+    if "board" in p:
+        groups.append(("board", "kanban"))
+    if "dashboard" in p:
+        groups.append(("dashboard", "stat", "summary"))
+    if "login" in p:
+        groups.append(("login", "signin"))
+    if "register" in p:
+        groups.append(("register", "signup"))
+    if "comment" in p:
+        groups.append(("comment",))
+    if m == "POST":
+        groups.append(("create", "add", "insert", "new"))
+    elif m in ("PUT", "PATCH"):
+        groups.append(("update", "edit", "change", "modify", "set"))
+    elif m == "DELETE":
+        groups.append(("delete", "remove", "drop"))
+    else:
+        groups.append(("list", "all", "index"))
+        groups.append(("get", "detail", "read", "fetch"))
+
+    res_tokens = [t for t in re.findall(r"[a-z]+", p)
+                  if len(t) > 3 and t not in ("auth", "tickets", "users", "boards", "http")]
+    res_singular = [t[:-1] if t.endswith("s") else t for t in res_tokens]
+
+    def usable(name: str) -> bool:
+        low = name.lower()
+        return not any(h in low for h in HELPER_WORDS)
+
+    for keys in groups:
+        hit = [n for n in funcs if any(k in n.lower() for k in keys) and usable(n)]
+        if not hit:
+            continue
+        # 资源词优先（ticket → create_ticket 而不是 create_user）
+        for n in hit:
+            if any(t in n.lower() for t in res_singular):
+                return n
+        return hit[0]
+    return ""
+
+
+def apply_web_wiring(ws, bp) -> list[str]:
+    """按蓝图把**所有** http 能力的路由补齐（幂等、确定性、顺序正确）。
+
+    为什么要有注册表（实测 2026-11-07）：
+      · 作者整文件重写 / 回归回滚会抹掉引擎段 → 路由消失 → 能力 404 被判"做不出来"；
+      · 只追加不重排 → `/tickets/{ticket_id}` 排在 `/tickets/search` 前面 → 后者永远 405。
+    所以引擎维护一份 `.sixcoder/web_routes.json`，每次**整块重渲染**（静态路径在前），
+    模块里那段永远等于注册表的投影，不靠"记得追加"。
+    """
+    reg = _load_routes(ws)
+    per_mod: dict[str, list[dict]] = {}
+    for c in bp.caps:
+        if str((c.probe or {}).get("kind") or "") != "http":
+            continue
+        mod = (c.modules or [""])[0]
+        p = Path(ws) / mod
+        if not mod or not p.is_file():
+            continue
+        # 先占位：这个模块必须参与本次渲染，否则"函数全被删了"时旧引擎段永远清不掉。
+        per_mod.setdefault(mod, [])
+        last = (((c.probe or {}).get("steps") or [{}])[-1] or {})
+        path = _fastapi_path(last.get("path") or "")
+        if not path:
+            continue
+        # 负向用例（期望 4xx）只负责"判"，**不能定义路由**：否则它会用自己的请求体
+        # 和错误状态码覆盖掉正向路由（实测 2026-11-07：POST /tickets 变成 200、
+        # 请求体变成 __invalid__，整片全红）。
+        _stt = last.get("expect_status")
+        if (isinstance(_stt, int) and _stt >= 400) or (
+                isinstance(_stt, list) and _stt and all(
+                    isinstance(x, int) and x >= 400 for x in _stt)):
+            continue
+        try:
+            src = p.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        funcs = _module_signatures(src)
+        method = str(last.get("method") or "GET").upper()
+        fn = _pick_func(path, funcs, method)
+        if not fn:
+            continue
+        route = {"method": method, "path": path, "func": fn,
+                 "body_keys": list((last.get("json") or {}).keys()),
+                 "body_sample": last.get("json")}
+        stt = last.get("expect_status")
+        if isinstance(stt, int):
+            route["status"] = stt
+        per_mod.setdefault(mod, []).append(route)
+
+    done: list[str] = []
+    for mod, routes in per_mod.items():
+        key = lambda r: f"{str(r.get('method')).upper()} {r.get('path')}"      # noqa: E731
+        merged = {key(r): r for r in (reg.get(mod) or [])}
+        for r in routes:
+            k = key(r)
+            old_r = merged.get(k)
+            # 有状态码的版本优先：别让"没写 status"的同路径条目把 201 冲成 200
+            if old_r and old_r.get("status") is not None and r.get("status") is None:
+                continue
+            merged[k] = r
+        try:
+            src = (Path(ws) / mod).read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        funcs_now = _module_signatures(src)
+        # 函数已经不在了 → 这条路由必须从注册表里摘掉，不能留着变成 NameError
+        reg[mod] = [r for r in merged.values()
+                    if str(r.get("func")) and str(r.get("func")) in funcs_now]
+        # **只有引擎真能接上的端点**才摘作者的路由：否则摘完引擎接不上，
+        # 就变成 404（比重复注册更糟）。
+        _owned = {(str(r.get("method") or "").upper(), str(r.get("path") or ""))
+                  for r in reg[mod]}
+        src, _removed = _strip_author_routes(src, _owned)
+        src, _added = _ensure_imports(src)
+        if _removed or _added:
+            try:
+                (Path(ws) / mod).write_text(src, encoding="utf-8")
+            except OSError:
+                pass
+            if _removed:
+                done.append(f"{mod}: 摘掉作者自挂的 {', '.join(_removed[:3])}")
+            if _added:
+                done.append(f"{mod}: 补 import {', '.join(x.split()[-1] for x in _added[:3])}")
+        res = ensure_web_router(ws, mod, reg[mod], funcs_now, full=True)
+        if res.get("wrote"):
+            done.append(f"{mod}:{len(reg[mod])} 条路由（静态优先）")
+    _save_routes(ws, reg)
+    return done
+
+
+def write_web_entry(ws, bp) -> dict:
+    """生成/刷新 ASGI 入口 `app/main.py`（确定性、0 token、可溯源）。
+
+    只写**引擎自己的文件**：其它 app/*.py 一律不碰。
+    """
+    mods = []
+    for c in bp.caps:
+        if str((c.probe or {}).get("kind") or "") != "http":
+            continue
+        for m in (c.modules or []):
+            name = str(m or "").strip()
+            if not name.endswith(".py") or name == "app/main.py":
+                continue
+            mod = name[:-3].replace("/", ".")
+            if mod.startswith("app.") and mod not in mods:
+                mods.append(mod)
+    root = Path(ws) / "app"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        init = root / "__init__.py"
+        if not init.exists():
+            init.write_text("", encoding="utf-8")
+        p = root / "main.py"
+        body = WEB_ENTRY.replace("{modules!r}", repr(sorted(mods)))
+        if p.exists():
+            cur = p.read_text(encoding="utf-8-sig", errors="replace")
+            if cur.strip() == body.strip():
+                return {"ok": True, "wrote": False, "why": "已是引擎 Web 入口",
+                        "modules": sorted(mods)}
+        p.write_text(body, encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "wrote": False, "why": f"写不了：{exc}"}
+    return {"ok": True, "wrote": True, "modules": sorted(mods),
+            "why": f"Web 入口由引擎生成（include {len(mods)} 个 router 模块）"}
+
+
+WEB_ROUTE_BEGIN = "# --- 引擎补的路由接线（本段由引擎生成，手改无效）---"
+WEB_ROUTE_END = "# --- 路由接线结束 ---"
+
+
+ROUTES_FILE = ".sixcoder/web_routes.json"
+
+
+def _load_routes(ws) -> dict:
+    import json as _json
+    p = Path(ws) / ROUTES_FILE
+    try:
+        return _json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
+def _save_routes(ws, reg: dict) -> None:
+    import json as _json
+    p = Path(ws) / ROUTES_FILE
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+# 名字 → 该补的 import（只放**无歧义**的；`Path`/`Response`/`status` 这类
+# 既能来自 fastapi 又能来自 pathlib/starlette 的不猜，避免补错）
+_AUTO_IMPORTS = {
+    "HTTPException": "from fastapi import HTTPException",
+    "APIRouter": "from fastapi import APIRouter",
+    "Body": "from fastapi import Body",
+    "Header": "from fastapi import Header",
+    "Query": "from fastapi import Query",
+    "Depends": "from fastapi import Depends",
+    "JSONResponse": "from fastapi.responses import JSONResponse",
+    "PlainTextResponse": "from fastapi.responses import PlainTextResponse",
+    "HTMLResponse": "from fastapi.responses import HTMLResponse",
+    "BaseModel": "from pydantic import BaseModel",
+    "Field": "from pydantic import Field",
+    "sqlite3": "import sqlite3",
+    "json": "import json",
+    "os": "import os",
+    "re": "import re",
+    "time": "import time",
+    "uuid": "import uuid",
+    "threading": "import threading",
+    "logging": "import logging",
+}
+
+
+def _ensure_imports(src: str) -> tuple[str, list[str]]:
+    """补上"用了但没 import"的名字（HTTPException 之类）。
+
+    为什么要有（实测 2026-11-07）：作者在服务函数里 `raise HTTPException(...)`，
+    却只 import 了 APIRouter/Body/Header → 请求时 `NameError`，整模块所有能力一起红，
+    系统还以为是"能力做不出来"。缺哪个 import 是**确定性**信息，不该让模型猜。
+    """
+    import ast as _ast
+    # 只在**作者区**里补：引擎段稍后会被整块重渲染，补进去的 import 会被冲掉
+    # （实测 2026-11-07：HTTPException 补进了引擎段 → 渲染后消失 → 还是 NameError）
+    head, tail = src, ""
+    if WEB_ROUTE_BEGIN in src:
+        head, tail = src.split(WEB_ROUTE_BEGIN, 1)
+        tail = WEB_ROUTE_BEGIN + tail
+    try:
+        tree = _ast.parse(head)
+    except SyntaxError:
+        return src, []
+    have: set[str] = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Import):
+            for a in node.names:
+                have.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, _ast.ImportFrom):
+            for a in node.names:
+                have.add(a.asname or a.name)
+    used = {n.id for n in _ast.walk(tree) if isinstance(n, _ast.Name)}
+    used |= {n.attr for n in _ast.walk(tree) if isinstance(n, _ast.Attribute)}
+    add = [stmt for name, stmt in _AUTO_IMPORTS.items()
+           if name in used and name not in have]
+    if not add:
+        return src, []
+    lines = head.splitlines()
+    last_import = 0
+    for i, ln in enumerate(lines[:80], 1):
+        t = ln.strip()
+        if t.startswith("import ") or t.startswith("from "):
+            last_import = i
+    pos = last_import if last_import else 0
+    out = lines[:pos] + add + lines[pos:]
+    return "\n".join(out) + "\n" + tail, add
+
+
+def _strip_author_routes(src: str, owned: set) -> tuple[str, list[str]]:
+    """删掉作者自己写的、**引擎已经负责**的那些路由装饰器（保留函数本体）。
+
+    为什么必须管（实测 2026-11-07）：作者会按"Web 项目常识"给服务函数挂
+    `@router.post("/tickets", response_model=Dict[str, str])`，于是
+      · 和引擎生成的路由**重复注册**，先注册的（作者的）生效 → 状态码/请求体都不对；
+      · `response_model` 把 int 的 id 当 str 校验 → 500。
+    引擎只为"自己有探针契约"的端点接管路由，作者多写的其它路由不动。
+    """
+    import ast as _ast
+    if not owned:
+        return src, []
+    head, tail = src, ""
+    if WEB_ROUTE_BEGIN in src:                    # 只处理作者区，引擎段稍后整块重渲染
+        head, tail = src.split(WEB_ROUTE_BEGIN, 1)
+        tail = WEB_ROUTE_BEGIN + tail
+    try:
+        tree = _ast.parse(head)
+    except SyntaxError:
+        return src, []
+    drop: list[int] = []
+    removed: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not isinstance(dec, _ast.Call) or not isinstance(dec.func, _ast.Attribute):
+                continue
+            if getattr(dec.func.value, "id", "") not in ("router", "app"):
+                continue
+            verb = dec.func.attr.lower()
+            if not dec.args or not isinstance(dec.args[0], _ast.Constant):
+                continue
+            if not isinstance(dec.args[0].value, str):
+                continue
+            path = _fastapi_path(dec.args[0].value)
+            if (verb.upper(), path) in owned:
+                drop.extend(range(dec.lineno, (dec.end_lineno or dec.lineno) + 1))
+                removed.append(f"{verb.upper()} {path}")
+    if not drop:
+        return src, []
+    lines = head.splitlines()
+    for ln in sorted(set(drop), reverse=True):
+        if 1 <= ln <= len(lines):
+            del lines[ln - 1]
+    return "\n".join(lines) + "\n" + tail, removed
+
+
+def _py_type(v) -> str:
+    """按样本值猜 pydantic 类型（用于生成请求体模型，让校验成为 FastAPI 的默认行为）。"""
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, int):
+        return "int"
+    if isinstance(v, float):
+        return "float"
+    if isinstance(v, list):
+        return "list"
+    if isinstance(v, dict):
+        return "dict"
+    return "str"
+
+
+def _strip_engine_leftovers(src: str) -> str:
+    """删掉"被作者抄出引擎段"的残留：`_engine_*` 函数与 `_Body_*` 模型。
+
+    实测（2026-11-07）：作者看到引擎生成的路由 handler，会把它当成模块的一部分
+    **复制到自己的代码里**（还丢了 `Body/Header` 的 import）→ `NameError: Body`，
+    整个 app 导入失败、15 条能力一起红。这些名字是引擎专用的（`_engine_`/`_Body_`），
+    清掉不会伤到作者的东西。
+    """
+    import ast as _ast
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return src
+    drop: list[tuple[int, int]] = []
+    for node in tree.body:
+        name = getattr(node, "name", "")
+        if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            continue
+        if not (name.startswith("_engine_") or name.startswith("_Body_")):
+            continue
+        start = min([getattr(d, "lineno", node.lineno) for d in
+                     getattr(node, "decorator_list", [])] + [node.lineno])
+        drop.append((start, node.end_lineno or node.lineno))
+    if not drop:
+        return src
+    lines = src.splitlines()
+    for a, b in reversed(sorted(drop)):
+        del lines[a - 1:b]
+    return "\n".join(lines) + "\n"
+
+
+def ensure_web_router(ws, module: str, routes: list[dict], funcs: dict[str, list[str]],
+                      full: bool = True) -> dict:
+    """把模块里的路由段**整块重渲染**成注册表的投影（确定性，不追加）。
+
+    路由形状（方法/路径/状态码/请求体字段）完全由探针决定，是接线不是设计判断，
+    所以交给引擎；作者只写服务层函数。
+
+    三条硬约束（都踩过）：
+      · 必须**剥掉所有**旧的引擎段再写：只剥第一段会让同一路由出现两次（2026-11-07）；
+      · 静态路径排在 `{param}` 之前：否则 `/tickets/{id}` 会吃掉 `/tickets/search` → 405；
+      · 参数接不上就不要接：硬接会拿 None 去调，报一个和作者无关的 TypeError。
+    """
+    p = Path(ws) / module
+    if not p.is_file():
+        return {"ok": False, "wrote": False, "why": "模块还没写出来"}
+    # 注意：routes 为空也要继续 —— 函数被作者删掉时，旧引擎段里还留着指向它们的
+    # `@router.*`，不清掉就是"请求时 NameError"（实测 2026-11-07，6 条能力一起红）。
+    try:
+        src = p.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        return {"ok": False, "wrote": False, "why": f"读不了：{exc}"}
+
+    while WEB_ROUTE_BEGIN in src:                        # 剥**干净**（可能有多段残留）
+        _h, _rest = src.split(WEB_ROUTE_BEGIN, 1)
+        _rest = _rest.split(WEB_ROUTE_END, 1)[1] if WEB_ROUTE_END in _rest else ""
+        src = _h + _rest
+    src = _strip_engine_leftovers(src)
+    head = src.rstrip()
+
+    routes = sorted(routes, key=lambda r: (0 if "{" not in str(r.get("path") or "") else 1,
+                                           -len(str(r.get("path") or "")),
+                                           str(r.get("path") or "")))
+    body: list[str] = []
+    seen: set = set()
+    n_routes = 0
+    skipped: list[str] = []
+    for r in routes:
+        fn = str(r.get("func") or "")
+        path = str(r.get("path") or "")
+        method = str(r.get("method") or "GET").lower()
+        if not fn or not path or (method, path) in seen:
+            continue
+        if not re.search(rf"^\s*def\s+{re.escape(fn)}\s*\(", head, re.M):
+            skipped.append(f"{method} {path}（缺函数 {fn}）")
+            continue
+        pvars = re.findall(r"\{(\w+)\}", path)
+        bkeys = set(r.get("body_keys") or [])
+        nums = re.findall(r"/(\d+)(?=/|$)", path)
+        args: list[str] = []
+        bad: list[str] = []
+        for pn in (funcs.get(fn) or []):
+            if pn in pvars:
+                args.append(f"{pn}=_to_int({pn})")
+            elif pn in ("authorization", "token", "auth"):
+                args.append(f"{pn}=authorization")
+            elif pn in bkeys:
+                args.append(f'{pn}=_b.get("{pn}")')
+            elif pn.endswith("_id") or pn in ("id", "pk"):
+                args.append(f"{pn}={int(nums[0]) if nums else 1}")
+            elif not any(k in pn.lower() for k in
+                         ("file", "path", "url", "dir", "db", "conn")):
+                args.append(f'{pn}=""')
+            else:
+                bad.append(pn)
+        if bad:
+            skipped.append(f"{method} {path}（参数无从提供：{','.join(bad)}）")
+            continue
+        seen.add((method, path))
+        n_routes += 1
+        name = re.sub(r"[^a-z0-9]+", "_", f"{method}_{path}".lower()).strip("_")
+        model = ""
+        if bkeys:
+            fname = f"_Body_{name}"
+            model = f"class {fname}(BaseModel):\n" + "\n".join(
+                f"    {k}: {_py_type((r.get('body_sample') or {}).get(k))}" for k in sorted(bkeys))
+            body_arg = f"body: {fname}"
+        else:
+            body_arg = "body: dict = Body(default=None)"
+        extra = [f"{v}: str" for v in pvars] + [body_arg]
+        st = r.get("status")
+        kw = f", status_code={int(st)}" if isinstance(st, int) else ""
+        if model:
+            body += ["", model]
+        body += ["", f'@router.{method}("{path}", response_model=None{kw})',
+                 f"def _engine_{name}({', '.join(extra)},",
+                 "                   authorization: str = Header(default=\"\")):",
+                 ("    _b = body.model_dump()" if bkeys else
+                  "    _b = body if isinstance(body, dict) else {}"),
+                 f"    return {fn}({', '.join(args)})"]
+
+    block = [WEB_ROUTE_BEGIN]
+    if any(r.get("body_keys") for r in routes) and not re.search(r"\bBaseModel\b", head):
+        block.append("from pydantic import BaseModel")
+    for name in ("APIRouter", "Body", "Header"):
+        if not re.search(rf"\b{name}\b", head):
+            block.append(f"from fastapi import {name}")
+    if not re.search(r"^\s*router\s*=\s*APIRouter\(", head, re.M):
+        block.append("router = APIRouter()")
+    if "_to_int" not in head:
+        block += ["", "def _to_int(v):",
+                  "    try:", "        return int(v)",
+                  "    except (TypeError, ValueError):", "        return v"]
+    block += body + [WEB_ROUTE_END]
+    text = head + "\n\n" + "\n".join(block) + "\n"
+    if text == p.read_text(encoding="utf-8-sig", errors="replace"):
+        return {"ok": True, "wrote": False, "why": "路由段已是最新", "routes": n_routes,
+                "skipped": skipped}
+    try:
+        p.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "wrote": False, "why": f"写不了：{exc}"}
+    return {"ok": True, "wrote": True, "routes": n_routes, "skipped": skipped,
+            "why": f"{n_routes} 条路由（静态优先）；跳过 {len(skipped)} 条"}
+
+
+def write_web_entry(ws, bp) -> dict:
+    """生成/刷新 ASGI 入口 `app/main.py`（确定性、0 token、可溯源）。
+
+    只写**引擎自己的文件**：其它 app/*.py 一律不碰。
+    """
+    mods = []
+    for c in bp.caps:
+        if str((c.probe or {}).get("kind") or "") != "http":
+            continue
+        for m in (c.modules or []):
+            name = str(m or "").strip()
+            if not name.endswith(".py") or name == "app/main.py":
+                continue
+            mod = name[:-3].replace("/", ".")
+            if mod.startswith("app.") and mod not in mods:
+                mods.append(mod)
+    root = Path(ws) / "app"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        init = root / "__init__.py"
+        if not init.exists():
+            init.write_text("", encoding="utf-8")
+        p = root / "main.py"
+        body = WEB_ENTRY.replace("{modules!r}", repr(sorted(mods)))
+        if p.exists():
+            cur = p.read_text(encoding="utf-8-sig", errors="replace")
+            if cur.strip() == body.strip():
+                return {"ok": True, "wrote": False, "why": "已是引擎 Web 入口",
+                        "modules": sorted(mods)}
+        p.write_text(body, encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "wrote": False, "why": f"写不了：{exc}"}
+    return {"ok": True, "wrote": True, "modules": sorted(mods),
+            "why": f"Web 入口由引擎生成（include {len(mods)} 个 router 模块）"}
+
+
+WEB_ROUTE_BEGIN = "# --- 引擎补的路由接线（本段由引擎生成，手改无效）---"
+WEB_ROUTE_END = "# --- 路由接线结束 ---"
+
+
+ROUTES_FILE = ".sixcoder/web_routes.json"
+
+
+def _load_routes(ws) -> dict:
+    import json as _json
+    p = Path(ws) / ROUTES_FILE
+    try:
+        return _json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
+def _save_routes(ws, reg: dict) -> None:
+    import json as _json
+    p = Path(ws) / ROUTES_FILE
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(reg, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def ensure_entry_wiring(ws, entry: str) -> dict:
     """入口脚本必须能直接 `python entry.py …` 跑起来：缺 `__main__` 接线就机械补 1 行。
 
@@ -617,6 +1260,37 @@ def ensure_example(text: str, entry: str, ex: str, prep: list[str] | None = None
     return text
 
 
+def _append_web_routes(text: str, probes: list, keep_modules: list[str] | None = None,
+                       fail_note: str = "") -> str:
+    """把 http 探针要求的路由**写进契约本体**（作者看得到的东西）。
+
+    为什么不能只写在简报里（实测 2026-11-07）：作者上下文由契约构成，简报只用于
+    契约合成。路由形状（方法/路径/请求体字段/状态码）只有探针知道，契约里没有，
+    作者就只写服务层函数 → 探针真发请求时 404 → 整片红、反复重写同一个地方。
+
+    fail_note 也必须进来：Web 项目没有 CLI 入口，`ensure_entry_binding` 会直接原样返回，
+    于是"上一轮实测失败"这条证据**永远传不到作者**（实测：状态码 200/期望 201 连撞两轮）。
+    """
+    from . import slicer as _slicer
+    if not text.strip():
+        return text
+    marker = "# 路由（探针会"
+    if marker in text:                       # 上一轮加的块：整块换新（否则证据不会更新）
+        text = text[:text.index(marker)].rstrip()
+    specs = _slicer.web_route_spec([p for p in probes if isinstance(p, dict)])
+    if not specs:
+        return text
+    mods = [str(m) for m in (keep_modules or []) if str(m).endswith(".py")] or ["（本片模块）"]
+    block = ["", "# 路由（探针会**真的**发这些请求：路径 / 字段名 / 状态码逐字一致，不许改）",
+             *[f"- {s}" for s in specs],
+             f"- 写法：在 {mods[0]} 里 `router = APIRouter()`，用 Pydantic 模型接收 JSON 请求体，"
+             "再调用上面的契约函数；**不要写 app/main.py**（引擎生成，router 会自动挂上）"]
+    note = (fail_note or "").strip().replace("\n", " ")[:240]
+    if note:
+        block.append(f"- 【上一轮实测失败，这次必须改掉】{note}")
+    return text.rstrip() + "\n" + "\n".join(block) + "\n"
+
+
 def contract_for_slice(ws, sl: dict, brief: str, *, emit=None, refresh: bool = False,
                        entry: str = "", entry_example: str = "", fail_note: str = "",
                        prep: list[str] | None = None,
@@ -624,7 +1298,8 @@ def contract_for_slice(ws, sl: dict, brief: str, *, emit=None, refresh: bool = F
                        groups: list[list[str]] | None = None,
                        core_probes=None,
                        keep_modules: list[str] | None = None,
-                       drop_modules: list[str] | None = None) -> dict:
+                       drop_modules: list[str] | None = None,
+                       web_probes: list | None = None) -> dict:
     """这一片的考卷：远端最强档把"切片简报"翻译成可机判的契约，按切片 id 缓存。
 
     缓存不是为了省钱（虽然也省），是为了**可复现**：同一片重跑必须还是同一份考卷，
@@ -647,6 +1322,8 @@ def contract_for_slice(ws, sl: dict, brief: str, *, emit=None, refresh: bool = F
             fixed = (trim_contract(ensure_core_binding(text, entry, core_probes, fail_note), drop=drop_mods)
                      if core_probes is not None else
                      ensure_entry_binding(text, entry, entry_example, fail_note, prep, post, groups))
+            fixed = _append_web_routes(fixed, list(web_probes or []), keep_modules=keep_mods,
+                                        fail_note=fail_note)
             if fixed != text:
                 p.write_text(fixed, encoding="utf-8")
             return {"ok": True, "path": str(p), "text": fixed, "by": "cached"}
@@ -668,6 +1345,8 @@ def contract_for_slice(ws, sl: dict, brief: str, *, emit=None, refresh: bool = F
             if core_probes is not None else
             ensure_entry_binding(got.get("text") or "", entry, entry_example, fail_note,
                                  prep, post, groups))
+    text = _append_web_routes(text, list(web_probes or []), keep_modules=keep_mods,
+                               fail_note=fail_note)
     if _contract_funcs(text) == 0:
         # 只有模块名、没有函数签名的契约 = 没法验收 = 会静默零工作量（实测过的形态）
         return {"ok": False, "problems": ["切片契约解析出 0 个函数签名（只是文件清单）"]}
@@ -718,6 +1397,35 @@ def _default_runner(ws, brief: str, contract_path: str, budget_cny: float, *,
 
 # ---------------------------------------------------------------- 主循环
 
+def _target_lines(goal: str) -> int:
+    """从目标里读"要多少行"（≥10000 行 / 目标 8000 行 / XL）。读不到就 0（不启用规模机制）。"""
+    g = str(goal or "")
+    m = re.search(r"(\d{3,6})\s*行", g)
+    if m:
+        return int(m.group(1))
+    if re.search(r"\bXL\b", g, re.I):
+        return 10000
+    if re.search(r"\bL\b", g):
+        return 4000
+    return 0
+
+
+def _maybe_split_subsystems(bp, ws, emit=None) -> bool:
+    """两级蓝图（开发文档 §18.7 第 1 件）：能力数过阈值 → 按模块域分组。
+
+    只在能力数 ≥ 阈值时分（重新）组；已有分组不会因为"能力暂时变少"被取消
+    （分组是稳定的接口冻结，取消会破坏已做的切片边界）。返回是否真的重新分组。
+    """
+    if len(bp.caps) < blueprint.SUBSYS_TRIGGER_CAPS:
+        return False
+    blueprint.split_subsystems(bp)
+    blueprint.save(bp, ws)
+    if emit:
+        emit("subsystems", {"groups": len(bp.subsystems), "caps": len(bp.caps),
+                            "note": "两级蓝图：能力按模块域分组，切片不跨子系统"})
+    return True
+
+
 def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 0.0,
                model: str = "", max_slices: int = 0, max_rounds: int = 40,
                slice_hours: float = 0.0, do_audit: bool = True, fresh: bool = False,
@@ -735,6 +1443,12 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
     ws = Path(repo).resolve()
     # 全自主是从 0 生成：工作区允许还不存在（CLI --goal 模式与 API 直接调都会走这里）
     ws.mkdir(parents=True, exist_ok=True)
+    # 项目宪法：跑夜班前先落盘（幂等）。作者提示词把宪法当稳定前缀注入（吃前缀缓存）。
+    try:
+        from . import constitution as _const0
+        _const0.ensure(ws)
+    except Exception:                                    # noqa: BLE001
+        pass
     t0 = time.time()
     llm = llm or blueprint._default_llm
     runner = runner or _default_runner
@@ -774,11 +1488,33 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
         if cut:
             start_cut.extend(cut)
         blueprint.save(bp, ws)
+        # 两级蓝图：能力数过阈值 → 分组（切片不跨子系统）
+        _maybe_split_subsystems(bp, ws, emit)
         if emit:
             emit("blueprint_ready", {"version": bp.version, "caps": len(bp.caps),
                                      "summary": blueprint.summary(bp)[:600]})
     elif goal and not bp.goal:
         bp.goal = goal
+        blueprint.save(bp, ws)
+
+    # 机制注入：鉴权拦截 / 页面可打开 / 数据真落盘 —— 这三类是"能上线"的硬要求，
+    # 但远端模型经常"忘了做"，于是系统给绿灯、交付物却不能用（实测 2026-11-07）。
+    # 这里是**引擎侧**补能力，不消耗远端能力。
+    try:
+        from . import shipgate as _ship0
+        _inj = _ship0.inject_caps(bp, goal or bp.goal)
+        if _inj:
+            bp.notes.append("机制注入：" + "、".join(_inj))
+            blueprint.save(bp, ws)
+            if emit:
+                emit("caps_injected", {"caps": _inj})
+    except Exception as exc:                             # noqa: BLE001
+        if emit:
+            emit("notice", {"message": f"机制注入跳过：{type(exc).__name__}: {exc}"[:160]})
+
+    # 老蓝图（引擎分配落点模块之前生成的）可能 modules 是空的：
+    # Web 能力必须补齐落点，否则作者无处落文件、契约合成会抄成 calc.py。
+    if blueprint.fill_http_modules(bp):
         blueprint.save(bp, ws)
 
     # ── 人给的验收样例是**权威判据**：直接变成能力，排在最前，模型自造的探针让位 ──
@@ -808,10 +1544,59 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
     if approve is not None and not approve(bp):
         return _fail(ws, "蓝图等人确认（没开跑，一分钱没花）", blueprint=bp)
 
+    try:
+        from . import deps as _deps0
+        _dep0 = _deps0.ensure(ws)
+        if _dep0.get("installed") and emit:
+            emit("deps_installed", {"pkgs": _dep0["installed"], "req": _dep0.get("req_file")})
+    except Exception:                                    # noqa: BLE001
+        pass
+    # 规模机制：目标写着"XL / ≥N 行"时，做完一轮**不能报 100% 收工** ——
+    # 要按行数缺口继续要新能力。实测 2026-11-07：目标 10000 行，蓝图 9 条能力，
+    # 做完就报 100%，交付物 400 行。规模不是模型能力问题，是规划机制缺了一环。
+    try:
+        _target = _target_lines(bp.goal)
+        if _target:
+            from . import scale as _scale0
+            _prod0 = int((_scale0.count_lines(ws) or {}).get("prod_lines") or 0)
+            _all_done = all(c.status == "done" for c in bp.caps)
+            if _all_done and _prod0 < _target * 0.8:
+                _need = max(2, min(8, int((_target - _prod0) / 120) or 2))
+                _got = blueprint.extend(bp, bp.goal, need=_need, llm=llm, ws=ws)
+                if _got.get("added"):
+                    bp.notes.append(f"规模扩产：+{len(_got['added'])} 条能力（目标 {_target} 行，"
+                                    f"现有 {_prod0} 行）")
+                    if emit:
+                        emit("blueprint_extended", {"added": _got["added"], "target": _target,
+                                                    "lines": _prod0})
+                    # 扩产后能力涨了，重新分组（保证新能力也有子系统归属）
+                    _maybe_split_subsystems(bp, ws, emit)
+    except Exception as exc:                             # noqa: BLE001
+        if emit:
+            emit("notice", {"message": f"规模扩产跳过：{type(exc).__name__}: {exc}"[:150]})
+
+    # 起始观测前也要接线：上一轮作者可能自己给服务函数挂了路由（重复注册 / 错误的
+    # response_model），也会把引擎段抹掉；不先接线，起始观测就会把"能过的能力"判红。
+    try:
+        _w0 = apply_web_wiring(ws, bp)
+        if _w0 and emit:
+            emit("web_routes", {"module": "（起始）", "routes": len(_w0),
+                                "detail": "；".join(_w0[:4])})
+    except Exception as exc:                             # noqa: BLE001
+        if emit:
+            emit("notice", {"message": f"起始接线跳过：{type(exc).__name__}: {exc}"[:160]})
+
     cov = recon(bp, ws)
     covmod.record(ws, cov, "起始观测")
     bp = covmod.mark(bp, cov)
     blueprint.save(bp, ws)
+    # Web 项目：入口必须由引擎先写好（作者只写功能模块，不写 app/main.py），
+    # 否则每加一片就重写一次入口，上一片的路由会被抹掉。
+    _web0 = write_web_entry(ws, bp)
+    if _web0.get("wrote"):
+        bp.notes.append(f"引擎生成 Web 入口：{_web0.get('why')}")
+        if emit:
+            emit("web_entry", {"modules": _web0.get("modules") or []})
 
     spent = 0.0
     hist: list[dict] = []
@@ -865,6 +1650,10 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
                 per = CNY_PER_FUNC
             affordable = max(1, int(left_now / max(1e-6, per * SLICE_RETRY_MARGIN)))
             funcs_cap = max(1, min(funcs_cap, affordable))
+        # Web 能力比纯函数重（路由、Pydantic 模型、DB 访问都要写），
+        # 一片 12 个函数作者根本写不完 → 整片被回滚（实测 2026-11-07 s04）。
+        if any(str((c.probe or {}).get("kind") or "") == "http" for c in bp.caps):
+            funcs_cap = min(int(funcs_cap), 6)
         plan = slicer.plan(bp, max_funcs=funcs_cap)
         if not plan["slices"]:
             reason = "没有可做的切片：剩下的能力全部受阻（依赖被降级或不存在）"
@@ -913,7 +1702,8 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
                                 drop_modules=[m for c in bp.caps if c.status == "done"
                                               for m in (c.modules or [])
                                               if m not in {x for cid in sl["caps"] if bp.by_id(cid)
-                                                           for x in (bp.by_id(cid).modules or [])}])
+                                                           for x in (bp.by_id(cid).modules or [])}],
+                                web_probes=probes)
         if cg.get("ok"):
             _aligned = align_probe_modules(bp, cg.get("text") or "")
             if _aligned:
@@ -927,8 +1717,10 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
             # 而真正的原因往往只是"这一片太大/太杂，合成出来的契约不合规"。
             contract_fail_streak += 1
             funcs_cap = max(1, int(funcs_cap * 0.5)) if funcs_cap > 1 else 1
-            for cid in sl["caps"]:
-                fails[cid] = fails.get(cid, 0) + 1
+            # **不许记到 fails 上**（2026-11-07 实测）：fails 是"这条能力做不出来"的证据，
+            # 而契约合成失败是**系统自己没把考卷出对**，跟能力难度无关。
+            # 旧逻辑把它算进 fails → 3 次后 replan 把 4 条能力全标 descoped，
+            # 整轮 9.1%、¥0.00 收工，报告写"连续 3 次尝试仍未通过"，把系统 bug 栽给需求。
             why = "契约合成失败：" + "；".join(cg.get("problems") or [])[:100]
             hist.append({"slice": sl["id"], "caps": sl["caps"], "cost_cny": 0.0,
                          "gained": [], "why": why[:160]})
@@ -936,13 +1728,13 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
                 emit("slice_contract_failed", {"slice": sl["id"], "problems": (cg.get("problems") or [])[:3],
                                                "next_funcs_cap": funcs_cap,
                                                "streak": contract_fail_streak})
-            if max(fails.values() or [0]) >= replan.FAIL_DESCOPE:
-                if replans >= MAX_REPLANS:
-                    reason = "重规划次数到顶（契约反复合成失败）"
-                    break
-                bp, cov, calls, replans = _do_replan(bp, cov, ws, llm, recon, fails, hist,
-                                                     replans, calls, emit,
-                                                     "契约连续合成失败")
+            if contract_fail_streak >= MAX_CONTRACT_FAIL:
+                # 连着出不出考卷 = 系统侧问题。如实停下并说清是谁的问题，
+                # 不降级任何能力（降级会污染蓝图，下一次重跑还得手工清）。
+                reason = ("契约合成连续失败 %d 次（系统侧问题，不是能力做不出来）：%s"
+                          % (contract_fail_streak,
+                             "；".join((cg.get("problems") or [])[:2])[:200]))
+                break
             continue
         contract_fail_streak = 0
 
@@ -958,6 +1750,21 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
                      hours=slice_hours, emit=emit, slice_id=sl["id"])
         spent += float(res.get("cost_cny") or 0.0)
         slices_run += 1
+        # Web：**引擎补路由接线**（方法/路径/状态码/请求体都是探针给的，不是设计判断）。
+        # 作者只写服务层函数；路由由引擎挂，避免"作者把 router 写丢 → 整片 404 → 振荡停机"。
+        try:
+            _ctext = cg.get("text") or Path(cg.get("path") or "").read_text(
+                encoding="utf-8", errors="replace")
+            _plan, _fmap = _web_route_plan(bp, sl, _ctext)
+            for _mod, _routes in _plan.items():
+                _wr = ensure_web_router(ws, _mod, _routes, _fmap.get(_mod) or {})
+                if _wr.get("wrote"):
+                    bp.notes.append(f"引擎路由接线：{_mod}（{_wr.get('why')}）")
+                    if emit:
+                        emit("web_routes", {"module": _mod, "routes": _wr.get("routes")})
+        except Exception as exc:                         # noqa: BLE001
+            if emit:
+                emit("notice", {"message": f"路由接线跳过：{type(exc).__name__}: {exc}"[:160]})
         # 本地助手该做的事：入口接线由**引擎**负责（确定性、0 token、可溯源）。
         # CLI 片跑完**强制**把入口恢复成引擎接线（远端整文件重写会把它盖掉）；
         # 其余情况只补一行 `__main__`（实测 run 11：不补 CLI 能力会成批被降级）。
@@ -972,6 +1779,46 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
                 bp.notes.append(f"引擎补全：{wiring.get('why')}（{entry}）")
                 if emit:
                     emit("wiring", {"entry": entry, "why": wiring.get("why")})
+        else:
+            # 纯 Web 片：刷新入口（新模块要 include 进来；已有模块的内容一律不碰）
+            _web = write_web_entry(ws, bp)
+            if _web.get("wrote"):
+                bp.notes.append(f"引擎生成 Web 入口：{_web.get('why')}")
+                if emit:
+                    emit("web_entry", {"modules": _web.get("modules") or []})
+
+        # 依赖自举：作者可能引入新的第三方包（jwt 之类）。缺包会让**整个 app 导入失败** →
+        # 所有能力一起变红，系统会判"做不出来"。那不是代码错，是环境没跟上（实测 2026-11-07：
+        # 6/9 一夜掉到 0/8，全因 PyJWT 没装）。所以每次测覆盖之前先扫 import、补装缺失。
+        try:
+            from . import deps as _deps
+            _dep = _deps.ensure(ws)
+            try:
+                from . import shipgate as _ship_env
+                _envw = _ship_env.ensure_env(ws)
+                if _envw.get("wrote") and emit:
+                    emit("env_ready", {"vars": _envw.get("names"), "wrote": _envw.get("wrote")})
+            except Exception:                            # noqa: BLE001
+                pass
+            if _dep.get("installed") and emit:
+                emit("deps_installed", {"pkgs": _dep["installed"], "req": _dep.get("req_file")})
+            if _dep.get("failed") and emit:
+                emit("notice", {"message": "依赖装不上：" + "、".join(
+                    str(x.get("pkg")) for x in _dep["failed"][:3])})
+        except Exception as exc:                         # noqa: BLE001
+            if emit:
+                emit("notice", {"message": f"依赖自举跳过：{type(exc).__name__}: {exc}"[:160]})
+
+        # 测覆盖之前**必须**把路由补齐：作者整篇重写、回归硬门禁回滚都会抹掉引擎段，
+        # 少了路由的能力会以"404"被判成做不出来（实测 2026-11-07 update/delete）。
+        try:
+            _wired = apply_web_wiring(ws, bp)
+            if _wired and emit:
+                emit("web_routes", {"module": "（全部）", "routes": len(_wired),
+                                    "detail": "；".join(_wired[:4])})
+        except Exception as exc:                         # noqa: BLE001
+            if emit:
+                emit("notice", {"message": f"路由补齐跳过：{type(exc).__name__}: {exc}"[:160]})
 
         cov = recon(bp, ws)
         covmod.record(ws, cov, f"切片 {sl['id']} 之后")
@@ -1086,7 +1933,45 @@ def night_auto(repo, goal: str = "", *, budget_cny: float = 0.0, hours: float = 
     nxt = [(round(s, 3), c.id) for s, c in frontier.rank(bp)[:8]]
     # ok 的口径：**只有每条能力都真通过观测才算完成**。降级不是完成，
     # 受阻也不是完成 —— 报告里"全部通过"而实际有缺口，是最严重的失败形态。
-    res = {"ok": (not gaps and not blocked and not descoped), "reason": reason,
+    # 上线机制：README / 引擎生成的 pytest / 体检（全部引擎做，不占远端能力）。
+    # 注意：ship_check 是 **Web 上线体检**（app.main / /docs / uvicorn / test_api.py），
+    # 只对含 http 探针的项目生效；非 Web 项目（CLI/库/算法）跳过它，否则会误判
+    # "测试通过"必红（没有 test_api.py）—— 实测 check_auto 的 CSV 工具 fixture 就这样
+    # 被 ship_check 永久判成未完成。
+    _is_web = any(str((c.probe or {}).get("kind") or "") == "http" for c in bp.caps)
+    try:
+        from . import shipgate as _ship
+        try:
+            _ship.ensure_env(ws)
+            _ship.write_env_block(ws, bp)
+        except Exception:                                # noqa: BLE001
+            pass
+        _docs = _ship.write_docs(ws, bp)
+        if _is_web:
+            _tests = _ship.write_tests(ws, bp)
+            _ship_rep = _ship.ship_check(ws, bp)
+        else:
+            _tests = {}
+            _ship_rep = {"ok": True, "rows": [{
+                "name": "上线体检", "ok": True,
+                "detail": "非 Web 项目，跳过 Web 上线体检（README / 依赖已生成）"}]}
+        if emit:
+            emit("ship_artifacts", {"docs": _docs.get("wrote"), "tests": _tests.get("tests") or 0,
+                                    "path": _tests.get("path") or ""})
+            for _row in _ship_rep["rows"]:
+                emit("ship_check", _row)
+    except Exception as exc:                             # noqa: BLE001
+        _ship_rep = {"ok": False, "rows": [{"name": "上线体检", "ok": False,
+                                            "detail": f"{type(exc).__name__}: {exc}"[:150]}]}
+        if emit:
+            emit("notice", {"message": f"上线体检失败：{type(exc).__name__}"})
+    _ship_bad = [r["name"] for r in _ship_rep.get("rows") or [] if not r.get("ok")]
+    if _ship_bad and not gaps:
+        # 能力都过了但发布条件不齐：这是"看起来做完了、其实不能交付"，必须如实标成未完成
+        reason = ("上线条件不齐：" + "、".join(_ship_bad[:3])) if not reason else                  (reason + "；上线条件不齐：" + "、".join(_ship_bad[:3]))
+
+    res = {"ok": (not gaps and not blocked and not descoped and _ship_rep.get("ok")),
+           "ship": _ship_rep, "reason": reason,
            "blueprint": bp, "coverage": cov,
            "ratios": ratios, "spent_cny": round(spent, 4), "elapsed_s": round(time.time() - t0, 1),
            "slices": slices_run, "replans": replans, "calls": calls, "history": hist,
@@ -1138,6 +2023,27 @@ def _fail(ws, reason: str, blueprint=None) -> dict:
 
 
 # ---------------------------------------------------------------- 报告
+
+def _cause(detail: str) -> str:
+    """把失败证据归因：是**模型没写对**，还是**机制/环境**没到位。
+
+    这条口径很重要（用户要的正是"最后只剩远端能力不足"）：如果报告里混着
+    "缺依赖/导入失败"这类机制问题，那就不能算"能力不足"，得先修机制。
+    """
+    d = str(detail or "")
+    if any(k in d for k in ("engine_error", "没有可用的 ASGI", "ModuleNotFound",
+                            "ImportError", "SyntaxError", "缺依赖", "装不上",
+                            "没有 httpx", "并发判据跑不起来")):
+        return "机制/环境（先修引擎侧）"
+    if "NotImplementedError" in d:
+        return "模型未实现（函数是空桩）"
+    if any(k in d for k in ("状态码", "响应里没有", "JSON 字段不符", "没有任何一个关键词",
+                            "条记录", "并发", "条，实际")):
+        return "模型实现不满足判据"
+    if "抛异常" in d:
+        return "模型实现抛异常"
+    return "未分类"
+
 
 def write_report(ws, bp, res: dict) -> Path:
     """AUTONOMY.md：目标、覆盖矩阵、缺口、每片账本、怎么续跑。
@@ -1217,11 +2123,36 @@ def write_report(ws, bp, res: dict) -> Path:
 
     gaps = res.get("gaps") or []
     if gaps:
-        lines += ["", "## 缺口（还没通过的能力）", ""]
+        from collections import Counter as _Counter
+        _causes = {}
+        for cid in gaps:
+            _row = caps.get(cid) or {}
+            _causes[cid] = _cause(_row.get("detail") or "")
+        _cnt = _Counter(_causes.values())
+        lines += ["", "## 缺口（还没通过的能力）", "",
+                  "**归因汇总**：" + "；".join(f"{k} {v} 条" for k, v in _cnt.most_common()), ""]
         for cid in gaps:
             c = bp.by_id(cid)
             row = caps.get(cid) or {}
-            lines.append(f"- `{cid}`：{row.get('detail') or (c.desc if c else '')}")
+            lines.append(f"- `{cid}`：{row.get('detail') or (c.desc if c else '')}"
+                         f"｜归因：{_causes.get(cid, '')}")
+        _mech = _cnt.get("机制/环境（先修引擎侧）", 0)
+        if _mech:
+            lines += ["", f"> ⚠ 有 {_mech} 条是**机制/环境**问题（缺依赖、导入失败之类），"
+                          "不该算成模型能力不足：先修引擎侧，再重跑。"]
+        else:
+            lines += ["", "> 这些缺口的归因都在模型侧（没写 / 写错 / 空桩），机制侧已无阻塞。"]
+
+    ship = res.get("ship") or {}
+    if ship.get("rows"):
+        lines += ["", "## 上线体检（引擎跑的，与能力覆盖**分开**看）", "",
+                  "> 能力覆盖只说明「每条能力都被观测过」；这一节回答「能不能交付」。", "",
+                  "| 项 | 结果 | 说明 |", "|---|---|---|"]
+        for row in ship["rows"]:
+            lines.append(f"| {row.get('name')} | {'✓' if row.get('ok') else '✗'} | "
+                         f"{str(row.get('detail') or '')[:72]} |")
+        if not ship.get("ok"):
+            lines += ["", "**结论：能力可能都过了，但发布条件不齐 —— 不能算交付完成。**"]
 
     nxt = res.get("next") or []
     if nxt:

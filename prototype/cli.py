@@ -482,6 +482,31 @@ def cmd_plan(args) -> None:
     sys.exit(2)
 
 
+def cmd_contract(args) -> None:
+    """契约反推：读现有代码 → 结构化契约（存量仓库的入场券，只读、零花费）。
+
+    产物与需求契约同构（同一个 Contract/FuncSig），闸门/判据/骨架可直接吃；
+    只提取代码里真写出的事实（签名/注解/raise/返回 dict 字面量/doctest），不猜。
+    """
+    from core import contract_reverse
+    ws = Path(args.repo)
+    if not ws.is_dir():
+        print(f"[FAIL] 目录不存在：{ws}")
+        sys.exit(2)
+    paths = [args.path] if args.path else None
+    cons, issues = contract_reverse.from_code(ws, paths, include_private=args.private)
+    if not cons:
+        print("没有可反推的模块（全是测试/配置/忽略目录，或没有 .py 文件）")
+        for it in issues[:5]:
+            print(f"  - {it}")
+        return
+    print(contract_reverse.render(cons))
+    if issues:
+        print(f"\n【如实报告的跳过项 {len(issues)} 条】")
+        for it in issues[:8]:
+            print(f"  - {it}")
+
+
 def cmd_questions(args) -> None:
     """列出待人回答的问题（开发者模式里本地模型主动提的）。"""
     from core import questions
@@ -1040,6 +1065,12 @@ def build() -> argparse.ArgumentParser:
     sp.add_argument("--goal", default="", help="ask 用：一句话目标（提问的依据）")
     sp.add_argument("--answers", default="", help="ask 用：答案文件；给了就直接把安排定下来")
     sp.set_defaults(fn=cmd_plan)
+
+    sp = sub.add_parser("contract", help="契约反推：从现有代码反推结构化契约（只读，不花 token）")
+    sp.add_argument("--repo", required=True, help="存量仓库目录")
+    sp.add_argument("--path", default="", help="只反推这个相对路径（不给就全仓）")
+    sp.add_argument("--private", action="store_true", help="把 _ 开头的函数也收进契约面")
+    sp.set_defaults(fn=cmd_contract)
 
     sp = sub.add_parser("inspect", help="定期巡检：缓存命中率趋势 + 文档健康（只读）")
     sp.add_argument("--repo", required=True)

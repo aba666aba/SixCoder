@@ -249,6 +249,12 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
       只读模式：不写任何文件，直接拒绝跑夜班。
     """
     t0 = time.time()
+    # 项目宪法：跑夜班前先落盘（幂等，已存在不覆盖）。作者提示词会把宪法当稳定前缀注入。
+    try:
+        from . import constitution as _const
+        _const.ensure(Path(repo))
+    except Exception:                                # noqa: BLE001
+        pass
     from . import permissions as _perms
     from . import policy as _policy
     pol = _policy.current()
@@ -1600,9 +1606,17 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
             write_used[rel] = rec
         return rec
 
-    for rel in mods:
-        if budget_left <= 20 or time.time() >= _deadline - 5:
-            break
+    # 并行接线（开发文档 P0-2）：写模块循环经 parallel.map_calls 走。
+    # 默认 1 工人 = 串行，行为与老代码**完全一致**（map_calls 串行分支按输入序逐项跑）；
+    # SIXCODER_PARALLEL=N 才真正并行 —— 429 与"读到中间态"风险见 core/parallel.py 顶部，
+    # 默认不承担。`_stopped` 保留旧 `break` 语义：预算/截止一到，后续模块一律跳过、不进 stats。
+    from . import parallel as _par_mod
+    _stopped = {"flag": False}
+
+    def _write_one(rel):
+        if _stopped["flag"] or budget_left <= 20 or time.time() >= _deadline - 5:
+            _stopped["flag"] = True
+            return {"skipped": True}
         hit = _scale_mod.protected_hits(ws, [rel])
         if hit and zone_mode == "block":
             stats["modules"].append({"path": rel, "ok": False, "tier": 0, "by": "-",
@@ -1612,7 +1626,7 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
             if emit:
                 emit("protected_zone", {"path": rel, "action": "拒绝",
                                         "message": "认证/部署/治理文件不在自动修改范围内"})
-            continue
+            return
         if hit and emit:
             emit("protected_zone", {"path": rel, "action": "警告",
                                     "message": f"{_scale_mod.resolve('', ws)['level']} 级只警告不阻断"})
@@ -1692,7 +1706,7 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                 emit("module_budget_stop", {"path": rel, "spent_cny": round(_spent_mod, 4),
                                             "budget_cny": round(_mod_budget, 4),
                                             "remaining": round(_mod_budget - _spent_mod, 4)})
-            continue
+            return
         if used_total >= cap_total or used_tier >= cap_per_tier:
             # 同一档已经写得够多 / 整夜额度用尽 → 不再重写；能升档就升档（升档不占本档额度）
             can_step = used_tier >= cap_per_tier and lvl + 1 < len(steps)
@@ -1703,7 +1717,7 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                     emit("write_cap", {"path": rel, "tier": lvl + 1, "used_in_tier": used_tier,
                                        "write_per_tier": cap_per_tier, "action": "换档重试",
                                        "message": f"这一档已写 {used_tier} 次，升到下一档再试"})
-                continue
+                return
             stats["modules"].append({"path": rel, "ok": False, "tier": lvl + 1, "by": "-",
                                      "reason": f"写次数到顶（本档 {used_tier}/{cap_per_tier}，"
                                                f"整夜 {used_total}/{cap_total}），不再重写",
@@ -1714,7 +1728,7 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                                    "used_total": used_total, "cap_total": cap_total,
                                    "action": "停止重写",
                                    "message": "同一模块同一档写了太多次，停下来交给报告"})
-            continue
+            return
         step = steps[lvl] if steps else {}
         tag = f"{step.get('profile_id')}:{step.get('effort')}" if step else "?"
         oid = workorder.add(task_id, 0, "implement_module", rel, "", f"整文件通过全部判据（{rel}）",
@@ -2077,6 +2091,13 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                         emit("escalate", {"order": f"整文件 {rel}", "from": tag,
                                           "to": f"{nxt.get('profile_id')}:{nxt.get('effort')}",
                                           "fails": n})
+
+    _par_res = _par_mod.map_calls(mods, _write_one)
+    if _par_res.get("backend") != "serial" and emit:
+        emit("parallel_write", {"backend": _par_res["backend"],
+                                "workers": _par_res["workers"],
+                                "modules": len(mods),
+                                "errors": len(_par_res.get("errors") or {})})
     return stats
 
 

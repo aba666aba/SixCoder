@@ -84,7 +84,7 @@ def main() -> int:
     check("py_call 的 expect=None 是合法期望（返回 None 也要被判）",
           probe.validate({"kind": "py_call", "module": "m", "func": "f", "expect": None}) == [])
     check("没有执行器的种类 → 明确说不支持（不许假装支持）",
-          any("没有执行器" in x for x in probe.validate({"kind": "http", "path": "/x"})))
+          any("没有执行器" in x for x in probe.validate({"kind": "grpc", "path": "/x"})))
     check("cli 的 entry 写成解释器命令 → 拒收（这种探针永远红）",
           any("解释器" in x for x in probe.validate(
               {"kind": "cli", "entry": "python", "args": ["-m", "pytest"],

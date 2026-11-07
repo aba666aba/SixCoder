@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import tokens as _tokens
 
-AUTHOR_PROMPT = """你是资深工程师。按下面的**契约**写出整个文件的完整内容，只输出 JSON。
+AUTHOR_PROMPT = """你是资深工程师。按下面的**契约**实现这些函数（改已有文件时**只写这次要写的函数**）。
 
 {protocol}
 
@@ -26,13 +26,38 @@ AUTHOR_PROMPT = """你是资深工程师。按下面的**契约**写出整个文
 
 {requirements}
 
-只输出 JSON（不要解释、不要围栏外文字）：
+输出格式（三选一，**优先 A**）：
+
+（A）**只写函数** —— 要新增 / 重写**少数几个函数**时，用代码围栏只给这几个函数：
+```python
+def delete_ticket(ticket_id: int) -> dict:
+    # 按 id 删除工单，成功返回 deleted=True
+    ...
+```
+  引擎会把它们**合并**进现有文件：同名函数原位替换、新函数追加，
+  **不会删掉文件里已有的其它函数**。这是改已有文件时最省事、最不容易出错的方式。
+
+（B）**补丁** —— 要改的是函数中间的几行、且你能逐字复制原文时：
+{{"patches":[{{"path":"app/x.py",
+  "find":"<从当前文件**原样复制**的旧代码，2~30 行>",
+  "replace":"<替换成的新代码>"}}]}}
+  · `find` 必须逐字出现在文件里；找不到这份回复就作废
+
+（C）**整份文件** —— 只在新建文件、或改动超过半个文件时用：
+```python
+<完整文件内容>
+```
+
+需要 delegate / system_issues 时，用 JSON 整份文件形式：
 {{"files":[{{"path":"模块.py","content":"<完整文件内容>"}}],
  "delegate":[{{"kind":"validation|boilerplate|logging|adapter","target":"函数名","spec":"一句话规格"}}],
  "system_issues":[{{"where":"契约/判据/工具链","issue":"本地的缺陷","suggest":"怎么改"}}]}}
 
+**代码里有大量引号/换行时不要用 JSON**（转义写错会导致整份回复作废）。
+
 铁律：
-1. content 是**完整文件**（含 import、docstring、必要的辅助函数），不是 diff、不是片段。
+1. （A）只给"这次要写的函数"（含它们用到的 import 写在最上面即可）；
+   （C）里的 content 才是**完整文件**（含 import、docstring、辅助函数）。
 2. 每个函数都要有类型注解，参数名与契约完全一致；返回类型一致。
 3. **空输入/空值不许崩**：列表可能为空、字典可能缺键、值可能是 None。
    除零、`row["k"]` 直接下标、对 None 运算都会被边界判据判红；先给空情形一个确定结果。
@@ -108,6 +133,182 @@ def _parse_reply(text: str) -> tuple[list[dict], list[dict], list]:
     return out, issues, out_deleg
 
 
+def _parse_patches(text: str) -> list[dict]:
+    """从回复里抽 `{"patches":[{path, find, replace}]}`（局部替换，不重写整篇）。
+
+    为什么要补丁（实测 2026-11-07）：作者每轮整文件重写，一是把上一片写好的函数
+    顺手删掉（被函数保全打回，白烧一轮），二是输出量翻几倍、弱模型更容易写崩。
+    局部替换把"改一个函数"变成"贴一段旧代码 + 给新代码"，风险与成本都低一个量级。
+    """
+    t = (text or "").strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", t, re.DOTALL)
+    if m:
+        t = m.group(1).strip()
+    data = None
+    for cand in (t, (re.search(r"\{.*\}", t, re.DOTALL) or [None])[0]):
+        if not cand:
+            continue
+        try:
+            data = json.loads(cand)
+        except Exception:                                # noqa: BLE001
+            continue
+        break
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("patches") or data.get("edits") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    out: list[dict] = []
+    for it in (raw if isinstance(raw, list) else []):
+        if not isinstance(it, dict):
+            continue
+        find = it.get("find") if it.get("find") is not None else it.get("old")
+        rep = it.get("replace") if it.get("replace") is not None else it.get("new")
+        if find is None or rep is None:
+            continue
+        out.append({"path": str(it.get("path") or "").strip().replace("\\", "/"),
+                    "find": str(find), "replace": str(rep)})
+    return out
+
+
+def _apply_patches(src: str, patches: list[dict]) -> tuple[str, list[str]]:
+    """把补丁应用到现有文件。返回 (新内容, 失败说明)。
+
+    匹配顺序：**逐字**（含缩进）→ 忽略行尾空白/整体缩进差异的逐行匹配。
+    两次都不中就算失败：宁可不落盘，也不能"猜着改"把无关代码改坏。
+    """
+    cur = src
+    bad: list[str] = []
+    for it in patches:
+        find = str(it.get("find") or "")
+        rep = str(it.get("replace") or "")
+        if not find.strip():
+            bad.append("find 为空")
+            continue
+        if find in cur:
+            cur = cur.replace(find, rep, 1)
+            continue
+        # 宽松匹配：忽略行尾空白、允许模型少写/多写整体缩进
+        # 先按"去掉缩进也认"比较：模型复制 find 时经常整体多缩/少缩一两级
+        want = [ln.strip() for ln in find.splitlines() if ln.strip()]
+        cur_lines = cur.splitlines()
+        idx = -1
+        if want:
+            for i in range(len(cur_lines) - len(want) + 1):
+                if cur_lines[i].strip() != want[0]:
+                    continue
+                if all(cur_lines[i + k].strip() == want[k] for k in range(len(want))):
+                    idx = i
+                    break
+        if idx < 0:
+            bad.append(want[0][:70] if want else "find 没有有效行")
+            continue
+        # 用被替换段的**原缩进**给新代码补齐（模型常写成顶格）
+        base_indent = cur_lines[idx][:len(cur_lines[idx]) - len(cur_lines[idx].lstrip())]
+        rep_lines = rep.splitlines()
+        if base_indent and rep_lines and not rep_lines[0][:1].isspace():
+            rep_lines = [base_indent + ln if ln.strip() else ln for ln in rep_lines]
+        tail = cur_lines[idx + len(want):]
+        cur = "\n".join(cur_lines[:idx] + rep_lines + tail)
+        if src.endswith("\n") and not cur.endswith("\n"):
+            cur += "\n"
+    return cur, bad
+
+
+_ROUTE_BEGIN = "# --- 引擎补的路由接线"
+_ROUTE_END = "# --- 路由接线结束 ---"
+
+
+def _toplevel_names(src: str) -> set[str]:
+    import ast as _ast
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return set()
+    return {n.name for n in tree.body
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef))}
+
+
+def _fragments_only(code: str, base: str) -> str | None:
+    """判断"这段代码是不是只包含**新增**的函数（+import）"，是就合并进 base。
+
+    为什么需要（实测 2026-11-07）：glm-4-flash 被要求"只写新函数"时，最自然的输出
+    就是围栏里一个 `def delete_ticket(...)`，而不是"复制旧代码 + 替换"。这属于
+    **增量**，却会被当成"整份文件"落盘 → 上一片写好的函数全被删（再被函数保全打回）。
+    所以：只要围栏里的顶层定义**都是新名字**，就按增量合并，而不是整份覆盖。
+    """
+    import ast as _ast
+    if not base.strip() or not code.strip():
+        return None
+    try:
+        tree = _ast.parse(code)
+    except SyntaxError:
+        return None
+    defs: list = []
+    imports: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            defs.append(node)
+        elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+            imports.append(_ast.get_source_segment(code, node) or "")
+        elif isinstance(node, _ast.Expr) and isinstance(getattr(node, "value", None), _ast.Constant):
+            continue                      # 模块级 docstring，忽略
+        elif isinstance(node, _ast.Assign) and len(node.targets) == 1 and \
+                isinstance(node.targets[0], _ast.Name) and \
+                isinstance(node.value, _ast.Constant):
+            continue                      # 只允许模块级**常量**（表名之类）；对象/调用不行
+        else:
+            return None                   # 出现语句/路由/if __main__：不是纯增量，按整份处理
+    if not defs:
+        return None
+    existing = _toplevel_names(base)
+    new_names = [d.name for d in defs]
+    if any(n in existing for n in new_names):
+        return None                       # 有同名定义 = 想重写已有函数，走整份（带保全校验）
+    body = "\n\n".join((_ast.get_source_segment(code, d) or "").rstrip() for d in defs)
+    if not body.strip():
+        return None
+    head, tail = base, ""
+    if _ROUTE_BEGIN in base:             # 新函数插在引擎段之前，别插在路由后面
+        head, tail = base.split(_ROUTE_BEGIN, 1)
+        tail = _ROUTE_BEGIN + tail
+    add_imports = [i for i in imports
+                   if i.strip() and i.split()[1].split(".")[0] not in base]
+    parts = [head.rstrip()]
+    if add_imports:
+        parts.append("\n".join(dict.fromkeys(add_imports)))
+    parts.append(body)
+    merged = "\n\n".join(parts) + "\n"
+    if tail:
+        merged += "\n" + tail
+    return merged
+
+
+def _code_fallback(text: str, path: str) -> str:
+    """模型没给合法 JSON 时，退回"取代码围栏"（代码的主力载体）。
+
+    实测（2026-11-07，glm-4-flash）：要求它把整份模块塞进 JSON 字符串，
+    两次都交不出合法 JSON（代码里的引号/换行要转义，转义写错整份作废）。
+    于是作者认为"什么都没生成"，同一份 NotImplementedError 骨架连撞 6 轮 ——
+    时间全花在重写上，代码一行没长。代码本来就有更好的载体：围栏。
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    blocks = re.findall(r"```[a-zA-Z0-9_+.#-]*[ \t]*\r?\n(.*?)```", t, re.DOTALL)
+    body = ""
+    if blocks:
+        body = max(blocks, key=len).strip()
+    elif re.match(r'^(?:#!|"""|\'\'\'|from\s|import\s|def\s|class\s|@)', t):
+        body = t
+    if not body:
+        return ""
+    # 必须真的像代码（防止把解释文字当代码写进文件）
+    if not re.search(r"^\s*(?:def|class|import|from|@)\s|^\s*#!|^\s*[\"']", body, re.M):
+        return ""
+    return body if _is_code_path(path) else ""
+
+
 def _parse_files(text: str) -> list[dict]:
     return _parse_reply(text)[0]
 
@@ -118,6 +319,33 @@ def _strip_fence(code: str) -> str:
     if m:
         c = m.group(1).strip()
     return c + ("\n" if c and not c.endswith("\n") else "")
+
+
+def _toplevel_symbols(src: str) -> set[str]:
+    """顶层公开符号（函数/类），忽略引擎自己的 `_engine_*` / `_Body_*`。"""
+    import ast as _ast
+    try:
+        tree = _ast.parse(src)
+    except SyntaxError:
+        return set()
+    out = set()
+    for node in tree.body:
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+            n = node.name
+            if n.startswith("_engine_") or n.startswith("_Body_"):
+                continue
+            out.add(n)
+    return out
+
+
+def _deleted_symbols(old: str, new: str) -> list[str]:
+    """这次重写删掉了哪些已有符号 —— 整文件重写最容易犯的错。
+
+    实测（2026-11-07）：作者为了加一条能力把整篇重写，顺手把上一片写好的
+    `list_tickets/search_tickets/...` 删了 → 那些能力从"已完成"退回"缺"，
+    整片再重写一次、再删一次，来回振荡到停机。
+    """
+    return sorted(_toplevel_symbols(old) - _toplevel_symbols(new))
 
 
 def _compile_ok(src: str) -> tuple[bool, str]:
@@ -581,6 +809,14 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
                            focus=focus, budget_chars=context_budget, evidence=evidence)
     # 把提炼结果切成稳定/易变两块：契约+签名表稳定（可命中缓存），焦点源码+证据易变
     head, _, tail = ctx.partition("# 焦点符号完整源码")
+    # 项目宪法：目录/命名/分层/错误/测试/铁律 —— 最稳定的前缀（吃缓存），放最前。
+    try:
+        from . import constitution as _const
+        _const_prefix = _const.prefix(Path(ws))
+        if _const_prefix:
+            head = _const_prefix + "\n\n" + head
+    except Exception:                            # noqa: BLE001
+        pass
     # §13.4 第 5 步：把跨轮记忆前置进稳定前缀（命中缓存、让远端越用越强）
     try:
         from . import memory as _mem
@@ -597,6 +833,18 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
     ctx = _layout.render(chunks)
     if emit:
         emit("context_layout", _layout.audit(chunks))
+    # 把**当前文件的全文**也给作者（限长）：只给"焦点符号源码"会让它看不见 import 区
+    # 与模块级接线，于是每轮都从头重写、顺手丢东西（实测 2026-11-07 振荡 6 轮）。
+    try:
+        _cur = Path(ws) / path
+        if _cur.is_file():
+            _txt = _cur.read_text(encoding="utf-8", errors="replace")
+            if _txt.strip() and len(_txt) <= 12000:
+                ctx += ("\n\n# 当前文件内容（在它基础上**增量修改**：保留已有 import、"
+                        "已有函数、已有路由，别整篇重写）\n```python\n"
+                        + _txt.rstrip() + "\n```\n")
+    except OSError:
+        pass
     req_block = ("【实现方案（必须照它做）】\n" + _tokens.cut(model_plan.strip(), 2500)) if model_plan else ""
     if workingset:
         req_block = (req_block + "\n\n" + workingset).strip()
@@ -646,7 +894,7 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
             prompt + "\n\n【上一版被机械判据判红，必须改掉】\n" + _tokens.cut(last or "", 1500))
         r = remote.complete(body, task_id=task_id or "author", node_id=f"author:{path}",
                             workspace=str(ws), emit=emit, step_index=step_index,
-                            json_mode=True, max_out=max_out)
+                            json_mode=False, max_out=max_out)
         if not r.get("ok"):
             return {"ok": False, "reason": f"远端调用失败：{r.get('error')}"[:200],
                     "by": "", "attempt": attempt, "system_issues": issues, "max_out": max_out}
@@ -674,8 +922,52 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
             continue
         files, got_issues, delegated = _parse_reply(r.get("answer") or "")
         issues += got_issues
+        _patch_err = ""
         if not files:
-            last = '没有给出 {"files":[...]}（必须是完整文件内容，不是 diff/片段）'
+            # ① 先试**补丁**（改已有文件的首选形态：只替换某一段，不重写整篇）
+            _pl = _parse_patches(r.get("answer") or "")
+            _wrong = [x for x in _pl if x.get("path") and x["path"] != path]
+            if _wrong:
+                # 补丁必须落在本轮的目标文件上：打错文件比不落盘更糟
+                _patch_err = (f"patch 的 path 必须是 {path}（收到 {_wrong[0]['path']}）")
+                _pl = [x for x in _pl if not x.get("path") or x["path"] == path]
+            if _pl:
+                try:
+                    _base = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+                except OSError:
+                    _base = ""
+                _newc, _bad = _apply_patches(_base, _pl)
+                if _base.strip() and not _bad and _newc != _base:
+                    files = [{"path": path, "content": _newc}]
+                    if emit:
+                        emit("author_patched", {"path": path, "patches": len(_pl)})
+                elif _bad:
+                    _patch_err = ("有 %d 处 patch 的 find 在文件里找不到：%s。"
+                                  "find 必须**逐字**复制当前文件里的旧代码（连缩进一起），"
+                                  "或者改用整份文件（围栏）"
+                                  % (len(_bad), "；".join(_bad[:2])))
+                    if emit:
+                        emit("author_patch_miss", {"path": path, "missing": _bad[:2]})
+        if not files:
+            # ② 围栏：**先判它是不是"只含新增函数"的增量**，是就合并，不是才当整份文件
+            _fb = _code_fallback(r.get("answer") or "", path)
+            if _fb.strip():
+                try:
+                    _base = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+                except OSError:
+                    _base = ""
+                _merged = _fragments_only(_fb, _base) if _base.strip() else None
+                if _merged:
+                    files = [{"path": path, "content": _merged}]
+                    if emit:
+                        emit("author_fragment", {"path": path, "chars": len(_fb),
+                                                 "names": sorted(_toplevel_names(_fb))[:4]})
+                else:
+                    files = [{"path": path, "content": _fb}]
+                    if emit:
+                        emit("author_fenced", {"path": path, "chars": len(_fb)})
+        if not files:
+            last = _patch_err or '没有给出 {"files":[...]} 或 {"patches":[...]}'
             continue
         mine = [f for f in files if f["path"] == path] or files[:1]
         content = _strip_fence(mine[0]["content"])
@@ -684,6 +976,18 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
             last = f"生成的代码解析不了：{why}"
             continue
         p.parent.mkdir(parents=True, exist_ok=True)
+        # 写回前先确认"没把已实现的函数删掉"：删了就打回，不落盘。
+        try:
+            _old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+        except OSError:
+            _old = ""
+        _gone = _deleted_symbols(_old, content)
+        if _gone:
+            last = ("你把已实现的函数删掉了：%s。整文件重写不许删已有函数 —— "
+                    "保留它们，只在里面补新功能。" % "、".join(_gone[:6]))
+            if emit:
+                emit("author_regress", {"path": path, "deleted": _gone[:6]})
+            continue
         p.write_text(content, encoding="utf-8")
         _ensure_packages(ws, path)          # 嵌套模块要有包结构才 import 得动
         # 委托：远端把机械输出交给本地模型（省远端输出）。委托失败要打回给远端。

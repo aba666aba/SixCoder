@@ -20,6 +20,9 @@ prototype/workspaces/
 prototype/data/proto.db*
 prototype/data/api_index.db
 
+# 判据标定用的对照实现（正确/丢写/幂等等，可随时重建，见 docs/27）
+_sandbox/
+
 # 研究用的大体积索引库（用 graft_demo/bench_scale.py 重新生成）
 graft_demo/work/*.db
 

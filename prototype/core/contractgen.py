@@ -40,14 +40,24 @@ JSON 结构（严格）：
 硬性要求（不满足就会被判红重来）：
 1. path 必须以 .py 结尾；函数不超过 8 个。
 2. **每个参数都必须有类型注解**，只能用 str / int / float / bool / dict / list[int] / list[str] / list[dict]。
-3. **每个函数至少 1 条示例**，示例必须是"能用字面量算出来"的等式，写成 `f(字面量) == 字面量`，
+   返回类型同样只能用这些；**不许写 None / void**（副作用函数也要返回一个可判的小结果，
+   例如 `{{"id": 1, "username": "new_user"}}` 或 `"ok"`，否则没有判据、永远没法验收）。
+   元组可以，但必须写清类型形状，例如 `tuple[int, str]`。
+3. **每个函数至少 1 条示例**，示例必须是"能用字面量算出来"的等式，写成 `f(字面量) == 期望值`。
    参数里不许出现变量名（`sqrt(x)` 不行，`sqrt(9.0)` 可以）。
+   **只有调用、没有 `== 期望值` 的一律判红**（`register('a','b')` 不合格，`register('a','b') == {{"id": 1}}` 合格）。
 4. 符号运算（求导、不定积分）不要追求通解：把它**限定成一条示例能判定的形式**
    （例如输入是多项式系数列表 `[3, 0, 2]`，或输入是单幂函数字符串 `"x^3"`），
    并在 desc 里写清适用范围与不支持的情形。
 5. **需求里点名的每个能力都要有函数覆盖**（例如"求导"和"不定积分"各至少一个函数）；
    实在无法机判的，要么限定成可判形式，要么在 module 的 purpose 里写明放弃哪一项、为什么。
 6. 宁可少而可判，不要多而含糊。拿不准就拆成"能做对的那一小步"。
+7. **模块路径以简报里的「落点模块」为准**：写了 `app/auth.py` 就必须逐字用 `app/auth.py`，
+   没写才自己定。**绝对不要用 calc.py / main.py**（那只是上面的格式示例，不是这个项目的文件）。
+8. **禁止恒真函数**：`main() -> str` 配 `main() == 'ok'`、`noop() == None` 这类
+   除了骗过判据什么也没做的函数，一律不收。每个函数都要有真实的输入输出语义。
+9. Web 项目里，函数是**路由背后的服务层函数**（`register_user(username, password) -> dict`），
+   不是 `def main()`。路由由作者在模块里用 `router = APIRouter()` 挂，不进契约。
 
 {ambiguity_block}
 
@@ -82,6 +92,56 @@ def _norm_type(t: str) -> str:
     ok = {"str", "int", "float", "bool", "dict", "list", "list[int]", "list[str]",
           "list[dict]", "list[float]", "dict[str, int]", "object"}
     return t if t in ok else ""
+
+
+def _raw_index(modules: list[dict]) -> dict:
+    """(模块路径, 函数名) → 远端给出的原始函数 JSON。用于**精确**诊断。
+
+    为什么需要它（实测 2026-11-07）：模型给了
+    `"examples": ["register('new_user', 'password123')"]` —— 有示例、但只有调用没有期望值。
+    旧校验统一报"没有示例"，模型照着这句话重写还是给裸调用，
+    于是同一个错连撞 3 次、4 条能力被降级、整轮 9.1% 就收工。反馈说错了，重试就永远不会对。
+    """
+    idx: dict = {}
+    for mod in modules or []:
+        path = str((mod or {}).get("path") or "").strip()
+        for f in ((mod or {}).get("functions") or []):
+            name = str((f or {}).get("name") or "").strip()
+            if path and name:
+                idx[(path, name)] = f or {}
+    return idx
+
+
+def _example_problem(exs: list) -> str:
+    """示例一句话诊断：缺 / 只有调用没期望值。空串 = 合格。
+
+    exs 里既可能是解析出来的 `contract.Example`，也可能是远端原始字符串。
+    `Example.expect == ""` 就是"只有调用、没有期望值"——它判定必然失效，
+    但旧文案统一写成"没有示例"，把模型引向错误方向（实测连撞 3 次）。
+    """
+    if not exs:
+        return "没有示例（没有示例就没有 call_eq 判据）"
+    def _txt(e) -> str:
+        if isinstance(e, str):
+            return e
+        func = str(getattr(e, "func", "") or "")
+        args = ", ".join(str(a) for a in (getattr(e, "args", None) or []))
+        exp = str(getattr(e, "expect", "") or "")
+        return f"{func}({args})" + (f" == {exp}" if exp else "")
+    if not any(str(getattr(e, "expect", "") or ("==" in e if isinstance(e, str) else "")) for e in exs):
+        return (f"示例没有期望值：必须写成 `f(...) == 期望值`，"
+                f"而你给的是 {_txt(exs[0])[:80]!r}（只有调用、无从比对 → 判不了）")
+    return ""
+
+
+def _returns_problem(raw: dict) -> str:
+    ret = str((raw or {}).get("returns") or "").strip()
+    if not ret:
+        return "缺 returns（没有返回类型就不知道拿什么去比）"
+    if ret.lower() in ("none", "void", "null", "nil"):
+        return (f"返回类型是 {ret}（副作用函数也必须返回一个可判的小结果，"
+                f"否则没有期望值可比）→ 改成 str/int/float/bool/dict/list[...] 或 tuple[...]")
+    return ""
 
 
 def render_text(modules: list[dict], per_module: int = 8) -> str:
@@ -138,22 +198,28 @@ def validate(modules: list[dict], contracts: dict, limit: int | None = None,
     problems: list[str] = []
     if not contracts:
         return ["契约解析结果为 0 个模块（路径没以 .py 结尾，或没有函数签名）"]
+    raw_idx = _raw_index(modules)
     n_funcs = 0
     n_examples = 0
     n_raises = 0
     for path, c in contracts.items():
         for f in c.funcs:
             n_funcs += 1
+            raw = raw_idx.get((path, f.name)) or {}
             params = list(getattr(f, "params", None) or [])
             untyped = [p.name for p in params if str(getattr(p, "type", "") or "") in ("", "object")]
             if untyped:
                 problems.append(f"{path}::{f.name} 的参数字段缺类型：{', '.join(untyped)}"
                                 f"（没有类型就造不出边界输入、判据跑不起来）")
-            exs = list(getattr(f, "examples", None) or [])
+            ret_bad = _returns_problem(raw)
+            if ret_bad:
+                problems.append(f"{path}::{f.name} {ret_bad}")
+            exs = list(getattr(f, "examples", None) or []) or list(raw.get("examples") or [])
             n_examples += len(exs)
             n_raises += len(list(getattr(f, "raises", None) or []))
-            if not exs:
-                problems.append(f"{path}::{f.name} 没有示例（没有示例就没有 call_eq 判据）")
+            ex_bad = _example_problem(exs)
+            if ex_bad:
+                problems.append(f"{path}::{f.name} {ex_bad}")
     if n_funcs == 0:
         problems.append("一个函数都没解析出来")
     if limit is None:
@@ -171,8 +237,34 @@ def validate(modules: list[dict], contracts: dict, limit: int | None = None,
 
 
 
+WIRING_NAMES = ("router", "app", "create_app", "api", "application")
+
+
+def drop_wiring_funcs(modules: list[dict]) -> list[str]:
+    """剔掉"接线"伪函数（`router() -> APIRouter` 这种）。
+
+    实测（2026-11-07）：Web 项目的契约里混进 `router() -> APIRouter`，
+    示例写成 `router = APIRouter()`（赋值，不是调用），于是：
+      · 判据会去调一个不存在的 `router()`；
+      · 作者被要求"实现 router 函数"，而正确写法是在模块级 `router = APIRouter()`。
+    接线是**结构性**的，不该出现在"可调用函数"清单里。
+    """
+    dropped: list[str] = []
+    for mod in modules or []:
+        keep = []
+        for f in ((mod or {}).get("functions") or []):
+            name = str((f or {}).get("name") or "").strip().lower()
+            ret = str((f or {}).get("returns") or "").lower()
+            if name in WIRING_NAMES and ("router" in ret or "fastapi" in ret or "app" in ret):
+                dropped.append(f"{mod.get('path')}::{name}")
+                continue
+            keep.append(f)
+        mod["functions"] = keep
+    return dropped
+
+
 def synthesize(requirement: str, task_id: str = "contract", step_index: int | str | None = None,
-               retries: int = 1, thinking: str = "off", ambiguity: str = "decide",
+               retries: int = 2, thinking: str = "off", ambiguity: str = "decide",
                budget: dict | None = None) -> dict:
     """需求 → 契约。返回 {ok, contracts, text, by, problems, usage, allowance}
     （或 need_human）。
@@ -225,6 +317,7 @@ def synthesize(requirement: str, task_id: str = "contract", step_index: int | st
                     "problems": [f"规格有歧义需要人拍板：{ask}"],
                     "contracts": {}, "text": "", "by": r.get("by") or ""}
         modules = (data or {}).get("modules") or []
+        drop_wiring_funcs(modules)     # 接线不是能力：剔掉 router()/app() 这类伪函数
         per_mod = _dosing.per_module_cap(allow, len(modules) or 1)
         text = render_text(modules, per_module=per_mod)
         contracts = contract_mod.parse_requirement(text) if text else {}

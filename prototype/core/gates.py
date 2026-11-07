@@ -532,9 +532,9 @@ def gate_mutation(ws: Path, changed: dict[str, tuple[str, str]],
             patched = list(lines)
             patched[idx] = mutated_line
             tools.write_file(ws, rel, "\n".join(patched) + "\n", backup=False)
-            shutil.rmtree(ws / "__pycache__", ignore_errors=True)
-            for sub in ws.rglob("__pycache__"):
-                shutil.rmtree(sub, ignore_errors=True)
+            # 这里**不再递归删 __pycache__**：写文件已经改了源码 mtime，CPython 会自己
+            # 让旧 .pyc 失效。而每个变异体都递归清一遍缓存，一次变异测试能删掉几百个文件，
+            # 直接撞上外层"单轮删除"保护，把整次夜班打断（实测 2026-11-07 exit 1）。
             res = gate_tests(ws, test_targets, timeout=120)
             (killed if not res.ok else survived).append(label)
     finally:
@@ -1183,6 +1183,63 @@ def _import_name(ws: Path, rel: str) -> tuple[str, Path]:
     return p.stem, Path(ws) / p.parent
 
 
+def _batch_import(ws: Path, entries: list[tuple[str, str, Path]],
+                  timeout: int) -> dict[str, str]:
+    """**一次子进程**导入所有模块，返回 {rel: 错误信息(空=成功)}。
+
+    旧实现每文件起一个 Python 进程（33 文件 6–10 秒），1000 文件必超时；
+    而且每个进程都要重新付一遍解释器启动 + 重复 import 公共依赖。
+    这里把"能 import 吗"压成**单进程 + 清单文件**：一次启动、一个 sys.path、
+    逐个 importlib.import_module，结果 JSON 回传。
+
+    返回空 dict = 子进程自己崩了（不是"全绿"），调用方必须回退逐个路径 ——
+    性能优化绝不能把"测不了"伪装成"通过"。
+    """
+    import json as _json
+    import tempfile
+    mods: list[str] = []
+    by_mod: dict[str, str] = {}
+    for rel, mod, _cwd in entries:
+        mods.append(mod)
+        by_mod[mod] = rel
+    # 每个"平铺 import"的 cwd 都要进 sys.path，否则 import 文件名会找不到
+    pathlist = sorted({str(Path(ws).resolve())}
+                      | {str(Path(c).resolve()) for _, _, c in entries})
+    script = (
+        "import json,sys,importlib\n"
+        "mods=[l for l in open(sys.argv[1],encoding='utf-8').read().splitlines() if l.strip()]\n"
+        "out={}\n"
+        "for mod in mods:\n"
+        "    try:\n"
+        "        importlib.import_module(mod)\n"
+        "        out[mod]=''\n"
+        "    except Exception as e:\n"
+        "        out[mod]='%s: %s'%(type(e).__name__, e)\n"
+        "sys.stdout.write(json.dumps(out,ensure_ascii=False))\n"
+    )
+    fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="sixcoder_imp_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(mods))
+        proc = subprocess.run([sys.executable, "-c", script, list_path], cwd=str(Path(ws).resolve()),
+                              capture_output=True, text=True, timeout=max(timeout, 60),
+                              encoding="utf-8", errors="replace",
+                              env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                                   "PYTHONPATH": os.pathsep.join(pathlist),
+                                   "PYTHONDONTWRITEBYTECODE": "1"})
+        data = _json.loads(proc.stdout or "{}")
+        if not isinstance(data, dict):
+            return {}
+        return {by_mod.get(m, m): str(e or "") for m, e in data.items()}
+    except Exception:                                    # noqa: BLE001
+        return {}
+    finally:
+        try:
+            os.unlink(list_path)
+        except OSError:
+            pass
+
+
 def gate_import_ok(ws: Path, paths: list[str], timeout: int = 60) -> GateResult:
     """导入闸门：这个模块**真的能被 import 吗**（跑一句 python -c，确定性）。
 
@@ -1190,11 +1247,15 @@ def gate_import_ok(ws: Path, paths: list[str], timeout: int = 60) -> GateResult:
     `def upsert(conn: sqlite3.Connection)` 少一行 import 会让**导入即 NameError**，
     而 pytest 只会报一堆看不出根因的 collected-error。实测 night8/r2 都栽在这里，
     架构师每轮都得自己推断"少了 sqlite3 导入"。这道闸门把它变成一句话。
+
+    大仓库走**批量**（单进程一次 import 全部，33 文件从 6–10s 压到秒级）；
+    批量子进程崩了会**回退逐个**，保证结果永远可靠（性能优化不许换正确性）。
     """
     t0 = time.time()
     findings: list[str] = []
     checked = 0
     skipped: list[str] = []
+    entries: list[tuple[str, str, Path]] = []
     for rel in paths:
         p = Path(ws) / rel
         if not rel.endswith(".py") or not p.exists() or p.name.startswith("test_"):
@@ -1203,18 +1264,29 @@ def gate_import_ok(ws: Path, paths: list[str], timeout: int = 60) -> GateResult:
         if why_skip:
             skipped.append(f"{rel}：{why_skip}")
             continue
-        checked += 1
         mod, cwd = _import_name(ws, rel)
-        proc = subprocess.run([sys.executable, "-c", f"import {mod}"], cwd=str(cwd),
-                              capture_output=True, text=True, timeout=timeout,
-                              encoding="utf-8", errors="replace",
-                              env={**os.environ, "PYTHONIOENCODING": "utf-8",
-                                   "PYTHONPATH": str(Path(ws).resolve()),
-                                   "PYTHONDONTWRITEBYTECODE": "1"})
-        if proc.returncode != 0:
-            err = (proc.stderr or "").strip().splitlines()
-            tail = next((ln for ln in reversed(err) if ln.strip()), "")
-            findings.append(f"{rel}（import {mod}）导入失败：{tail[:160]}")
+        entries.append((rel, mod, cwd))
+        checked += 1
+    # 批量：一次子进程 import 全部。结果空 = 子进程崩 → 回退逐个。
+    if entries:
+        batch = _batch_import(ws, entries, timeout)
+        if batch:
+            for rel, mod, _cwd in entries:
+                err = batch.get(rel)
+                if err:
+                    findings.append(f"{rel}（import {mod}）导入失败：{err[:160]}")
+        else:
+            for rel, mod, cwd in entries:
+                proc = subprocess.run([sys.executable, "-c", f"import {mod}"], cwd=str(cwd),
+                                      capture_output=True, text=True, timeout=timeout,
+                                      encoding="utf-8", errors="replace",
+                                      env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                                           "PYTHONPATH": str(Path(ws).resolve()),
+                                           "PYTHONDONTWRITEBYTECODE": "1"})
+                if proc.returncode != 0:
+                    err = (proc.stderr or "").strip().splitlines()
+                    tail = next((ln for ln in reversed(err) if ln.strip()), "")
+                    findings.append(f"{rel}（import {mod}）导入失败：{tail[:160]}")
     if not findings:
         extra = (f"；另有 {len(skipped)} 个平台条件模块跳过（{skipped[0].split('：')[0]} 等）"
                  if skipped else "")

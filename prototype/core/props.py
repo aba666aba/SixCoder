@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import ast
+import itertools
 import json
 import os
 import random
@@ -20,6 +21,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+# 判据临时目录的自增序号：保证每次判据都有干净目录，又不靠"删掉上一次"来实现
+_SCRATCH_SEQ = itertools.count(1)
 
 CALL_EQ = re.compile(
     r"([A-Za-z_]\w{2,})\s*\(([^()]*)\)\s*(?:==|等于|应返回|应等于|返回)\s*"
@@ -114,6 +118,16 @@ for c in checks:
                     want = c["expect"]
                 ok = got == want
                 detail = f"{c['desc']}: 得到 {got!r}，应为 {want!r}"
+                if not ok and isinstance(got, dict) and isinstance(want, dict):
+                    # 字典要**逐键相等**：模型常"多返回一个 message 字段"，
+                    # 只说"得到 X 应为 Y"它会以为差不多、下一轮照样多给（实测连撞 6 轮）。
+                    extra = [k for k in got if k not in want]
+                    miss = [k for k in want if k not in got]
+                    if extra:
+                        detail += ("（多出键 " + "、".join(map(str, extra))
+                                   + "：字典必须逐键相等，多余的键要删掉）")
+                    if miss:
+                        detail += "（缺少键 " + "、".join(map(str, miss)) + "）"
                 if not ok and not c.get("hard", True):
                     advisories.append({"kind": kind, "detail": detail})
                     ok, detail = True, ""
@@ -1523,19 +1537,13 @@ def run(ws: Path, rel: str, checks: list[dict], timeout: int = 60) -> dict:
     tmpd.mkdir(parents=True, exist_ok=True)
     runner = tmpd / "_props_run.py"
     runner.write_text(RUNNER, encoding="utf-8")
-    cache = ws / "__pycache__"
-    if cache.exists():
-        for f in cache.glob("*.pyc"):
-            try:
-                f.unlink()
-            except OSError:
-                pass
+    # 这里**不再扫 __pycache__**：Python 自己按 mtime/size 校验缓存，陈旧 .pyc 无害；
+    # 而每跑一次判据都清一批，会撞上外层"单轮删除 ≥50 个就拦下"的保护，
+    # 把整次夜班直接打断（实测 2026-11-07：进程被静默 kill、连退出码都没写）。
     # 判据要在**独立空目录**里跑：契约示例里常有相对路径（write_csv("t.csv", ...)），
     # 边界矩阵还会拿 "αβ"、"x"*1000 当文件名去调用。实测后果：客户仓库里被留下
     # `t_two.csv`、`t_empty.csv`、还有一个真叫 `αβ` 的文件 —— 判据自己的垃圾。
-    scratch = tmpd / f"probe-{os.getpid()}-{len(checks)}"
-    if scratch.exists():
-        _rmtree_force(scratch)
+    scratch = tmpd / f"probe-{os.getpid()}-{next(_SCRATCH_SEQ)}"
     scratch.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-B", str(runner), Path(rel).stem,
            json.dumps(checks, ensure_ascii=False), str(ws), str(rel).replace("\\", "/")]
@@ -1547,12 +1555,11 @@ def run(ws: Path, rel: str, checks: list[dict], timeout: int = 60) -> dict:
         return {"ok": False, "passed": 0, "total": len(checks),
                 "fails": [{"kind": "timeout", "detail": f"超过 {timeout}s（可能有死循环）"}]}
     finally:
-        for junk in (runner,):
-            try:
-                junk.unlink()
-            except OSError:
-                pass
-        _rmtree_force(scratch)
+        # **这里不删任何东西**：一次夜班要跑几十上百次判据，每次删目录+runner，
+        # 很快撞上外层"单轮删除 ≥50 个就拦下"的保护，把运行直接打断
+        # （实测 2026-11-07：SAFE_DELETE_BULK_CONFIRM_REQUIRED，进程 exit 1）。
+        # 临时目录用"进程号+自增序号"保证不重样，脏文件下一个判据看不到它。
+        pass
     lines = [ln for ln in (proc.stdout or "").strip().splitlines() if ln.strip()]
     if not lines:
         # 探针一行输出都没有 = **引擎自己跑不动**，不是产物错。

@@ -121,9 +121,32 @@ def _env(ws) -> dict:
     return env
 
 
+_RUN_SEQ = 0
+
+
 def run_cmd(ws, cmd: str) -> dict:
-    """在仓库内跑一条命令，返回真实证据。绝不抛异常。"""
+    """在仓库内跑一条命令，返回真实证据。绝不抛异常。
+
+    `python -c "<代码>"` 单独处理：命令白名单为了防注入会拒收带引号/分号的写法，
+    而**片内自验恰恰全靠这种写法**（作者要看 "import app.tickets; print(...)"）。
+    实测 2026-11-07：自验命令全被 rejected，作者拿不到任何证据，只能瞎改 6 轮。
+    这里把代码落到临时脚本再执行 —— 没有 shell 参与，语义一致，注入面反而更小。
+    """
     ws = Path(ws).resolve()
+    m = re.match(r'^\s*(?:python|python3|python\.exe|py)\s+-c\s+(["\'])(?P<code>[\s\S]*)\1\s*$',
+                 (cmd or "").strip())
+    if m:
+        global _RUN_SEQ
+        _RUN_SEQ += 1
+        d = ws / ".sixcoder" / "tmp"
+        d.mkdir(parents=True, exist_ok=True)
+        script = d / f"run_{os.getpid()}_{_RUN_SEQ}.py"
+        try:
+            script.write_text(m.group("code"), encoding="utf-8")
+        except OSError as exc:
+            return {"cmd": cmd, "ok": False, "exit": None, "out": "",
+                    "err": f"引擎写不了临时脚本：{exc}"}
+        return _exec(ws, [sys.executable, "-B", str(script)], cmd)
     why = check_cmd(cmd, ws)
     if why:
         return {"cmd": cmd, "ok": False, "rejected": True, "exit": None,
@@ -135,6 +158,11 @@ def run_cmd(ws, cmd: str) -> dict:
         argv = [sys.executable, "-B", *argv[1:]]
     elif head == "pytest":
         argv = [sys.executable, "-B", "-m", "pytest", *argv[1:]]
+    return _exec(ws, argv, cmd)
+
+
+def _exec(ws: Path, argv: list[str], cmd: str) -> dict:
+    """真正跑子进程（不抛异常；超时/异常都变成可观测结果）。"""
     t0 = time.time()
     try:
         proc = subprocess.run(argv, cwd=str(ws), capture_output=True, text=True,
