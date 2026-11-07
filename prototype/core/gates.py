@@ -127,10 +127,10 @@ def gate_syntax(ws: Path, paths: list[str]) -> GateResult:
 
 def gate_tests(ws: Path, targets: list[str] | None = None, timeout: int = 180) -> GateResult:
     t0 = time.time()
-    cmd = "python -m pytest -q --tb=short -p no:cacheprovider"
+    cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider"]
     if targets:
-        cmd += " " + " ".join(targets)
-    rc, out = tools.run_bash(ws, cmd, timeout=timeout)
+        cmd += targets
+    rc, out = tools.run_cmd(ws, cmd, timeout=timeout)
     tail = "\n".join(out.strip().splitlines()[-12:])
     ok = rc == 0
     return GateResult("tests", ok, "exit_code", evidence_ref=f"exit={rc}",
@@ -577,9 +577,10 @@ def gate_types(ws: Path, paths: list[str], timeout: int = 180, node_kind: str = 
     files = [p for p in paths if p.endswith(".py") and (Path(ws) / p).exists()]
     if not files:
         return GateResult("types", True, "static_rule", "no-file", "没有可检查的 .py 文件")
-    cmd = ("python -m mypy --ignore-missing-imports --follow-imports=silent "
-           "--no-error-summary --cache-dir=.sixcoder/mypy_cache " + " ".join(files))
-    rc, out = tools.run_bash(ws, cmd, timeout=timeout)
+    cmd = [sys.executable, "-m", "mypy", "--ignore-missing-imports",
+           "--follow-imports=silent", "--no-error-summary",
+           "--cache-dir=.sixcoder/mypy_cache", *files]
+    rc, out = tools.run_cmd(ws, cmd, timeout=timeout)
     if "No module named mypy" in (out or ""):
         return GateResult("types", True, "static_rule", "mypy-missing",
                           "mypy 未安装，已跳过类型检查（不是通过）",

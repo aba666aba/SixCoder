@@ -134,6 +134,25 @@ def run_bash(ws: Path, cmd: str, timeout: int = 180) -> tuple[int, str]:
         return 124, f"超时 {timeout}s"
 
 
+def run_cmd(ws: Path, argv: list[str], timeout: int = 180) -> tuple[int, str]:
+    """跑一个内部固定命令（列表形式，不经 shell 解析 PATH）。
+
+    与 run_bash 的关键区别：run_bash 走 shell=True 字符串，`python` 由 PATH 解析——
+    在 WorkBuddy 会话里 PATH 最前是自带的 3.13.x（无 pytest/mypy），会让
+    gate_tests/gate_types 命中错误解释器。这里改用列表 argv + sys.executable，
+    保证用项目真正的解释器，同时保留沙箱脱敏环境与审计。
+    """
+    sb = sandbox(ws)
+    sb.audit("cmd", " ".join(argv))
+    try:
+        p = subprocess.run(argv, cwd=str(sb.ws), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, env=sb.env())
+        return p.returncode, ((p.stdout or "") + (p.stderr or ""))[-4000:]
+    except subprocess.TimeoutExpired:
+        return 124, f"超时 {timeout}s"
+
+
 HUMAN_GIT_BLOCK = {"filter-branch", "gc", "reflog", "replace"}
 
 

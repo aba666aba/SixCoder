@@ -348,8 +348,12 @@ def usage_summary(task_id: str = "") -> dict:
                 _prices[model] = step["pricing"]
             else:
                 p = pricing_for(model)
-                same = {k: p.get(k) for k in ("in_miss", "in_hit", "out")}
-                _prices[model] = {"offpeak": same, "peak": same}
+                off = {k: p.get(k) for k in ("in_miss", "in_hit", "out")}
+                # pricing_for 顶层 in_miss/in_hit/out 是空闲价，peak 是单独的一整块；
+                # 旧美元价目表没有 peak 字段，此时 peak 回落 off（不分闲忙，保持旧行为）。
+                peak = p.get("peak")
+                _prices[model] = {"offpeak": off,
+                                  "peak": peak if isinstance(peak, dict) else off}
         return _prices[model]
 
     def cost_of(r: dict) -> float:
@@ -379,8 +383,8 @@ def usage_summary(task_id: str = "") -> dict:
     # 缓存省下来的钱：命中部分若按未命中价计会多花多少
     saved = 0.0
     for r in rows:
-        if not model_steps.get(r.get("model") or ""):
-            continue
+        if not (r.get("model") or "").strip():
+            continue  # 本地手脚档（model 为空）不花钱，也不计缓存省钱
         price = prices_for(r.get("model") or "")[
             "offpeak" if r.get("offpeak") else "peak"]
         hit = r["cache_hit_tokens"] or 0

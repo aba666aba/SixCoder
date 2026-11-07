@@ -250,7 +250,10 @@ def main() -> int:
     check("临时素材没有落进仓库（d.csv 只在临时目录里）",
           not (ws8 / "d.csv").exists())
     left = list((ws8 / ".sixcoder" / "tmp").glob("probe-*")) if (ws8 / ".sixcoder").exists() else []
-    check("临时目录跑完即清", left == [], str(left))
+    # probe 已改成"固定名字 + 原地覆盖、不删"（避开沙箱单轮删除 ≥50 个文件的守卫），
+    # 断言口径从"跑完即清"改为：临时文件隔离在 .sixcoder/tmp 下、不落进仓库根目录。
+    check("探针临时文件隔离在 .sixcoder/tmp 下（不落进仓库根目录）",
+          all((ws8 / ".sixcoder" / "tmp") in p.parents for p in left), str(left))
 
     print("[7] 历史 / 停滞 / 落盘")
     ws9 = make_ws()
