@@ -229,6 +229,13 @@ def _norm_model_profile(raw: dict) -> dict:
     compat = str(raw.get("compat") or "").strip().lower()
     if compat not in ("", "deepseek", "openai"):
         compat = ""                  # 非法值收敛到「未设置」，交给下游回落，不猜协议
+    # 档案没写协议时，按**模型名**定族：deepseek-* 一律是 DeepSeek 协议。
+    # 不这么定的话，空 compat 会继承全局 compat（可能已被配成 openai），
+    # 结果把 DS 的 reasoning_effort 丢掉、还继承别家端点的 base_url ——
+    # 实测（2026-11-07）：DeepSeek key 被发到智谱端点，报 401，看起来像 key 失效。
+    # 其它模型仍保持空 = 跟随全局，不擅自替用户拍板。
+    if not compat and str(raw.get("model") or "").strip().lower().startswith("deepseek-"):
+        compat = "deepseek"
     pricing = raw.get("pricing") or {}
 
     def price_block(b):

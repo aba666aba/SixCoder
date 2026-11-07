@@ -137,6 +137,17 @@ def main() -> int:
     ws_full = _ws({"m.py": MOD, "test_m.py": TEST_FULL})
     cov_ok = arch.gate_coverage(ws_full, level="M")
     check("覆盖率达标 → 放行", cov_ok.ok is True, str(cov_ok.detail))
+    # 实测 2026-11-07：不指定 --source 时，运行环境注入的 sitecustomize.py
+    # （834 行 / 10% 覆盖）被算进 TOTAL，把真实 100% 拉到 13% → M 档永远假红。
+    # 覆盖率只该测客户仓库里的代码，不许被外部文件拖低。
+    check("覆盖率达标时读数确实 ≥80%（不是靠跳过蒙混）",
+          cov_ok.evidence_ref.replace("%", "").isdigit()
+          and float(cov_ok.evidence_ref.replace("%", "")) >= 80,
+          str(cov_ok.evidence_ref))
+    arch_src = (Path(__file__).resolve().parent.parent / "core" / "arch.py").read_text(
+        encoding="utf-8")
+    check("覆盖率限定 --source 到工作区", "--source={source}" in arch_src)
+    check("report 按工作区过滤", "--include={source}/*" in arch_src)
 
     print("[3] M 档：改动规模超软上限必须阻断，并留可追溯豁免口")
     ws_g = _git_repo({"m.py": MOD})

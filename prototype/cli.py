@@ -199,6 +199,20 @@ def cmd_night(args) -> None:
         sys.exit(2)
     db.init()
     goal = str(getattr(args, "goal", "") or "").strip()
+    _goal_file = str(getattr(args, "goal_file", "") or "").strip()
+    if _goal_file:
+        if goal:
+            print("[FAIL] --goal 与 --goal-file 只能用一个")
+            sys.exit(2)
+        try:
+            goal = Path(_goal_file).read_text(encoding="utf-8-sig").strip()
+        except OSError as exc:
+            print(f"[FAIL] 读不了目标文件：{exc}")
+            sys.exit(2)
+        if not goal:
+            print("[FAIL] 目标文件是空的")
+            sys.exit(2)
+        print(f"> 目标文件：{_goal_file}（{len(goal)} 字符）")
     requirement = args.requirement or ""
     if getattr(args, "requirement_file", ""):
         requirement = Path(args.requirement_file).read_text(encoding="utf-8-sig")
@@ -1013,6 +1027,8 @@ def build() -> argparse.ArgumentParser:
     sp.add_argument("--requirement-file", default="", help="需求文件路径（长需求用这个）")
     sp.add_argument("--goal", default="",
                     help="一句话目标（全自主模式）：切片、验收对象、预算分配全部由系统自己规划")
+    sp.add_argument("--goal-file", default="",
+                    help="目标文本文件路径（长需求用这个，内容整份作为 goal；与 --goal 二选一）")
     sp.add_argument("--max-slices", type=int, default=0,
                     help="全自主模式：最多做几个切片（0 = 不限，直到覆盖完成/钱用完）")
     sp.add_argument("--slice-hours", type=float, default=0.0,

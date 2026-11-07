@@ -28,6 +28,9 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 def main() -> int:
     print("远端模型选择自检")
     orig = settings_store.models()
+    # 下面会切 active_model 做实验；结尾硬写 "" 会清掉用户 pin 的当前模型
+    # （实测 2026-11-07 把 flash 弄丢），所以连 pin 一起备份、无条件恢复。
+    orig_active = str(settings_store.get_remote().get("active_model") or "")
 
     print("[1] 默认设置：整条阶梯 = flash 四档")
     alls = [f"{x['profile_id']}:{x['effort']}" for x in remote.ladder()]
@@ -62,12 +65,15 @@ def main() -> int:
         check("切过去之后 flash 反而查不到", remote.ladder("flash") == [],
               str(remote.ladder("flash")))
     finally:
-        settings_store.update_remote({"active_model": ""})
         settings_store.save_models(orig)          # 一定还原，别把用户配置改坏
+        settings_store.update_remote({"active_model": orig_active})
 
     print("[4] 还原后配置没被改动")
     back = [f"{x['profile_id']}:{x['effort']}" for x in remote.ladder()]
     check("阶梯恢复原样", back == alls, f"{back} vs {alls}")
+    check("用户原本的当前模型 pin 未被清掉",
+          str(settings_store.get_remote().get("active_model") or "") == orig_active,
+          f"{settings_store.get_remote().get('active_model')!r} vs {orig_active!r}")
 
     print("[5] 调用链：night 接受这个参数且写进报告")
     src = (Path(__file__).resolve().parents[1] / "core" / "company.py").read_text(encoding="utf-8")

@@ -142,6 +142,22 @@ class Blueprint:
                 return c
         return None
 
+    @staticmethod
+    def clip(text: str, limit: int) -> str:
+        """超长文本塞进提示词时**保留头尾、砍中间**，不丢结尾。
+
+        长需求（本次 6954 字符）若用 `text[:6000]`，尾部的验收口径与风险应对
+        会被整段砍掉 —— 而那些恰恰是判定"做没做完"的依据。
+        头部放目标/规模/核心指标，尾部放验收与风险，中间是展开描述，砍中间最安全。
+        """
+        s = str(text or "")
+        if len(s) <= limit:
+            return s
+        head = int(limit * 0.62)
+        tail = limit - head - 60
+        return (s[:head] + f"\n\n…（中间省略 {len(s) - head - tail} 字符，控制远端 token）…\n\n"
+                + s[-tail:])
+
     def ids(self) -> list[str]:
         return [c.id for c in self.caps]
 
@@ -1069,7 +1085,7 @@ def extend(bp: "Blueprint", goal: str, *, need: int = 4, llm=None, ws=None) -> d
                      for c in bp.caps) or "（还没有）"
     prompt = (EXTEND_PROMPT.replace("{need}", str(max(1, int(need))))
               .replace("{have}", have[:4000])
-              .replace("{goal}", (goal or bp.goal)[:4000]))
+              .replace("{goal}", Blueprint.clip(goal or bp.goal, 4000)))
     r = llm(prompt, json_mode=True, task_id="blueprint-extend", node_id="plan", max_out=12000)
     if not r.get("ok"):
         return {"ok": False, "why": f"远端调用失败：{r.get('error')}", "added": []}
@@ -1114,7 +1130,7 @@ def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = Tru
     bp = Blueprint(goal=goal, version=1, total_budget_cny=float(budget_cny or 0.0),
                    created_at=time.time())
 
-    prompt = (DERIVE_PROMPT.replace("@GOAL@", goal[:6000])
+    prompt = (DERIVE_PROMPT.replace("@GOAL@", Blueprint.clip(goal, 6000))
               .replace("@BUDGET@", f"{bp.total_budget_cny:.2f}")
               .replace("@PER_FUNC@", f"{CNY_PER_FUNC:.4f}")
               .replace("@N_FUNCS@", str(_n_funcs_for(bp.total_budget_cny))))
@@ -1243,13 +1259,13 @@ def audit(bp: Blueprint, *, llm=None, emit=None, ws=None, diff=None) -> dict:
         rows = [{"id": c.id, "desc": c.desc, "probe": c.probe,
                  "deps": c.deps, "funcs_est": c.funcs}
                 for c in bp.caps if c.id in ids]
-        prompt = (AUDIT_DIFF_PROMPT.replace("@GOAL@", (bp.goal or "")[:4000])
+        prompt = (AUDIT_DIFF_PROMPT.replace("@GOAL@", Blueprint.clip(bp.goal or "", 4000))
                   .replace("@DIFF@", json.dumps(changes, ensure_ascii=False,
                                                 indent=1, default=str)[:6000])
                   .replace("@TABLE@", json.dumps(rows, ensure_ascii=False,
                                                  indent=1, default=str)[:12000]))
     else:
-        prompt = (AUDIT_PROMPT.replace("@GOAL@", (bp.goal or "")[:4000])
+        prompt = (AUDIT_PROMPT.replace("@GOAL@", Blueprint.clip(bp.goal or "", 4000))
                   .replace("@TABLE@", table_text(bp)))
     r = llm(prompt, json_mode=True, task_id="blueprint-audit", node_id="plan")
     if not r.get("ok"):

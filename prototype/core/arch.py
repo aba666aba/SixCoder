@@ -163,10 +163,17 @@ def gate_coverage(ws: Path, level: str = "M", floor: float | None = None,
     except OSError:
         pass
     try:
-        proc = subprocess.run([sys.executable, "-m", "coverage", "run", "-m", "pytest", "-q"],
+        # **只测客户仓库里的代码**：不指定 --source 时 coverage 会把运行环境注入的
+        # sitecustomize.py（实测 834 行、10% 覆盖）也算进 TOTAL，把真实 100% 拉到 13%，
+        # M 档 80% 地板因此永远判红 —— 覆盖率就成了假红，会卡死整次夜班。
+        # --source 指向工作区，report 再按同口径过滤，外部文件一律不计。
+        source = str(Path(ws).resolve())
+        proc = subprocess.run([sys.executable, "-m", "coverage", "run",
+                               f"--source={source}", "-m", "pytest", "-q"],
                               cwd=str(ws), capture_output=True, text=True, timeout=timeout,
                               env=_cov_env)
-        rep = subprocess.run([sys.executable, "-m", "coverage", "report", "--format=total"],
+        rep = subprocess.run([sys.executable, "-m", "coverage", "report", "--format=total",
+                              f"--include={source}/*"],
                              cwd=str(ws), capture_output=True, text=True, timeout=60,
                              env=_cov_env)
         total = float((rep.stdout or "0").strip().splitlines()[-1] or 0)

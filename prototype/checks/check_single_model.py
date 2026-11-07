@@ -203,9 +203,13 @@ def main() -> int:
     pub = (root / "core" / "settings_store.py").read_text(encoding="utf-8", errors="replace")
     check("对外视图带出当前模型（界面能显示『当前』）", '"active_model"' in pub)
     app_vue = (root / "web" / "src" / "App.vue").read_text(encoding="utf-8", errors="replace")
-    check("界面有『用这个』= 切换当前模型", "useProfile" in app_vue and "用这个" in app_vue)
-    check("界面有『当前模型』三合一填写（模型名/接口/key）",
-          "saveCurrentModel" in app_vue and "保存当前模型" in app_vue)
+    check("界面有『设为当前』= 切换当前模型",
+          "useProfile" in app_vue and "设为当前" in app_vue)
+    # 2026-11-07 界面重构：旧的「当前模型」三合一填写区已改成"卡片列表 → 点开详情"。
+    # 等价能力仍要钉住：点开后能改请求网址 / API key / 请求参数，并保存这个模型。
+    check("界面点开模型可改连接参数并保存（网址 / key / 请求参数）",
+          "请求网址" in app_vue and "API key" in app_vue and "请求参数" in app_vue
+          and "saveProfile" in app_vue and "保存这个模型" in app_vue)
     check("界面不再出现旧的美元价目表编辑器", "价目表（可编辑" not in app_vue
           and "美元 / 每百万 token" not in app_vue)
 

@@ -48,6 +48,9 @@ CONTENT_CEIL = 384000          # 官方单次输出上限（正文部分）
 # OpenAI 兼容端点的输出配额上限（智谱官方示例 65536，接口硬上限 131072）。
 # DS 校准出的 33 万配额直接发给这类端点会 HTTP 400「max_tokens 参数非法」。
 OPENAI_OUTPUT_CEIL = 65536
+# 按协议族区分的官方端点：DeepSeek 档案不继承全局（可能是别家 OpenAI 兼容服务）的地址
+DEEPSEEK_BASE = "https://api.deepseek.com"
+OPENAI_COMPAT_BASE = "https://api.openai.com/v1"
 
 
 def reasoning_reserve(effort: str | None) -> int:
@@ -146,8 +149,10 @@ def compat_of(step: dict | None = None, r: dict | None = None) -> str:
 
 
 def _key() -> str:
+    """全局 key（含环境变量回落）。保持无参：自检会 monkeypatch 它。"""
     r = settings_store.get_remote()
-    return (r.get("api_key") or "").strip() or os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    return (str(r.get("api_key") or "").strip()
+            or os.environ.get("DEEPSEEK_API_KEY", "").strip())
 
 
 def available() -> tuple[bool, str]:
@@ -462,8 +467,25 @@ def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool) -> 
     else:
         payload["thinking"] = {"type": "enabled"}
         payload["reasoning_effort"] = effort
-    base = (step.get("base_url") or r.get("base_url") or "https://api.deepseek.com").rstrip("/")
-    key = step.get("api_key") or _key()
+    # 端点与 key **按协议族隔离**，不许跨厂商兜底。
+    # 旧链是 `档案 → 全局 → 官方默认`：用户把全局配成智谱（openai 兼容）后，
+    # DeepSeek 档案只要自己没填 base_url，就会继承智谱地址；key 同理。
+    # 实测（2026-11-07）：DeepSeek key + deepseek-flash 模型名被发到智谱端点 → 401，
+    # 错误信息却说"Key 无效或已被轮换"，把端点错配误诊成 key 失效。
+    global_compat = compat_of(r=r)
+    explicit_base = str(step.get("base_url") or "").strip().rstrip("/")
+    global_base = str(r.get("base_url") or "").strip().rstrip("/")
+    if compat == "deepseek":
+        # DeepSeek 家族：只用官方端点（或档案显式填的），绝不继承 openai 兼容全局地址
+        base = explicit_base or DEEPSEEK_BASE
+    else:
+        base = explicit_base or global_base or OPENAI_COMPAT_BASE
+    # key 同理：只有"全局服务与本协议一致"时才允许继承全局 key
+    key = str(step.get("api_key") or "").strip()
+    if not key and (global_compat == compat or not global_compat):
+        # 优先用调用方传入的 r（离线自检可注入，不读本机配置）；
+        # 没有才回落到 _key()（含环境变量）。_key 保持无参，自检会 monkeypatch 它。
+        key = str(r.get("api_key") or "").strip() or _key()
     return payload, base, key
 
 
@@ -594,8 +616,11 @@ def http_error_hint(exc) -> str:
     except Exception:                                    # noqa: BLE001
         detail = ""
     if code in (401, 403):
-        return (f"Key 无效或已被轮换（HTTP {code}）：请到「设置 → 远端模型」重新填一把可用的 "
-                f"DeepSeek Key（旧的作废 Key 留在本地设置里也会报这个错）")
+        # 401 不一定是 key 失效：实测（2026-11-07）DeepSeek key 被发到智谱端点
+        # 同样报 401。先让用户核对"端点/协议/key 是不是同一家"，别误导去换 key。
+        return (f"鉴权失败（HTTP {code}）：先确认这个模型的「请求网址 / 协议类型 / API key」"
+                f"属于同一家服务 —— 端点错配（例如 DeepSeek 模型继承了智谱地址）也会报 401。"
+                f"三者一致再考虑 key 失效或已轮换，到「设置 → 远端模型」重新填一把。")
     if code == 402:
         return "余额不足（HTTP 402）：远端账户欠费，请充值或改用本地模型"
     if code == 429:

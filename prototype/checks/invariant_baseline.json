@@ -851,7 +851,7 @@
     "kind": "截断长度",
     "value": "32",
     "snip": "mid = str(raw.get(\"id\") or \"\").strip()[:32]",
-    "依据": "展示/日志截断：长度 32 用于展示或摘要，不影响判据"
+    "依据": "展示字段截断：tz 字符串最长 32 字符，防止界面传入超长时区名写坏配置；不影响判据"
   },
   "settings_store.py|截断长度|64|0cd5b41d": {
     "file": "settings_store.py",
@@ -2630,5 +2630,404 @@
     "value": "路由挂在「落点模块」的 `router` 上，**不要写 app/main.py",
     "snip": "\"路由挂在「落点模块」的 `router` 上，**不要写 app/main.py**（引擎生成）。\"]",
     "依据": "提示词约定：约束模型输出形态（不是系统硬限制）；不满足时由结构体检/机械判据兜住"
+  },
+  "architect.py|默认上限|max_out=12000|8a6e0f92": {
+    "file": "architect.py",
+    "kind": "默认上限",
+    "value": "12000",
+    "snip": "r = llm(prompt, json_mode=True, task_id=\"architect\", node_id=\"architect\", max_out=12000)",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|80|4e8ae8a0": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "for i, ln in enumerate(lines[:80], 1):",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|100|c0f39e32": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "why = \"契约合成失败：\" + \"；\".join(cg.get(\"problems\") or [])[:100]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|200|7009f6ee": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"；\".join((cg.get(\"problems\") or [])[:2])[:200]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|120|ecf6df31": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "detail = str(c.why or \"（原因见覆盖报告）\")[:120]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|200|c4e75003": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "c.why = (f\"⚠ 被切片 {sl['id']} 的改动改坏（之前是通的）：{detail}\")[:200]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|100|5ab286e5": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "\"why\": (res.get(\"reason\") or \"\")[:100]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|20|f8a7d7eb": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "covmod.record(ws, cov, f\"重规划后观测（{reason[:20]}）\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|160|3385216a": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"why\": f\"重规划：{reason}；diff={rep.get('diff')}\"[:160]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|40|674e3707": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "lines.append(f\"| {marks.get(st, st)} | `{c.id}` | {c.desc[:40]} | \"",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|截断长度|60|96987eda": {
+    "file": "auto.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "lines.append(f\"| `{r['cap']}` | `{r.get('slice')}` | {str(r.get('detail'))[:60]} |\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "auto.py|默认上限|max_rounds=8|01d1477f": {
+    "file": "auto.py",
+    "kind": "默认上限",
+    "value": "8",
+    "snip": "doc = _clarify.clarify_loop(requirement, complete, human_answer, effort=\"max\", max_rounds=8)",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "blueprint.py|截断长度|20|df256535": {
+    "file": "blueprint.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "user = \"u_\" + re.sub(r\"[^a-z0-9]+\", \"_\", str(c.id).lower())[:20]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "blueprint.py|截断长度|200|5b6a0abe": {
+    "file": "blueprint.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "c.why = (why or \"未说明原因\")[:200]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "blueprint.py|截断长度|12|c3068738": {
+    "file": "blueprint.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "for c in gaps[:12]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "blueprint.py|截断长度|60|448fdc10": {
+    "file": "blueprint.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "lines.append(f\" - {c.id}: {c.desc[:60]}\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ceiling.py|截断长度|160|ab66181f": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"cost_cny\": round(float(cost_cny or 0.0), 4), \"reason\": (reason or \"\")[:160]}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ceiling.py|截断长度|120|08c57257": {
+    "file": "ceiling.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "measured = f\"按 M 档地板实测：{detail[:120]}（本项目 {level.upper()} 档）\"",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|截断长度|160|4a3c16a5": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"note\": _plan[\"note\"][:160]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|截断长度|160|ffa4afb9": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "emit(\"notice\", {\"message\": f\"回归硬门禁：{_guard['reason'][:160]}\"})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "constitution.py|截断长度|16|84669a67": {
+    "file": "constitution.py",
+    "kind": "截断长度",
+    "value": "16",
+    "snip": "return hashlib.sha256(text.encode(\"utf-8\")).hexdigest()[:16]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "coverage.py|截断长度|120|0b2598cf": {
+    "file": "coverage.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "emit(\"coverage\", {\"cap\": cid, \"status\": status, \"detail\": detail[:120]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "coverage.py|截断长度|200|c8c21cfe": {
+    "file": "coverage.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "c.why = str(row.get(\"detail\") or \"\")[:200]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "coverage.py|截断长度|60|2c3bc28a": {
+    "file": "coverage.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "+ (\"\" if st == \"done\" else detail[:60]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "dataflow.py|截断长度|60|f0e10e0f": {
+    "file": "dataflow.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "line += f\"，{len(miss)} 个没有证据（{('、'.join(miss))[:60]}）\"",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deps.py|截断长度|200|c20545a5": {
+    "file": "deps.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "failed.append({\"module\": mod, \"pkg\": pkg, \"why\": f\"{type(exc).__name__}: {exc}\"[:200]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "flow.py|截断长度|120|05c6d9e1": {
+    "file": "flow.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "out[\"imports\"][stem] = \"%s: %s\" % (type(exc).__name__, str(exc)[:120])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "flow.py|截断长度|300|41f4bcba": {
+    "file": "flow.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "out[\"checks\"].append({\"name\": name, \"ok\": bool(ok), \"detail\": str(detail)[:300]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "flow.py|截断长度|120|015d75ee": {
+    "file": "flow.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "out[\"error\"] = \"import %s 失败：%s: %s\" % (stem, type(exc).__name__, str(exc)[:120])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "flow.py|截断长度|200|9bd75402": {
+    "file": "flow.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "out[\"error\"] = \"业务流执行异常：%s: %s\" % (type(exc).__name__, str(exc)[:200])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "gates.py|截断长度|160|4aaade14": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "findings.append(f\"{rel}（import {mod}）导入失败：{err[:160]}\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "gates.py|截断长度|160|643d6fd7": {
+    "file": "gates.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "findings.append(f\"{rel}（import {mod}）导入失败：{tail[:160]}\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "gitops.py|截断长度|400|257b1aba": {
+    "file": "gitops.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "return {\"ok\": rc == 0, \"head\": head if rc2 == 0 else \"\", \"detail\": out[:400],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "oracle.py|截断长度|200|962d4906": {
+    "file": "oracle.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"error\": (out.strip().splitlines() or [\"(无输出)\"])[-1][:200], \"value\": None}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "probe.py|截断长度|400|febef111": {
+    "file": "probe.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "out[\"detail\"] = \"没有可用的 ASGI 应用（试过 %s 个候选）：%s\" % (len(seen), \" ; \".join(errs)[:400])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "remotetools.py|截断长度|200|fe23b873": {
+    "file": "remotetools.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "hits.append(f\"{rel}:{i}: {ln.strip()[:200]}\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "remotetools.py|截断长度|80|a7c36558": {
+    "file": "remotetools.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "return True, f\"已写入记忆 [{entry['type']}]：{entry['text'][:80]}\"",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "replan.py|截断长度|80|2c6e0684": {
+    "file": "replan.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "bp.notes.append(f\"重规划(v{bp.version}→v{bp.version + 1})：{reason[:80]}\"",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "replan.py|截断长度|80|595958fa": {
+    "file": "replan.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "bp.notes.append(f\"重规划(v{bp.version}→v{bp.version + 1})：{reason[:80]}（未复评）\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "replan.py|截断长度|200|c03e322e": {
+    "file": "replan.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "d[\"reason\"] = reason[:200]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "replan.py|截断长度|120|7c79e7d6": {
+    "file": "replan.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"descoped\": d.get(\"descoped\"), \"reason\": reason[:120]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "scale.py|默认上限|max_lines=100|1ee51bf2": {
+    "file": "scale.py",
+    "kind": "默认上限",
+    "value": "100",
+    "snip": "id=\"S\", label=\"< 10 万行（小型项目 / 单一团队）\", max_lines=100_000,",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "scale.py|比较阈值|10|1ee51bf2": {
+    "file": "scale.py",
+    "kind": "比较阈值",
+    "value": "10",
+    "snip": "id=\"S\", label=\"< 10 万行（小型项目 / 单一团队）\", max_lines=100_000,",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "selfcheck_loop.py|截断长度|400|5ff0e83d": {
+    "file": "selfcheck_loop.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "out.append(f\" 上次判红的原因：{str(c.why)[:400]}\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "settings_store.py|截断长度|32|0ab4e1c9": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "\"tz\": str(raw.get(\"tz\") or \"Asia/Shanghai\")[:32]}",
+    "依据": "展示字段截断：tz 字符串最长 32 字符，防止界面传入超长时区名写坏配置；不影响判据"
+  },
+  "shipgate.py|截断长度|40|a51438dc": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "rows = [f\"| `{c.id}` | {c.desc[:40]} | {_probe.describe(c.probe)[:60]} | ✅ |\" for c in done]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|60|a51438dc": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "rows = [f\"| `{c.id}` | {c.desc[:40]} | {_probe.describe(c.probe)[:60]} | ✅ |\" for c in done]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|60|fd1d8827": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "readme = f\"\"\"# {bp.goal.splitlines()[0][:60] if bp.goal else 'SixCoder 产物'}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|120|8413f82e": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "\"[r.text[:120] for r in _rs]\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|200|571b4841": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "body.append(f\" assert r.status_code in {stt}, r.text[:200]\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|200|b63feaaa": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "body.append(f\" assert r.status_code == {stt}, r.text[:200]\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|200|7698140d": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "body.append(\" assert 200 <= r.status_code < 300, r.text[:200]\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|120|5c8c90d3": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "return {\"ok\": False, \"why\": str(exc)[:120], \"tests\": 0}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|200|56b4a7b1": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "rows.append({\"name\": name, \"ok\": bool(ok), \"detail\": detail[:200]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|100|b0dc32a3": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "100",
+    "snip": "det = f\"{type(exc).__name__}: {exc}\"[:100]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "shipgate.py|截断长度|160|f9188fae": {
+    "file": "shipgate.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "add(\"测试通过\", p.returncode == 0, (tail[-1] if tail else \"\")[:160])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "slicer.py|截断长度|160|582271cc": {
+    "file": "slicer.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "body = str(content).replace(\"\\n\", \"\\\\n\")[:160]",
+    "依据": "（待填：这个数字凭什么）"
   }
 }

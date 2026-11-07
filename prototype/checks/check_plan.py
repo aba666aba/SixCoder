@@ -391,6 +391,22 @@ def main() -> int:
     check("summary 与 describe 同源（观测方式只有一处定义）",
           "describe" in inspect.getsource(blueprint.summary))
 
+    print("[长需求进提示词：保留头尾，不丢验收口径]")
+    long_goal = ("目标代码规模：30000 行\n" + ("中段展开描述。" * 900)
+                 + "\n验收：blocking pair 为零，一志愿命中率不低于 75%。\n综上，以实验验证为准。")
+    clipped = blueprint.Blueprint.clip(long_goal, 6000)
+    check("超长目标被压到限额内", len(clipped) <= 6000, str(len(clipped)))
+    check("头部保留（规模声明没丢）", "30000 行" in clipped, clipped[:80])
+    check("尾部保留（验收口径没丢）", "blocking pair 为零" in clipped
+          and "综上" in clipped, clipped[-80:])
+    check("短目标原样返回", blueprint.Blueprint.clip("短目标", 6000) == "短目标")
+    # 四处提示词都必须走 clip，不许回到裸切片把尾部砍掉
+    src = (Path(__file__).resolve().parent.parent / "core" / "blueprint.py").read_text(
+        encoding="utf-8")
+    check("derive 走 clip", 'DERIVE_PROMPT.replace("@GOAL@", Blueprint.clip(goal, 6000))' in src)
+    check("audit 两处走 clip", src.count('Blueprint.clip(bp.goal or "", 4000)') == 2)
+    check("扩产提示走 clip", "Blueprint.clip(goal or bp.goal, 4000)" in src)
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")

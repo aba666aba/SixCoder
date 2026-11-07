@@ -97,38 +97,48 @@ def main() -> int:
     check("超时确实等了（不是立刻放行）", time.time() - t0 >= 0.35, f"{time.time() - t0:.2f}s")
 
     # 4b 人工批准 → 放行
+    # 只批准**本次新建**的单据：4a 的超时单据会残留在 pending() 里，旧写法
+    # `items[0]` 可能批准错单据后线程就退出，导致 4b 自己没人批 → 偶发超时。
+    # 线程持续到 request 返回（stop 事件），不再靠固定 2 秒循环碰运气。
     holder = {}
+    before = {it["id"] for it in approval.pending()}
+    stop = threading.Event()
 
     def approve_soon():
-        for _ in range(100):
-            items = approval.pending()
-            if items:
-                holder["id"] = items[0]["id"]
-                approval.resolve(items[0]["id"], "approved", by="test")
-                return
-            time.sleep(0.02)
+        while not stop.is_set():
+            for it in approval.pending():
+                if it["id"] not in before:
+                    holder["id"] = it["id"]
+                    approval.resolve(it["id"], "approved", by="test")
+                    return
+            time.sleep(0.01)
 
     th = threading.Thread(target=approve_soon, daemon=True)
     th.start()
     r2 = approval.request("file.write", "写 ok.py", "diff…", workspace=ws,
                           interactive=False, timeout=5)
+    stop.set()
     th.join(timeout=1)
     check("人工批准后放行", r2["ok"] and r2["decision"] == "approved", str(r2)[:120])
     check("单据被回填了", bool(holder.get("id")), str(holder))
 
     # 4c 人工拒绝 → 该节点中止
+    before2 = {it["id"] for it in approval.pending()}
+    stop2 = threading.Event()
+
     def reject_soon():
-        for _ in range(100):
-            items = approval.pending()
-            if items:
-                approval.resolve(items[0]["id"], "rejected", by="test")
-                return
-            time.sleep(0.02)
+        while not stop2.is_set():
+            for it in approval.pending():
+                if it["id"] not in before2:
+                    approval.resolve(it["id"], "rejected", by="test")
+                    return
+            time.sleep(0.01)
 
     th2 = threading.Thread(target=reject_soon, daemon=True)
     th2.start()
     r3 = approval.request("deliver", "标记可交付", "8/8", workspace=ws,
                           interactive=False, timeout=5)
+    stop2.set()
     th2.join(timeout=1)
     check("人工拒绝 → 不放行", (not r3["ok"]) and r3["decision"] == "rejected", str(r3)[:120])
     check("审计日志落了盘", (ws / ".sixcoder" / "audit.jsonl").exists())

@@ -227,15 +227,6 @@ function loadPricing(d) {
   windowForm.tz = w.tz || 'Asia/Shanghai'
 }
 
-/* 当前模型的连接参数一起保存（模型名 / 接口 / 协议 / key） */
-async function saveCurrentModel() {
-  const patch = { model: remoteForm.model, base_url: remoteForm.base_url,
-                  compat: remoteForm.compat }
-  if (remoteForm.api_key) patch.api_key = remoteForm.api_key
-  await saveRemote(patch)
-  await loadRemote()
-}
-
 /* 切换当前模型（单模型：切换 = 整条阶梯换成它） */
 async function useProfile(p) {
   if (p._draft) { errMsg.value = '请先保存这张新档案，再设为当前模型'; return }
@@ -589,7 +580,8 @@ const EFFORT_DEFS = [
   { v: 'max', label: 'max', hint: '最深（规格 / 方案 / 卡住时升档）' },
 ]
 
-/* compat 为空 = 跟随全局默认（deepseek）；显式 openai = OpenAI 兼容类 */
+/* 后端已按模型名定族：deepseek-* 档案的 compat 会被规范成 deepseek；
+   显式 openai（或智谱/混元等）才是 OpenAI 兼容类。空值按 DeepSeek 处理。 */
 function isOpenAI(p) { return String(p?.compat || '').toLowerCase() === 'openai' }
 function kindLabel(p) { return isOpenAI(p) ? 'OpenAI 兼容' : 'DeepSeek' }
 function effortSummary(p) {
@@ -1718,7 +1710,9 @@ onUnmounted(() => {
         <div class="modal-body">
           <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.6">
             下面是<b>已保存的模型</b>，按协议分成两类。点开任意一个就能改它的连接、参数、key、价格与闲时设置。
-            <b>一次运行只用它标着「当前」的那一个</b>；其余只是存着备用。key 只存本机设置文件，界面只显示掩码。
+            <b>一次运行只用它标着「当前」的那一个</b>；其余只是存着备用。
+            网址与 key 按协议族自动隔离（DeepSeek 走官方、OpenAI 兼容继承全局），互不串用。
+            key 只存本机设置文件，界面只显示掩码。
           </div>
 
           <!-- ① 已保存的模型：两类分组的卡片列表，点开看完整配置 -->
@@ -1769,7 +1763,7 @@ onUnmounted(() => {
                   <div class="row" style="gap:8px;margin-bottom:0">
                     <button class="ghost tiny" :class="{ 'sel': !isOpenAI(p) }" @click="setKind(p, false)">DeepSeek（四档）</button>
                     <button class="ghost tiny" :class="{ 'sel': isOpenAI(p) }" @click="setKind(p, true)">OpenAI 兼容（单档）</button>
-                    <span class="dim" style="font-size:10.5px">切换会重置档位，改完记得保存</span>
+                    <span class="dim" style="font-size:10.5px">切换会重置档位与默认网址，改完记得保存</span>
                   </div>
                 </div>
 
@@ -1779,13 +1773,22 @@ onUnmounted(() => {
                     <label><span>显示名</span><input v-model="p.label" placeholder="给这个模型起个名字" /></label>
                     <label><span>模型名</span><input v-model="p.model" class="mono" placeholder="deepseek-flash / gpt-4o" /></label>
                     <label style="grid-column:1/-1"><span>请求网址</span>
-                      <input v-model="p.base_url" class="mono" placeholder="https://api.deepseek.com（留空则用默认）" /></label>
+                      <input v-model="p.base_url" class="mono"
+                             :placeholder="isOpenAI(p) ? 'https://open.bigmodel.cn/api/paas/v4（留空则继承全局网址）' : 'https://api.deepseek.com（留空则自动用 DeepSeek 官方地址）'" /></label>
+                  <div class="dim" style="font-size:10.5px;margin-top:3px;line-height:1.6">
+                    留空时按<b>协议类型</b>自动选：DeepSeek 走官方地址，OpenAI 兼容继承全局网址。
+                    两者互不串用，所以 DeepSeek 模型不用手填网址也能连。
+                  </div>
                     <label style="grid-column:1/-1"><span>API key</span>
                       <input v-model="p.keyInput" type="password" placeholder="sk-...（留空 = 不修改已有 key）" /></label>
                   </div>
-                  <div class="dim" style="font-size:10.5px;margin-top:4px">
+                  <div class="dim" style="font-size:10.5px;margin-top:4px;line-height:1.6">
                     已保存的 key：
-                    <span class="mono">{{ p.key_masked || (p.key_configured ? '已配置' : '未设置（将用全局 key）') }}</span>
+                    <span class="mono">{{ p.key_masked || (p.key_configured ? '已配置' : '未设置') }}</span>
+                    <template v-if="!p.key_configured">
+                      · {{ isOpenAI(p) ? 'OpenAI 兼容模型会继承全局 key' : 'DeepSeek 不会继承别家的全局 key，请在这里填一把' }}
+                    </template>
+                    <br />网址 / 协议 / key 必须属于同一家，否则会报 401。
                   </div>
                 </div>
 
@@ -2304,7 +2307,11 @@ onUnmounted(() => {
               <button class="ghost tiny" @click="revealRemoteKey()">{{ remoteForm.api_key ? '隐藏' : '显示' }}</button>
             <button class="ghost tiny" @click="clearRemoteKey()">清除</button>
             </div>
-            <div class="panel-title" style="margin-top:12px">连接参数</div>
+            <div class="panel-title" style="margin-top:12px">全局连接参数（兜底 / 兼容旧配置）</div>
+            <div class="dim" style="font-size:11px;margin-bottom:6px;line-height:1.6">
+              这里是<b>全局</b>配置，只作为档案没填时的兜底。DeepSeek 档案永远走官方地址、不继承这里；
+              OpenAI 兼容档案才继承。要给某个模型单独配网址 / key，请到顶栏「远端模型」里点开它。
+            </div>
             <div class="row" style="gap:8px;align-items:center">
               <input v-model="remoteForm.model" placeholder="deepseek-flash" style="width:180px" />
               <input v-model="remoteForm.base_url" placeholder="https://api.deepseek.com" style="flex:1" />

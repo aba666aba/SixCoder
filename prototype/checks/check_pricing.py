@@ -26,6 +26,9 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 def main() -> int:
     print("模型档案与价目自检")
     backup = settings_store.models()
+    # 只备份档案表不够：下面会拿 active_model 做各种切换实验，
+    # 结尾硬写 "" 会把用户 pin 的"当前模型"清掉（实测 2026-11-07 把 flash 弄丢）。
+    backup_active = str(settings_store.get_remote().get("active_model") or "")
     try:
         # 1) 默认阶梯：flash 四档（甲方模式代码只由远端写，本地档默认关）
         steps = settings_store.ladder()
@@ -95,10 +98,12 @@ def main() -> int:
         check("切成 flash2 后阶梯就是它的单档 low",
               [(s["profile_id"], s["effort"]) for s in settings_store.ladder()] == [("flash2", "low")],
               str([(s["profile_id"], s["effort"]) for s in settings_store.ladder()]))
-        settings_store.update_remote({"active_model": ""})
         settings_store.save_models([p for p in settings_store.models() if p["id"] != "flash2"])
 
         # 6) 换模型 = 换 active_model（不再是"多模型并排成阶梯"）
+        # 显式 pin 到 flash：不能依赖"清空 pin 后的自动解析"——那会被顶层
+        # remote.model 牵着走（用户配了 glm 时就解析到 glm，实测这条曾误报）。
+        settings_store.update_remote({"active_model": "flash"})
         profs = settings_store.models()
         for p in profs:
             if p["id"] == "pro":
@@ -121,7 +126,11 @@ def main() -> int:
         db.execute("DELETE FROM remote_usage WHERE task_id=?", (tag,))
     finally:
         settings_store.save_models(backup)
+        settings_store.update_remote({"active_model": backup_active})
 
+    check("收尾：用户原本的当前模型 pin 未被清掉",
+          str(settings_store.get_remote().get("active_model") or "") == backup_active,
+          f"{settings_store.get_remote().get('active_model')!r} vs {backup_active!r}")
     check("收尾：档案表被还原", len(settings_store.ladder()) == 4,
           str([(s["profile_id"], s["effort"]) for s in settings_store.ladder()]))
     print()
