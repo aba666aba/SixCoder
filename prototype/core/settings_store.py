@@ -311,7 +311,7 @@ def ladder() -> list[dict]:
     r = get_remote()
     default_compat = str(r.get("compat") or r.get("provider") or "deepseek").strip().lower()
     if r.get("local_first", True):
-        # 第 0 档 = 本地模型（0 token）。本地连续失败到阈值才上远端。
+        # 第 0 档 = 本地模型（0 token 的手脚档，省 token）。本地连续失败到阈值才升到远端主力。
         steps.append({"profile_id": "local", "label": "本地模型", "model": "",
                       "effort": "-", "max_output_tokens": 0, "temperature": 0.2,
                       "compat": "deepseek", "base_url": "", "api_key": "", "pricing": None})

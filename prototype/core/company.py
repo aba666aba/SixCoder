@@ -123,7 +123,7 @@ def _stronger_alternative(current: str) -> str:
     """找一个"参数更大或同为 7B 级、且更会写代码"的已安装模型；明显更弱的一律不换。
 
     依据（实测）：3B 在同一个夜班任务上是 2/8 机械验收、2/16 独立验收，且大多数失败是
-    "生成代码无法解析"。把工人从 7B 换成 3B 只能浪费一轮预算。
+    "生成代码无法解析"。把本地模型从 7B 换成 3B 只能浪费一轮预算。
     同等参数量时**代码专精模型优先**（coder 更听指令、更少废话）。
     """
     try:
@@ -277,7 +277,7 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
                        "gates_run": _scale.gate_plan(scope["level"])["run"],
                        "gates_skipped": [n for n, _ in _scale.gate_plan(scope["level"])["skip"]],
                        "warning": scope.get("warning", "")})
-    # 门槛：本地工人必须 ≥7B（实测 3B 机械验收 2/8、独立验收 2/16，不能当工人）
+    # 门槛：本地模型必须 ≥7B（实测 3B 机械验收 2/8、独立验收 2/16，太小不能用）
     from . import model_policy
     model, model_warn = model_policy.enforce(model)
     if model_warn and emit:
@@ -935,8 +935,8 @@ def _night_inner(repo: Path, requirement: str, model: str, hours: float = 6.0,
                         r = iterate.add_engine_tests(ws, contracts, o.get("target") or "")
                     elif use_remote and _remote_available() and \
                             min(tier_of.get(okey(o), 0), max(0, len(steps) - 1)) > 0:
-                        # 阶梯第 0 档是**本地模型**（0 token，省钱的默认）。
-                        # 只有本地连续失败到阈值，才升到远端：flash:none → … → pro:max。
+                        # 阶梯第 0 档是**本地模型**（0 token 的手脚档，省 token）。
+                        # 只有本地连续失败到阈值，才升到远端主力：flash:none → … → pro:max。
                         lvl = min(tier_of.get(okey(o), 0), max(0, len(steps) - 1))
                         step = steps[lvl]
                         r = iterate.execute_order_remote(

@@ -1,4 +1,4 @@
-"""模型门槛：本地工人模型建议 **> 4B**，但**从不拒绝用户的选择**。
+"""模型门槛：本地模型建议 **> 4B**，但**从不拒绝用户的选择**。
 
 门槛来自用户口径（"超过 4b 就能用"），并保留了原来的实测依据作为**下限说明**：
 3B 在同一个夜班任务上机械验收 2/8、独立验收 2/16，绝大多数失败是
@@ -36,7 +36,7 @@ def is_remote(model: str) -> bool:
 
 
 def verdict(model: str) -> dict:
-    """判定一个模型当工人的**建议**。返回 {ok, advisory, model, params_b, min_params_b, message}。
+    """判定一个模型当本地模型的**建议**。返回 {ok, advisory, model, params_b, min_params_b, message}。
 
     ok 恒为 True（不拒绝）；advisory=True 表示"低于建议门槛，质量可能明显下降"。
     """
@@ -60,7 +60,7 @@ def verdict(model: str) -> dict:
 def is_coder(model: str) -> bool:
     """是不是代码专精模型（qwen2.5-coder / deepseek-coder / codegemma …）。
 
-    为什么要区分：这套系统让工人干的是"按契约写一个函数、只输出 JSON 符号编辑"，
+    为什么要区分：这套系统让本地模型干的是"按契约写一个函数、只输出 JSON 符号编辑"，
     **代码专精模型比通用模型更听指令、更少废话**。实测同尺寸下通用 7B 经常
    在 JSON 前后加解释，代码专精的几乎不加。
     """
@@ -70,7 +70,7 @@ def is_coder(model: str) -> bool:
 
 
 def best_available(current: str = "") -> str:
-    """已安装模型里最合适当工人的那个（只在"用户没指定"或"建议换一个"时使用）。
+    """已安装模型里最合适当本地模型的那个（只在"用户没指定"或"建议换一个"时使用）。
 
     排序规则（按这套系统的实际需要，不是按参数大小拍脑袋）：
       1) 必须 >4B（建议门槛）；
@@ -94,7 +94,7 @@ def candidates() -> list[dict]:
     """给界面/CLI 用：列出已安装模型的判定结果 + 是否代码专精 + 推荐用途。
 
     "低于建议门槛"不等于"该删"：小模型（1.5B/3B）写小嵌入式 AI 完全够用，
-    只是**当这套系统的工人时质量会明显下降**。所以把两件事分开说。
+    只是**当这套系统的本地模型时质量会明显下降**。所以把两件事分开说。
     """
     try:
         from . import ollama
@@ -106,9 +106,9 @@ def candidates() -> list[dict]:
         v = verdict(m)
         size = params_b(m)
         if not v["advisory"]:
-            use = "适合当工人" + ("（代码专精，推荐）" if is_coder(m) else "（通用）")
+            use = "适合当本地模型" + ("（代码专精，推荐）" if is_coder(m) else "（通用）")
         elif size and size <= MIN_PARAMS_B:
-            use = (f"低于建议门槛（{size:g}B ≤ {MIN_PARAMS_B:g}B），当工人质量会明显下降；"
+            use = (f"低于建议门槛（{size:g}B ≤ {MIN_PARAMS_B:g}B），当本地模型质量会明显下降；"
                    f"写小体量/嵌入式代码仍可用（仍按你的选择使用）")
         else:
             use = "未标注参数量，请自行确认"

@@ -148,7 +148,7 @@ def should_escalate(pol: Policy, n_fail: int, hard_evidence: bool, used: int) ->
         if hard_evidence:
             return True, "本地被硬判据判红 → 远端接管（甲方模式）"
         if n_fail >= 2:
-            return True, "连续失败 2 次 → 远端接管（甲方模式兜底）"
+            return True, "连续失败 2 次 → 远端接管（甲方模式主力接手）"
         return False, "本地还有重试余地"
     # ON_APPROVAL：只在连续失败后提请远端（是否会真的执行由审批门决定）
     if n_fail >= 2:

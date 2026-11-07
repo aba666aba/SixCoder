@@ -257,10 +257,10 @@ def _model_policy_view(models: list[str]) -> dict:
     return {"min_params_b": model_policy.MIN_PARAMS_B,
             "blocked": blocked,
             "suggest": model_policy.best_available(),
-            "message": (f"本地工人模型必须 ≥{model_policy.MIN_PARAMS_B:g}B；"
+            "message": (f"本地模型必须 ≥{model_policy.MIN_PARAMS_B:g}B；"
                         f"低于门槛的（{', '.join(blocked)}）不能选用——实测它们连结构化输出都不稳。"
                         if blocked else
-                        f"本地工人模型门槛 ≥{model_policy.MIN_PARAMS_B:g}B，当前模型均达标")}
+                        f"本地模型门槛 ≥{model_policy.MIN_PARAMS_B:g}B，当前模型均达标")}
 
 
 @app.get("/v1/models")
@@ -556,7 +556,7 @@ def create_task(req: TaskReq):
     if not repo.exists():
         raise HTTPException(400, f"仓库不存在：{req.repo}")
     model = req.model or ollama.pick_default()
-    # 门槛：本地工人必须 ≥7B。用户手选的小模型直接拒掉（而不是跑一夜产出垃圾）。
+    # 门槛：本地模型必须 ≥7B。用户手选的小模型直接拒掉（而不是跑一夜产出垃圾）。
     v = model_policy.verdict(model)
     if not v["ok"]:
         raise HTTPException(400, v["message"])

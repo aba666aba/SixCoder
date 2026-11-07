@@ -37,7 +37,7 @@ SixCoder/
 | 模块 | 职责 |
 |---|---|
 | `contract.py` | **结构化契约**（函数/参数/类型/返回/异常/示例/键），所有闸门与生成器读它 |
-| `model_policy.py` | **模型门槛（硬）**：本地工人必须 ≥7B；`verdict/require/enforce` 是唯一判定点，后端/CLI/夜班/界面都读它 |
+| `model_policy.py` | **模型门槛（硬）**：本地模型必须 ≥7B；`verdict/require/enforce` 是唯一判定点，后端/CLI/夜班/界面都读它 |
 | `permissions.py` | **三种模式（甲方/开发者/只读）**：能力矩阵、auto_approve、关键节点 |
 | `approval.py` | 人工审核门（needhuman）：单据落盘 `_logs/approvals/`，跨进程 HTTP 审批，超时按拒绝 |
 | `guards.py` | 五个关键节点守卫：写文件 / 提交 / 推送 / 上报远端 / 收尾交付 |
