@@ -33,7 +33,7 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-from core import agent, db, gitops, ollama, permissions, probe, review as review_mod, tools  # noqa: E402
+from core import agent, db, gitops, ollama, permissions, probe, recon, review as review_mod, tools  # noqa: E402
 
 
 def out(data, as_json: bool = False) -> None:
@@ -75,7 +75,7 @@ def _slim(payload: dict) -> str:
 
 def cmd_doctor(args) -> None:
     db.init()
-    items = probe.toolchains()
+    items = recon.toolchains()
     data = {
         "ollama": ollama.alive(),
         "models": ollama.models(),
@@ -117,7 +117,7 @@ def cmd_inspect_docs(args) -> None:
 
 
 def cmd_probe(args) -> None:
-    info = probe.classify(Path(args.repo))
+    info = recon.classify(Path(args.repo))
     if args.json:
         out(info, True)
         return

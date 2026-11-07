@@ -17,7 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import apikb, budget, context, db, docs as docsgen, gates, llm_cache, ollama, oracle, planner, probe, skeleton, style, symedit, tools
+from . import apikb, budget, context, db, docs as docsgen, gates, llm_cache, ollama, oracle, planner, probe, recon, skeleton, style, symedit, tools
 from . import props   # 判据（also used to re-render a broken test file）
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1965,10 +1965,10 @@ def _run_task(task_id: str, repo: Path, requirement: str, target: str,
               model: str, emit: Emitter) -> None:
     t0 = time.time()
     # 1. 探测
-    info = probe.classify(repo)
+    info = recon.classify(repo)
     emit("probe", {"state": info["state"], "note": info["note"],
                    "policy": info["policy"], "signals": info["signals"]})
-    tcs = probe.toolchains()
+    tcs = recon.toolchains()
     emit("toolchains", {"items": tcs})
 
     # 2. 工作区（隔离副本，用户仓库零风险）。同一个对话续跑时保留已有工作区，
