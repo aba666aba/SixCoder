@@ -132,3 +132,7 @@ projects/*
 # 需要 D7 的 a11y 检查时自行下载放到 prototype/data/axe.min.js。
 # 另外它内部大量 18 位数字串会被隐私扫描误判成身份证号，入库只会制造噪声。
 /prototype/data/axe.min.js
+
+# 本地阶段性备份（.bak-时间戳）一律不入库
+/prototype/checks/*.bak-*
+/*.bak-*
