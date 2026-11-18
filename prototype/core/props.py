@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import itertools
 import json
+import keyword
 import os
 import random
 import re
@@ -34,7 +35,7 @@ RANGE = re.compile(r"(\d+)\s*\.\.\s*(\d+)")
 INVERSE = ("互为逆运算", "互逆", "互为逆", "inverse")
 
 RUNNER = r'''
-import importlib, json, os, sys
+import importlib, json, os, sys, shutil, subprocess
 # 探针脚本放在 .sixcoder/tmp/ 下、在**独立空目录**里运行（不再污染客户仓库），
 # 所以把被测仓库根从参数传进来加回 sys.path。
 sys.path.insert(0, sys.argv[3] if len(sys.argv) > 3 else os.getcwd())
@@ -42,6 +43,36 @@ mod_name, checks = sys.argv[1], json.loads(sys.argv[2])
 rel_path = sys.argv[4] if len(sys.argv) > 4 else ""
 ws_root = sys.argv[3] if len(sys.argv) > 3 else os.getcwd()
 results = []
+def _cmp(got, want, desc):
+    """Response（FastAPI 的 JSONResponse 等）先拆成它承载的 JSON 再比。
+
+    为什么（2026-11-10 23:00 实测）：`app/api/*.py` 端点返回 `JSONResponse(...)` 是
+    FastAPI 的**合法写法**（引擎自己渲染的 api 层也这么写），但契约样例是
+    `get_student_me('Bearer stu1') == {...}`，旧判据把 JSONResponse 判成"应为 dict"
+    → **怎么改都过不了**；api 层 6 个函数吃掉 94 次远端调用后 heal_stop，
+    还被记成"模型写不出"。这里只做**等价写法归一**，不放松任何标准：
+    body 不是合法 JSON 就原样返回，该红还是红。
+    """
+    _b = getattr(got, "body", None)
+    if _b is not None:
+        try:
+            got = json.loads(_b.decode("utf-8", "replace")
+                             if isinstance(_b, (bytes, bytearray)) else _b)
+        except Exception:
+            pass
+    _ok = got == want
+    _d = f"{desc}: 得到 {got!r}，应为 {want!r}"
+    if not _ok and isinstance(got, dict) and isinstance(want, dict):
+        _ex = [k for k in got if k not in want]
+        _mi = [k for k in want if k not in got]
+        if _ex:
+            _d += ("（多出键 " + "、".join(map(str, _ex))
+                   + "：字典必须逐键相等，多余的键要删掉）")
+        if _mi:
+            _d += "（缺少键 " + "、".join(map(str, _mi)) + "）"
+    return _ok, _d, got
+
+
 def _load():
     """先按模块名 import；失败再**按文件路径**加载。
 
@@ -67,7 +98,15 @@ def _load():
         spec.loader.exec_module(m)
         return m
 try:
-    m = _load()
+    # 产物文件判据（contract.artifact_exists）不依赖被测模块 —— 全部检查都是它时
+    # **不 import 模块**（模板文件存在与否，跟 app 包能不能导入无关）。
+    # §20.6 C 档：语言级测试/类型检查是**全仓命令**，同样不 import 被测模块
+    # （Go/Java 项目根本没有可 import 的 Python 模块，误 import 会整片判红）。
+    _NO_MODULE_KINDS = ("artifact_exists", "lang_test", "lang_typecheck")
+    _need_m = any(c.get("kind") not in _NO_MODULE_KINDS for c in checks)
+    m = None
+    if _need_m:
+        m = _load()
 except Exception as exc:
     msg = f"{type(exc).__name__}: {exc}"
     print(json.dumps({"ok": False,
@@ -94,6 +133,76 @@ for c in checks:
                 if bad and not c.get("hard"):
                     advisories.append({"kind": kind, "detail": detail})
                     ok, detail = True, ""
+        elif kind == "artifact_exists":
+            # §20.4 A 档落点 2：契约声明的"必须产出的文件"。
+            # 文件不存在 = 硬失败（不是提示）—— 这一条是本机制的核心价值：
+            # 探针只测行为不测"需求点名的产物是否真的产出"，cap.page.home 就曾
+            # 带着不存在的 app/templates/index.html 标成 done（done 骗人）。
+            # 注意：这里在**字符串模板**里，不能调用 props.py 的模块级函数
+            # （实测 2026-11-10：调了模块级的 _compare → NameError，全仓判据变红）。
+            _fp = os.path.join(ws_root, str(c.get("path") or "").replace("/", os.sep))
+            if not str(c.get("path") or "").strip():
+                ok, detail = False, f"{c['desc']}: 产物文件路径为空（判据本身写坏了）"
+            elif not os.path.isfile(_fp):
+                ok = False
+                detail = (f"{c['desc']}: 文件不存在：{c.get('path')}"
+                          f"（契约要求必须产出这个文件，用 ```file:{c.get('path')} 围栏交内容）")
+            else:
+                try:
+                    with open(_fp, "r", encoding="utf-8", errors="replace") as _fh:
+                        _txt = _fh.read()
+                except Exception as _e2:
+                    ok, detail = False, f"{c['desc']}: 文件读不了（{_e2}）"
+                else:
+                    _miss = [k for k in (c.get("contains") or []) if str(k) not in _txt]
+                    if _miss:
+                        ok = False
+                        detail = (f"{c['desc']}: 文件在，但缺要点 "
+                                  + "、".join(f"「{k}」" for k in _miss)
+                                  + "（页面上必须能找到这些内容）")
+                    else:
+                        ok, detail = True, ""
+        elif kind in ("lang_test", "lang_typecheck"):
+            # §20.6 C 档落点 1：真跑该语言的测试套件 / 类型检查。
+            # **模板内必须自包含**（不能调 core/lang.py 的模块级函数，实测会 NameError），
+            # 所以命令由判据 dict 的 cmd 字段带全。
+            # 为什么 stdout 写文件而不是 capture_output：core/probe.py:945 踩过 ——
+            # 命令再起孙进程（npm → node → worker）会继承管道，
+            # communicate() 永不返回；写文件 + timeout 才不会把判据挂死。
+            _cmd = [str(x) for x in (c.get("cmd") or [])]
+            if not _cmd:
+                ok, detail = False, f"{c['desc']}: 判据没带命令"
+            else:
+                _exe = sys.executable if _cmd[0] in ("python", "python3") \
+                    else shutil.which(_cmd[0])
+                if not _exe:
+                    ok, detail = False, (f"{c['desc']}: 工具链 {_cmd[0]} 不在 PATH"
+                                         "（引擎不猜，如实判红）")
+                else:
+                    _log = os.path.join(ws_root, ".sixcoder", "tmp",
+                                        f"_lang_{os.getpid()}_{c.get('lang') or 'x'}.log")
+                    try:
+                        os.makedirs(os.path.dirname(_log), exist_ok=True)
+                    except Exception:                    # noqa: BLE001
+                        _log = os.path.join(os.getcwd(), "_lang_check.log")
+                    try:
+                        with open(_log, "w", encoding="utf-8", errors="replace") as _fh:
+                            _r = subprocess.run([_exe] + _cmd[1:], cwd=ws_root,
+                                                stdout=_fh, stderr=subprocess.STDOUT,
+                                                timeout=240)
+                        try:
+                            with open(_log, "r", encoding="utf-8", errors="replace") as _fh:
+                                _out = _fh.read()[-600:]
+                        except Exception:                # noqa: BLE001
+                            _out = ""
+                        ok = _r.returncode == 0
+                        detail = "" if ok else (f"{c['desc']}: {_cmd[0]} 退出码 "
+                                                f"{_r.returncode}：{_out}")
+                    except subprocess.TimeoutExpired:
+                        ok, detail = False, f"{c['desc']}: 命令超时（240s）"
+                    except Exception as _le:              # noqa: BLE001
+                        ok, detail = False, (f"{c['desc']}: 命令跑不起来 "
+                                             f"{type(_le).__name__}: {_le}")
         elif kind == "call_eq":
             # 实现抛异常 = 实现错，必须报成"调用抛了 X"，不能报成"检查本身出错"。
             # 实测（bench r2）：parse_date 误用 datetime.date → TypeError，
@@ -116,18 +225,7 @@ for c in checks:
                     want = _ast.literal_eval(c["expect"])
                 except Exception:
                     want = c["expect"]
-                ok = got == want
-                detail = f"{c['desc']}: 得到 {got!r}，应为 {want!r}"
-                if not ok and isinstance(got, dict) and isinstance(want, dict):
-                    # 字典要**逐键相等**：模型常"多返回一个 message 字段"，
-                    # 只说"得到 X 应为 Y"它会以为差不多、下一轮照样多给（实测连撞 6 轮）。
-                    extra = [k for k in got if k not in want]
-                    miss = [k for k in want if k not in got]
-                    if extra:
-                        detail += ("（多出键 " + "、".join(map(str, extra))
-                                   + "：字典必须逐键相等，多余的键要删掉）")
-                    if miss:
-                        detail += "（缺少键 " + "、".join(map(str, miss)) + "）"
+                ok, detail, got = _cmp(got, want, c["desc"])
                 if not ok and not c.get("hard", True):
                     advisories.append({"kind": kind, "detail": detail})
                     ok, detail = True, ""
@@ -136,7 +234,12 @@ for c in checks:
                 eval(c["expr"], {"m": m})
                 ok, detail = False, f"{c['desc']}: 应当抛 {c['exc']} 但没有抛"
             except Exception as exc:
-                ok = type(exc).__name__ == c["exc"]
+                # FastAPI api 层把业务异常统一包成 HTTPException —— 同一语义，
+                # 不是实现错误（实测 2026-11-08：auth_me("!!!") 抛 HTTPException
+                # 被判"应为 ValueError"，怎么改都过不了）。崩溃型不算数。
+                ok = (type(exc).__name__ == c["exc"]
+                      or (type(exc).__name__ == "HTTPException"
+                          and c["exc"] not in ("TypeError", "AttributeError")))
                 detail = f"{c['desc']}: 抛了 {type(exc).__name__}，应为 {c['exc']}"
         elif kind == "keys":
             # 键形状判据是**软**的（示例才是硬的）：它靠参数类型猜一个调用，猜得对不对
@@ -159,6 +262,25 @@ for c in checks:
                 else:
                     ok = not missing
                     detail = "%s: 缺少键 %s" % (c["desc"], "/".join(missing)) if missing else ""
+        elif kind == "thread_ok":
+            # 子线程求值：抓"单线程单测全过、多线程才炸"的类（SQLite 跨线程，
+            # 实测 2026-11-08 11:10：insert_college 判据 10/10，探针 ProgrammingError）。
+            import threading as _th
+            _box: dict = {}
+
+            def _trun():
+                try:
+                    eval(c["expr"], {"m": m})
+                    _box["ok"] = True
+                except Exception as _e:              # noqa: BLE001
+                    _box["err"] = _e
+            _t = _th.Thread(target=_trun, daemon=True)
+            _t.start()
+            _t.join()
+            ok = bool(_box.get("ok"))
+            detail = ("" if ok else
+                      f"{c['desc']}: 子线程抛 {type(_box.get('err')).__name__}: "
+                      f"{_box.get('err')}")
         elif kind == "call_ok":
             # "按注解类型能调用"只问**类型接线**对不对，不问业务校验：
             # 传 {} 给 clean_row(row: dict) 时它抛 ValueError 是设计选择（拒绝空行），
@@ -338,6 +460,12 @@ def _probe_literal(num: str, ptype: str) -> str:
     一个本来正确的函数。判据的类型错比漏报更贵：它会烧掉整轮预算。
     """
     t = (ptype or "").replace(" ", "").lower()
+    # 已经是字符串字面量就不要**再套一层引号**：旧实现把 `"!!!"` 变成 `""!"""`，
+    # 生成 `m.f(""!"""")` 这种非法表达式 → 求值抛 SyntaxError → 判据说"没抛
+    # ValueError"（实测 2026-11-07：app/api/batches.py::run_batch_endpoint 因此
+    # 永远过不了，8/9 也算失败，整片白跑 ¥0.57）。
+    if len(num) >= 2 and num[0] in ("'", '"') and num[-1] == num[0]:
+        return num
     if t.startswith("str"):
         return '"%s"' % num
     if t.startswith(("int", "float", "bool")) or t in ("", "object", "any", "number"):
@@ -743,6 +871,25 @@ def expr_checks(c) -> list[dict]:
                     "desc": f"{left} == {lit}"})
     for ch in out:
         ch["expr"] = ch["expr"].replace("m.", "")   # 表达式里不许带 m.
+    return out
+
+
+def artifact_checks(arts) -> list[dict]:
+    """§20.4 落点 2：把契约的产物文件声明变成 `artifact_exists` 判据。
+
+    语义（与 §20.4.2 定稿一致）：文件不存在 = **硬失败**；存在但缺要点 = 硬失败
+    并点名缺哪个字。要点匹配用子串（与 body_has 同一口径，不引新机制）。
+    """
+    out: list[dict] = []
+    for a in (arts or []):
+        path = str(getattr(a, "path", "") or "").strip()
+        if not path:
+            continue
+        out.append({"kind": "artifact_exists",
+                    "path": path,
+                    "contains": [str(k) for k in (getattr(a, "contains", None) or [])],
+                    "desc": f"产物文件 {path}",
+                    "hard": True})
     return out
 
 
@@ -1208,6 +1355,30 @@ def from_requirement(requirement: str, available: set[str]) -> list[dict]:
             continue
         checks.append({"kind": "raises", "expr": f"m.{name}({args})", "exc": exc,
                        "desc": f"{name}({args}) 应当抛 {exc}"})
+    # 修复契约的"导入期兼容"判据：`f() 无参调用必须成功` → call_ok。
+    # 为什么要能从文本生成（实测 2026-11-08 run15）：工作区被"函数签名与调用点不匹配"
+    # 毒化时，函数级判据全绿（它们带参调用）、verified 状态齐全 → 体检派不出单 →
+    # 修复片空转。一条必然失败的 call_ok 才能让体检重新派单。
+    for m in re.finditer(r"([A-Za-z_]\w{2,})\(\)[^。\n]{0,20}?(?:必须|应|要)[^。\n]{0,14}?(?:成功|不许崩|不抛|不报错)",
+                         text):
+        name = m.group(1)
+        if strict and name not in available:
+            continue
+        checks.append({"kind": "call_ok", "expr": f"m.{name}()",
+                       "exc_ok": sorted(CRASH_EXC),
+                       "desc": f"{name}() 无参调用必须成功（导入期兼容）"})
+    # 跨线程安全判据：`子线程调用 f(args) 必须成功` → thread_ok。
+    # 单线程单测抓不住"连接在主线程建、请求线程用"这类缺陷（SQLite 跨线程实测）。
+    for m in re.finditer(r"子线程调用\s*([A-Za-z_]\w{2,})\(([^)\n]*)\)\s*[^。\n]{0,10}?(?:必须|应|要)[^。\n]{0,10}?(?:成功|不许崩|不抛)",
+                         text):
+        name, raw_args = m.group(1), m.group(2).strip()
+        if strict and name not in available:
+            continue
+        args = _literal_args(name, raw_args)
+        if raw_args and not args:
+            continue
+        checks.append({"kind": "thread_ok", "expr": f"m.{name}({args})",
+                       "desc": f"子线程调用 {name}({args}) 必须成功（跨线程安全）"})
     # round-trip：需求点名"互为逆运算"时，把前两个出现的函数当作一对
     if any(k in text for k in INVERSE):
         names = [n for n in re.findall(r"def\s+([A-Za-z_]\w{2,})", text)] or \
@@ -1404,16 +1575,40 @@ def example_script(text: str, allowed: set[str] | None = None,
     return steps
 
 
-def render_pytest(module: str, checks: list[dict]) -> str:
-    """把引擎判据渲染成 pytest 文件（确定性模板，模型不参与写断言）。"""
+def render_pytest(module: str, checks: list[dict], *, target_rel: str = "") -> str:
+    """把引擎判据渲染成 pytest 文件（确定性模板，模型不参与写断言）。
+
+    target_rel：被测产物相对仓库根的路径。带子目录时（如 app/services/audit.py），
+    测试文件写在仓库根，`from audit import ...` 会 ModuleNotFoundError —— 实测
+    2026-11-07 夜班：多模块 Django 项目的引擎测试 100% 失败、测试文件被删、
+    能力验收拿不到证据。改为按绝对路径加载目标模块（不需要包结构、也不与
+    同名模块串味）；根目录模块保持原来的 import 写法，行为不变。
+    """
     names = sorted({m.group(1) for c in checks
                     for m in [re.search(r"m\.([A-Za-z_]\w{2,})\s*\(", c.get("expr")
                                         or c.get("forward") or "")] if m}
                    | {c[k] for c in checks if c.get("kind") == "db_end2end"
                       for k in ("create", "writer", "reader") if c.get(k)})
     # 只保留"像被测符号"的名字：测试函数名（test_*）绝不能出现在 import 里
-    names = [n for n in names if not n.startswith("test_") and not n.startswith("_")]
-    head = ["import pytest", f"from {module} import {', '.join(names) or '*'}", ""]
+    names = [n for n in names if not n.startswith("test_") and not n.startswith("_")
+             and not keyword.iskeyword(n)]
+    rel = str(target_rel or "").replace("\\", "/")
+    parts = [p for p in Path(rel).parts if p not in (".", "")][:-1] if rel else []
+    if parts and ".." not in parts:
+        bind = ("\n".join(f"{n} = getattr(m, {n!r})" for n in names)
+                if names else
+                "globals().update({k: v for k, v in vars(m).items() if not k.startswith('_')})")
+        head = ["import pytest",
+                "import importlib.util as _ilu",
+                "from pathlib import Path as _Path",
+                f"_spec = _ilu.spec_from_file_location({module!r} + '__engine_target',",
+                f"    str(_Path(__file__).resolve().parent / {rel!r}))",
+                "m = _ilu.module_from_spec(_spec)",
+                "_spec.loader.exec_module(m)",
+                bind,
+                ""]
+    else:
+        head = ["import pytest", f"from {module} import {', '.join(names) or '*'}", ""]
     body: list[str] = []
     for i, c in enumerate(checks):
         kind = c["kind"]
@@ -1448,6 +1643,25 @@ def render_pytest(module: str, checks: list[dict]) -> str:
                         f"    \"\"\"引擎判据：{_safe_doc(c['desc'])}\"\"\"\n"
                         f"    with pytest.raises({c['exc']}):\n"
                         f"        {expr}\n")
+        elif kind == "thread_ok":
+            # 子线程求值：抓"单线程单测全过、多线程才炸"的类（SQLite 跨线程，
+            # 实测 2026-11-08 11:10：insert_college 判据 10/10，探针 ProgrammingError）。
+            import threading as _th
+            _box: dict = {}
+
+            def _trun():
+                try:
+                    eval(c["expr"], {"m": m})
+                    _box["ok"] = True
+                except Exception as _e:              # noqa: BLE001
+                    _box["err"] = _e
+            _t = _th.Thread(target=_trun, daemon=True)
+            _t.start()
+            _t.join()
+            ok = bool(_box.get("ok"))
+            detail = ("" if ok else
+                      f"{c['desc']}: 子线程抛 {type(_box.get('err')).__name__}: "
+                      f"{_box.get('err')}")
         elif kind == "call_ok":
             expr = c["expr"].replace("m.", "")
             body.append(f"def test_engine_{i}_call_ok():\n"

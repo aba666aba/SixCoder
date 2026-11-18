@@ -319,3 +319,167 @@ button.danger:hover { filter: brightness(1.12); }
 .mp-price-t { font-size: 10.5px; margin: 6px 0 4px; }
 .mp-effort { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text); }
 button.ghost.sel { border-color: var(--accent); color: var(--accent); }
+
+/* ---------------------------------------------------------------- 厂商（一等公民）
+   2026-11-09 用户口径：点开「远端」→ 一个下拉 + 三个长方矩形；
+   矩形中间是大字厂商名，右侧偏右是「正在使用」的三选一；点矩形弹出该厂商的配置窗。 */
+
+.pv-picker {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px; flex-wrap: wrap;
+}
+.pv-select {
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 8px; font-size: 12px; min-width: 170px;
+}
+.pv-cards { display: flex; flex-direction: column; gap: 8px; }
+
+/* 长方矩形：横向一行，左中右三块 —— 厂商名在中间，单选在右侧偏右 */
+.pv-card {
+  position: relative;
+  display: flex; align-items: center; gap: 14px;
+  min-height: 74px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: var(--bg-2, rgba(255,255,255,.02));
+  cursor: pointer; transition: border-color .15s, background .15s;
+}
+.pv-card:hover { border-color: var(--accent); }
+.pv-card.is-focus { border-color: var(--accent); }
+.pv-card.is-current {
+  border-color: var(--accent);
+  background: rgba(79,140,255,.07);
+}
+/* 中间：比较大的厂商名称 */
+.pv-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 21px; font-weight: 650; letter-spacing: .4px;
+  line-height: 1.25; text-align: center;
+}
+.pv-sub { font-size: 10.5px; margin-top: 4px; text-align: center; }
+/* 右侧偏右：三选一「正在使用」 */
+.pv-current {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
+  padding: 5px 9px; border-radius: 20px;
+  border: 1px solid var(--line);
+  font-size: 11px; cursor: pointer; white-space: nowrap;
+}
+.pv-current:hover { border-color: var(--accent); }
+.pv-radio {
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 1.5px solid var(--dim); flex: 0 0 auto;
+}
+.pv-radio.on { border-color: var(--accent); background: var(--accent); }
+.pv-current-text { font-weight: 500; }
+.pv-cfg {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  opacity: 0; transition: opacity .15s;
+}
+.pv-card:hover .pv-cfg, .pv-card.is-focus .pv-cfg { opacity: 1; }
+
+/* 二级弹窗里的模型条目 */
+.pv-model {
+  border: 1px solid var(--line); border-radius: 7px;
+  padding: 8px 10px; margin-bottom: 7px; background: rgba(255,255,255,.015);
+}
+.pv-model label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+/* 远端厂商下拉面板：点顶栏「远端」按钮弹出的浮层（不是模态框） */
+.remote-panel {
+  position: fixed; right: 18px; top: 52px; z-index: 130;
+  width: 460px; max-width: calc(100vw - 36px);
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg, #14161a);
+  box-shadow: 0 12px 34px rgba(0,0,0,.42);
+}
+.remote-panel-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px; flex-wrap: wrap;
+}
+
+/* ---------- 仓库行左侧的三个下拉浮层（文件 / Git 客户端 / 工具链） ---------- */
+/* 与顶栏「远端」浮层同款：绝对定位在左栏仓库面板下方，不占布局高度 */
+.repo-panel { position: relative; }
+.repo-bar {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 7px; flex-wrap: wrap;
+}
+.repo-bar .menu-btn { font-size: 12px; padding: 3px 9px; }
+.repo-bar .menu-btn.active {
+  border-color: var(--accent); color: var(--accent);
+  background: rgba(79,140,255,.10);
+}
+.repo-pop {
+  position: fixed; right: 18px; top: 52px; z-index: 130;
+  width: 520px; max-width: calc(100vw - 36px);
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg, #14161a);
+  box-shadow: 0 12px 34px rgba(0,0,0,.42);
+}
+.repo-pop-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px; flex-wrap: wrap;
+}
+
+.repo-pop-git { max-height: 70vh; overflow: auto; }
+.repo-pop-tc { max-height: 60vh; overflow: auto; }
+.alert-inline {
+  padding: 5px 8px; margin-bottom: 7px; border-radius: 6px;
+  background: rgba(248,81,73,.12); border: 1px solid rgba(248,81,73,.35);
+  color: #ffb4ae; font-size: 10.5px;
+}
+
+/* ---------- VSCode 式文件树 ---------- */
+.tree-root {
+  border: 1px solid var(--line); border-radius: 7px;
+  background: rgba(255,255,255,.015);
+  padding: 4px 2px; max-height: 260px; overflow: auto;
+}
+.tree-node { line-height: 1.5; }
+.tree-row {
+  display: flex; align-items: center; gap: 5px;
+  padding: 1px 6px; border-radius: 4px; cursor: pointer;
+  font-size: 11.5px; white-space: nowrap;
+}
+.tree-row:hover { background: rgba(79,140,255,.13); }
+.tree-row.dir .tree-name { font-weight: 550; }
+.tree-caret { width: 10px; flex: 0 0 auto; color: var(--dim); font-size: 9px; }
+.tree-icon { flex: 0 0 auto; font-size: 11px; }
+.tree-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- VSCode 式侧栏开合 ----------
+   收起后从屏幕边缘滑出一条窄把手条（像 Activity Bar），点它侧栏滑出。 */
+.cols { position: relative; }
+.edge-rail {
+  position: fixed; top: 52px; bottom: 0; z-index: 70;
+  width: 14px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--panel); color: var(--dim);
+  border: 1px solid var(--line); cursor: pointer;
+  font-size: 13px; line-height: 1;
+  opacity: .8; transition: opacity .15s, background .15s;
+  animation: rail-in .16s ease-out;
+}
+.edge-rail:hover { opacity: 1; background: var(--panel2); color: var(--text); }
+.edge-left { left: 0; border-left: none; border-radius: 0 6px 6px 0; }
+.edge-right { right: 0; border-right: none; border-radius: 6px 0 0 6px; }
+@keyframes rail-in {
+  from { transform: translateX(-100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: .8; }
+}
+.edge-right { animation-name: rail-in-right; }
+@keyframes rail-in-right {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: .8; }
+}
+/* 基准位置：动画前后都必须是 translateX(0)，否则整条会停在屏幕外 */
+.edge-rail { transform: translateX(0); }
+.edge-left { transform: translateX(0); }
+.edge-right { transform: translateX(0); }
+/* 顶栏两端的栏开关 */
+.rail-toggle { font-size: 13px; padding: 3px 9px; }
+.topbar > .rail-toggle:first-child { margin-right: 6px; }
+.topbar > .rail-toggle:last-of-type { margin-left: 8px; }
+.rail-toggle.active { border-color: var(--accent); color: var(--accent); }

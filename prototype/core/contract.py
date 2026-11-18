@@ -59,6 +59,7 @@ class FuncSig:
     examples: list[Example] = field(default_factory=list)
     keys: list[str] = field(default_factory=list)
     owner_class: str = ""          # 属于哪个类（类 API 契约）；空 = 普通模块函数
+    route: str = ""                # 这个函数服务哪个端点（§11.4g 契约点名；空 = 不确定）
 
     def arity(self) -> int:
         return len(self.params)
@@ -78,6 +79,9 @@ class Contract:
     raw: str = ""
     full_text: str = ""                                    # 整篇需求原文（类 API 示例在里面）
     aliases: dict[str, str] = field(default_factory=dict)   # 别名 → 规范名（date → birth）
+    # 产物文件（§20.4 A 档落点 1）：本模块声明"必须产出的文件"（模板/静态资源等）。
+    # 空列表 = 没声明 = 完全不影响现有行为（增量字段，不写就不生效）。
+    artifacts: list["ArtifactFile"] = field(default_factory=list)
 
     def by_name(self, name: str) -> FuncSig | None:
         return next((f for f in self.funcs if f.name == name), None)
@@ -91,6 +95,179 @@ class Contract:
     def canonical(self, key: str) -> str:
         """把字段写法归一到规范名（不是别名就原样返回）。"""
         return self.aliases.get(str(key), str(key))
+
+
+# ------------------------------------------------------------------ 产物文件（§20.4 A 档落点 1）
+# 需求里的散文（"前端采用 Django 模板…使用 ECharts"）解析不出可判功能点 →
+# 模板/静态资源永远不会被派单（实测：app/web.py、app/dashboard.py 在 contract.txt 里 0 次出现，
+# 而蓝图里挂着 cap.page.dashboard_chart）。产物文件段把它变成**结构化、可验收**的声明。
+@dataclass
+class ArtifactFile:
+    path: str                                   # 仓库相对路径（app/templates/index.html）
+    contains: list[str] = field(default_factory=list)   # 内容要点（子串匹配，与 body_has 同口径）
+    owner: str = ""                             # 声明它的小节所属模块；空 = 顶层（全局）
+
+
+# 段头：【必须产出的文件】/【产物文件】/【必须产出文件】
+_ART_HEAD = re.compile(r"^[ \t]*【(?:必须产出的文件|产物文件|必须产出文件)】[ \t]*$", re.M)
+# 条目：- app/templates/index.html   要点: 毕业设计选题, 登录
+_ART_LINE = re.compile(
+    r"^[ \t]*[-*][ \t]+`?(?P<path>[\w][\w./\\ -]*?\.[A-Za-z][A-Za-z0-9]{0,5})`?[ \t]*"
+    r"(?:[,，;；]?[ \t]*要点\s*[:：][ \t]*(?P<keys>.+?))?[ \t]*$",
+    re.M)
+
+
+def _parse_art_lines(body: str, owner: str) -> list[ArtifactFile]:
+    out: list[ArtifactFile] = []
+    for m in _ART_LINE.finditer(body or ""):
+        path = m.group("path").replace("\\", "/").strip().strip("`").strip()
+        if not path or ".." in path.split("/"):
+            continue
+        keys = []
+        for k in re.split(r"[,，、;；]", m.group("keys") or ""):
+            k = k.strip().strip("`\"'").strip()
+            if k:
+                keys.append(k)
+        if not any(a.path == path for a in out):
+            out.append(ArtifactFile(path=path, contains=keys, owner=owner))
+    return out
+
+
+def parse_artifacts(text: str) -> list[ArtifactFile]:
+    """从需求/契约全文解析【必须产出的文件】段（所有段合并，按 path 去重）。
+
+    段写在哪一节就归那一节所属的模块（owner）；写在任何模块标题之前的归 owner=""（全局）。
+    """
+    text = text or ""
+    heads = [m for m in _ART_HEAD.finditer(text)]
+    if not heads:
+        return []
+    # 模块标题位置（与 parse_requirement 同一份分块逻辑），用来判段归属
+    sections = _module_sections(text)
+    out: list[ArtifactFile] = []
+    for i, h in enumerate(heads):
+        seg_end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        body = text[h.end():seg_end]
+        # 段体在下一个非空行开始遇到【..】头或模块标题就停（防止吞掉后面的契约正文）
+        stop = None
+        for mm in re.finditer(r"^[ \t]*【(?!必须产出的文件|产物文件|必须产出文件)|^[ \t]*\d+[)）.、][ \t]*[\w./]+\.py", body, re.M):
+            stop = mm.start()
+            break
+        if stop is not None:
+            body = body[:stop]
+        owner = ""
+        for s_pos, s_path in sections:            # sections 按位置升序
+            if s_pos > h.start():
+                break
+            owner = s_path
+        for a in _parse_art_lines(body, owner):
+            if not any(x.path == a.path for x in out):
+                out.append(a)
+    return out
+
+
+def render_artifacts(arts: list[ArtifactFile]) -> str:
+    """渲染回契约语法（给切片简报注入 / 报告展示用）。"""
+    arts = [a for a in (arts or []) if getattr(a, "path", "")]
+    if not arts:
+        return ""
+    lines = ["【必须产出的文件】"]
+    for a in arts:
+        line = f"- {a.path}"
+        if a.contains:
+            line += "   要点: " + ", ".join(a.contains)
+        if getattr(a, "owner", ""):
+            line += f"   （归属：{a.owner}）"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def artifacts_prompt(arts: list[ArtifactFile]) -> str:
+    """给作者的产物文件块：清单 + 输出格式（怎么把文件交回来）。"""
+    arts = [a for a in (arts or []) if getattr(a, "path", "")]
+    if not arts:
+        return ""
+    lines = ["【必须产出的文件（判据会逐字检查：文件必须存在、要点必须能找到）】"]
+    for a in arts:
+        tip = ("；要点（内容里必须出现这些字）："
+               + "、".join(f"「{k}」" for k in a.contains)) if a.contains else ""
+        lines.append(f"- {a.path}{tip}")
+    lines += [
+        "输出格式：每个文件用 `文件路径` 做围栏信息串给出**完整内容**，例如：",
+        "```file:app/templates/index.html",
+        "<!doctype html>…（完整文件内容）…",
+        "```",
+        "引擎会把它们写到对应路径。只写清单里声明的文件；内容必须自包含（HTML 要带完整标签结构）。",
+    ]
+    if any(str(a.path).lower().endswith((".html", ".htm")) for a in arts):
+        lines += [
+            "页面实现口径（§20.4/§20.5 定稿）：FastAPI + Jinja2 模板（模板文件放 app/templates/），"
+            "静态资源放 app/static/（入口已自动挂 /static），图表用 ECharts 的 CDN 引入"
+            "（不引前端工程、不写 app/main.py）；页面路由返回 HTMLResponse/TemplateResponse。",
+        ]
+    return "\n".join(lines)
+
+
+def missing_artifacts(ws, arts: list[ArtifactFile]) -> list[dict]:
+    """逐条核对产物文件：不存在 / 存在但缺要点。返回 [{path, exists, missing}]，空 = 全齐。"""
+    from pathlib import Path as _Path
+    ws = _Path(ws)
+    out: list[dict] = []
+    for a in arts or []:
+        p = ws / str(getattr(a, "path", "") or "")
+        if not getattr(a, "path", ""):
+            continue
+        if not p.is_file():
+            out.append({"path": a.path, "exists": False, "missing": list(a.contains or [])})
+            continue
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:                                # noqa: BLE001
+            txt = ""
+        miss = [k for k in (a.contains or []) if str(k) not in txt]
+        if miss:
+            out.append({"path": a.path, "exists": True, "missing": miss})
+    return out
+
+
+def inject_artifacts(text: str, arts: list[ArtifactFile]) -> str:
+    """把产物文件段**确定性地**插进契约文本里归属模块的小节（幂等）。
+
+    为什么引擎插而不是指望合成契约的模型抄：contractgen 是模型翻译，散文段
+    可能被改写/丢掉；判据又按它验收 → 段丢了 = 永远不验收 = 永远不做（同 §20.1 证据 2）。
+    owner 为空的段插在**最后一个**模块小节里（整合/ui 通常在最后）；已有同 path 段则不重复。
+    """
+    arts = [a for a in (arts or []) if getattr(a, "path", "")]
+    if not arts:
+        return text or ""
+    text = text or ""
+    have = {a.path for a in parse_artifacts(text)}
+    todo = [a for a in arts if a.path not in have]
+    if not todo:
+        return text
+    sections = _module_sections(text)                    # [(pos, path)]
+    by_owner: dict[str, list[ArtifactFile]] = {}
+    for a in todo:
+        by_owner.setdefault(getattr(a, "owner", "") or "", []).append(a)
+    out = text
+    # 从后往前插，位置不失效
+    insertions: list[tuple[int, str]] = []
+    for owner, group in by_owner.items():
+        seg = render_artifacts(group)
+        if owner:
+            # owner 小节的**下一个**模块标题之前 = 本小节末尾；找不到 owner 就插到文末
+            pos = None
+            for i, (s_pos, s_path) in enumerate(sections):
+                if s_path == owner:
+                    pos = sections[i + 1][0] if i + 1 < len(sections) else len(out)
+                    break
+            insertions.append((len(out) if pos is None else pos, seg))
+        else:
+            insertions.append((len(out), seg))
+    for pos, seg in sorted(insertions, key=lambda x: -x[0]):
+        out = out[:pos] + ("\n\n" if pos < len(out) and not out[:pos].endswith("\n") else "\n") \
+            + seg + ("\n" if pos < len(out) and not out[pos:].startswith("\n") else "")
+    return out
 
 
 # 字段别名：`别名：date → birth` / `date 是 birth 的别名` / `alias: date -> birth`
@@ -207,6 +384,14 @@ def parse_body(path: str, body: str) -> Contract:
         if not any(e.args == ex.args and e.expect == ex.expect for e in sig.examples):
             sig.examples.append(ex)
     _rederive_keys(c)
+    # 本模块小节里的产物文件段（直接 parse_body 的调用方也拿到同一种结构）
+    try:
+        _own = parse_artifacts(text)
+        if _own:
+            c.artifacts = [ArtifactFile(path=a.path, contains=a.contains, owner=path)
+                           for a in _own]
+    except Exception:                                    # noqa: BLE001
+        pass
     return c
 
 
@@ -368,11 +553,10 @@ def _scan_expect(text: str, i: int) -> str:
     return text[start:i]
 
 
-def _iter_examples(text: str):
-    """手写扫描器：找出 `name(args) == 字面量` 形式的可判定示例。
+def _iter_examples_pos(text: str):
+    """同 `_iter_examples`，但额外给出每个示例在原文中的**位置**。
 
-    比正则可靠：参数与期望值都按括号配平来读，因此
-    `summarize([{"age": 10}]) == {"count": 1}` 这种嵌套结构能完整取到。
+    位置用来判断"这个示例属于哪个模块小节"（见 `parse_requirement`）。
     """
     i, n = 0, len(text or "")
     while i < n:
@@ -409,7 +593,38 @@ def _iter_examples(text: str):
         expect = _scan_expect(text, k + mm.end())
         i = k + mm.end()
         if expect and name not in SKIP_NAMES:
-            yield name, args_text, expect
+            yield name, args_text, expect, m.start()
+
+
+def _iter_examples(text: str):
+    """手写扫描器：找出 `name(args) == 字面量` 形式的可判定示例。
+
+    比正则可靠：参数与期望值都按括号配平来读，因此
+    `summarize([{"age": 10}]) == {"count": 1}` 这种嵌套结构能完整取到。
+    """
+    for name, args_text, expect, _pos in _iter_examples_pos(text):
+        yield name, args_text, expect
+
+
+def _module_sections(text: str) -> list[tuple[int, str]]:
+    """按出现顺序给出 (位置, 模块路径)：示例用它判断自己属于哪一节。
+
+    实测 2026-11-09 夜班卡死：app/api/topics.py 与 app/services/topics.py
+    都有 create_topic_draft，旧实现按"第一个同名函数"认领示例 →
+    api 拿到两条（一条不含 status/source、一条含）→ 契约自查判
+    "同一组参数两个期望值" → 判定"需要甲方拍板" → **夜班拒绝开跑，0 产出**。
+    """
+    from .planner import is_module_header, HEADER_RE
+    out: list[tuple[int, str]] = []
+    pos = 0
+    for raw in (text or "").splitlines(keepends=True):
+        m = HEADER_RE.match(raw) if is_module_header(raw) else None
+        if m:
+            path = m.group(1).lstrip("./")
+            if path:
+                out.append((pos, path))
+        pos += len(raw)
+    return out
 
 
 def parse_requirement(requirement: str) -> dict[str, Contract]:
@@ -427,20 +642,73 @@ def parse_requirement(requirement: str) -> dict[str, Contract]:
     # 只读模块块会一条都取不到（实测：stateful-class 的 LRU(1).keys() == [] 丢了）。
     for c in out.values():
         c.full_text = text
+    # **端点 → 函数名（契约点名，§11.4g）**：挂到 FuncSig.route 上。
+    # 为什么挂在这里：契约文本里签名行本来就写着"这个函数服务哪个端点"，
+    # 那是**唯一权威**。挂到契约对象上之后，写码（提示里点名）、
+    # 体检（按契约判）、接线（按名接）三处消费**同一份**，不再各猜各的。
+    # 实测不挂的代价：契约点名 `teachers_me`，远端却写成 `teacher_me`
+    # → 点名找不到 → 接线退回字符串猜 → 接到"负载建议"函数上
+    # → 端到端返回错结构 → 覆盖永远不涨。
+    try:
+        from . import routefuncs as _rfm
+        _rfs = _rfm.parse(text)
+    except Exception:                                    # noqa: BLE001
+        _rfs = {}
+    if _rfs:
+        _by_fn: dict[str, str] = {}
+        for _p, _fn in _rfs.items():
+            _by_fn.setdefault(_fn, _p)
+        for _c in out.values():
+            for _f in _c.funcs:
+                if not getattr(_f, "route", "") and _f.name in _by_fn:
+                    try:
+                        _f.route = _by_fn[_f.name]
+                    except Exception:                    # noqa: BLE001
+                        pass
     # 字段别名是**跨模块**的：解析一次，挂到每份契约上（模型与判据都要用同一份）
     aliases = parse_aliases(text)
     for c in out.values():
         if aliases:
             c.aliases = dict(aliases)
-    # 全篇示例归属
-    for name, args_text, expect in _iter_examples(text):
-        owner = next((c for c in out.values() if c.by_name(name)), None)
-        if owner is None:
-            continue
-        sig = owner.by_name(name)
+    # 全篇示例归属：**按示例所在的小节归模块**，不能按函数名乱认领。
+    # 同名函数跨模块时（api 版不含 status/source、services 版含），
+    # 按名字认领会把两节的示例塞进同一个模块 → 契约自查误判"同一组参数两个期望值"
+    # → 夜班拒绝开跑（实测 2026-11-09：0 产出，远端一次都没被调用）。
+    sections = _module_sections(text)
+    for name, args_text, expect, pos in _iter_examples_pos(text):
+        owner = None
+        sig = None
+        for s_pos, s_path in sections:                # sections 按位置升序
+            if s_pos > pos:
+                break
+            c = out.get(s_path)
+            if c is not None and c.by_name(name) is not None:
+                owner = c
+                sig = c.by_name(name)
+        if sig is None:
+            # 小节里没声明这个函数（需求级示例 / 跨模块引用）→ 退回旧口径
+            owner = next((c for c in out.values() if c.by_name(name)), None)
+            if owner is None:
+                continue
+            sig = owner.by_name(name)
         ex = Example(func=name, args=_split_args(args_text), expect=expect.strip())
         if not any(e.args == ex.args and e.expect == ex.expect for e in sig.examples):
             sig.examples.append(ex)
+    # 产物文件段（§20.4 落点 1）：按位置归属模块小节；顶层全局段归**最后一个**模块
+    # （整合/ui 通常在最后）。去重按 path —— parse_body 已收过的不再重复挂。
+    try:
+        _arts = parse_artifacts(text)
+    except Exception:                                    # noqa: BLE001
+        _arts = []
+    if _arts and out:
+        _order = list(out)
+        for a in _arts:
+            owner = a.owner if a.owner in out else (_order[-1] if not a.owner else None)
+            if owner is None:
+                continue
+            _c = out[owner]
+            if not any(x.path == a.path for x in _c.artifacts):
+                _c.artifacts.append(a)
     return out
 
 

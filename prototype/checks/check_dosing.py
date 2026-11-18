@@ -8,7 +8,7 @@
     可写代码量越小。这条最容易搞反，必须钉住。
   · 每个函数的代价（示例越多、异常越多越贵）
   · 依赖数（上下文越大越保守）
-  · 近期一次通过率（低就缩小，高才敢放大 —— 先有证据再扩容）
+  · 近期一次通过率（低不缩、只记录，高才敢放大 —— 先有证据再扩容；不缩小是 2026-11-09 铁律：完全相信远端）
 
 跑法: python check_dosing.py
 """
@@ -55,15 +55,16 @@ def main() -> int:
     check("依赖越多，一轮函数数越少", b < a, f"{b} vs {a}")
     check("依据里写明了依赖的影响", any("依赖" in x for x in why), str(why))
 
-    print("[4] 一次通过率：低就缩，高才放，没有证据不乱猜")
+    print("[4] 一次通过率：低不缩（只记录），高才放，没有证据不乱猜")
     # 参数选在**没顶到 40 上限**的区间，否则放大看不出效果（这点本身也是信息：
     # 配额富余时，通过率只影响"要不要保守"，不影响"能不能更多"）
     lo, why_lo = dosing.suggest_max_funcs(capacity=3000, per_func=200, first_pass=0.3)
     mid, _ = dosing.suggest_max_funcs(capacity=3000, per_func=200, first_pass=0.7)
     hi, _ = dosing.suggest_max_funcs(capacity=3000, per_func=200, first_pass=0.95)
-    check("通过率低 → 比中等更少", lo < mid, f"{lo} vs {mid}")
+    check("通过率低 → 与中等相同（不缩小，只记录）", lo == mid, f"{lo} vs {mid}")
     check("通过率高 → 比中等更多", hi > mid, f"{hi} vs {mid}")
-    check("通过率低时依据里写明", any("一次通过率" in x for x in why_lo), str(why_lo))
+    check("通过率低时依据里写明『不缩小』（只记录，不用它裁剪远端）",
+          any("不缩小" in x for x in why_lo), str(why_lo))
     capped_mid = dosing.suggest_max_funcs(capacity=10 ** 6, per_func=150, first_pass=0.7)[0]
     capped_hi = dosing.suggest_max_funcs(capacity=10 ** 6, per_func=150, first_pass=0.95)[0]
     check("配额富余时两者都被上限夹住（放大不会突破 40）",

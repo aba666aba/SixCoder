@@ -62,6 +62,8 @@ def main() -> int:
         "远端模型下拉": ["远端模型"],
         "帮助入口": ["帮助"],
         "远端仓库地址": ["远端仓库地址"],
+        # 2026-11-10：模型档案的「原生工具调用」声明（不支持 tools 的模型要能显式关掉）
+        "原生工具调用声明": ["原生工具调用", "自动判断"],
     }
     for label, needles in must.items():
         check(f"{label} 存在", all(n in txt for n in needles),

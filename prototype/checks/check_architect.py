@@ -201,7 +201,7 @@ def test_end_to_end() -> None:
 
     briefs: list[str] = []
 
-    def fake_runner(ws, brief, contract_path, budget, **kw):
+    def fake_runner(ws, brief, contract_path, **kw):
         briefs.append(brief)
         return {"ok": True, "reason": "假执行器", "verified": 0, "total": 1, "spent_s": 0.1,
                 "cost_cny": 0.01, "delivery": ""}
@@ -213,7 +213,7 @@ def test_end_to_end() -> None:
     ans = {"Q2": "csvstat.py --path", "Q3": "空字段算 0"}
     em: list[tuple[str, dict]] = []
     with tempfile.TemporaryDirectory() as td:
-        res = auto.night_auto(Path(td), "做一个 CSV 统计工具", budget_cny=5.0, max_slices=1,
+        res = auto.night_auto(Path(td), "做一个 CSV 统计工具", max_slices=1,
                               llm=fake_llm, runner=fake_runner, recon=fake_recon,
                               emit=lambda k, p=None: em.append((k, p or {})),
                               arch={"questions": qs, "answers": ans})

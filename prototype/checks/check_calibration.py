@@ -103,15 +103,24 @@ def main() -> int:
         att = calibration.read_attempts(ws)
         check("台账读得回来", len(att) == 8, str(len(att)))
         sug3 = calibration.suggest(ws=ws, days=1, min_samples=1)
-        check("成功率 ≥50% 的最高档当封顶（low 全过、max 全挂 → low）",
-              sug3["code_effort_ceiling"] == "low", str(sug3["code_effort_ceiling"]))
+        # 2026-11-10：11-09 用户铁律"完全相信远端"把语义改成"封顶恒为 max、
+        # 成功率只记录不参与决策"——旧断言（按成功率压封顶）与新语义直接相反。
+        # 理由（校准器里已写明）：成功率里混着**引擎自身缺陷**造成的失败
+        # （多行签名被截断、路由接线误判），拿它压封顶会形成"越失败越不敢思考"的死循环。
+        check("封顶恒为 max（完全相信远端，不按成功率压档）",
+              sug3["code_effort_ceiling"] == "max", str(sug3["code_effort_ceiling"]))
         check("依据里列出各档成功率",
               "成功率" in str(sug3["basis"].get("code_effort_ceiling")),
               str(sug3["basis"].get("code_effort_ceiling")))
 
     print("[6] 编排层真的用了（不是写个没人读的函数）")
     csrc = inspect.getsource(company)
-    check("写代码封顶读校准值", "code_effort_ceiling" in csrc and "_cal.current()" in csrc)
+    # 2026-11-10：封顶恒 max 之后，编排层要读的不是"校准封顶值"，而是**升档节奏**
+    # （escalate_after 门槛，settings 唯一真相源）——护栏从"封顶"搬到了"节奏"，
+    # 这里断言新护栏真的在编排层里。
+    check("升档节奏由 escalate_after 门槛控制（不是成功率封顶）",
+          "escalate_after" in csrc and "escalate_after" in inspect.getsource(company),
+          "company.py 里找不到 escalate_after")
     check("单模块预算读校准值", "module_budget_cny" in csrc)
     check("每次写作尝试都记账", "record_attempt" in csrc)
     check("收工会自动校准一次", "recompute(ws)" in csrc)

@@ -155,11 +155,48 @@ def doc_doctor(ws: Path, level: str = "M") -> list[Finding]:
     return out
 
 
+def balance_doctor(ws: Path) -> list[Finding]:
+    """**官方余额**巡检（2026-11-11）。
+
+    为什么要有：余额是**账号的客观事实**（DeepSeek 官方 `GET /user/balance`），
+    而引擎自算的"已花费"是账本口径 —— 两者会打架（实测同一天三个数都不一样）。
+    余额见底却没被发现，引擎会一直烧到 402/401 才发现。
+
+    口径：查不到就**如实报"查不到"**，不猜、不拿估算冒充（info 级，不是 warn）。
+    """
+    out: list[Finding] = []
+    try:
+        from . import balance as _bal
+        b = _bal.query()
+    except Exception as exc:                             # noqa: BLE001
+        return [Finding("balance", "info", f"官方余额查不到（{type(exc).__name__}）",
+                        fix="查不到不影响运行；需要精确余额时手动跑 tools/ds_balance.py",
+                        evidence="core/balance.py")]
+    if not b.get("ok"):
+        return [Finding("balance", "info", f"官方余额查不到（{b.get('detail') or '未知原因'}）",
+                        fix="不影响运行；需要精确余额时手动跑 tools/ds_balance.py",
+                        evidence="core/balance.py")]
+    tot = b.get("total")
+    cur = b.get("currency") or ""
+    if b.get("available") is False:
+        out.append(Finding("balance", "error", f"官方余额不可用（{tot} {cur}）",
+                           fix="立即充值；余额闸会直接收工",
+                           evidence="DeepSeek /user/balance"))
+    elif tot is not None and float(tot) < 10:
+        out.append(Finding("balance", "warn", f"官方余额偏低：{tot} {cur}",
+                           fix="余额低于 ¥10，考虑充值（余额耗尽会直接收工）",
+                           evidence="DeepSeek /user/balance"))
+    else:
+        out.append(Finding("balance", "info", f"官方余额：{tot} {cur}",
+                           fix="余额正常", evidence="DeepSeek /user/balance"))
+    return out
+
+
 # ------------------------------------------------------------------ 统一入口
 def run(ws: Path, level: str = "M", runs: list[dict] | None = None) -> dict:
     """跑所有巡检代理，返回 {findings, warn, error, ok}。"""
     ws = Path(ws)
-    findings = cache_doctor(ws, runs) + doc_doctor(ws, level)
+    findings = cache_doctor(ws, runs) + doc_doctor(ws, level) + balance_doctor(ws)
     warn = [f for f in findings if f.level in ("warn", "error")]
     return {"findings": [f.as_dict() for f in findings], "warn": len(warn),
             "error": sum(1 for f in findings if f.level == "error"),

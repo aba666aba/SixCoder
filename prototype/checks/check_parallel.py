@@ -103,7 +103,9 @@ def main() -> int:
     # 与 check_ui_build 同类（源码结构断言），行为等价性由上面的 [3] 保证。
     src = (Path(__file__).resolve().parents[1] / "core" / "company.py").read_text(
         encoding="utf-8", errors="replace")
-    check("_author_round 定义 _write_one 闭包", "def _write_one(rel):" in src)
+    # 写成 "def _write_one(rel"：网络重试参数（_net_try）是后来加的，
+    # 旧断言写死 "def _write_one(rel):" → 加参数就断（重试语义由 check_network_recovery 钉）。
+    check("_author_round 定义 _write_one 闭包", "def _write_one(rel" in src)
     check("写模块循环经 map_calls 迭代", "map_calls(mods, _write_one)" in src)
     check("break 语义用 _stopped 保留（预算/截止到 → 后续模块跳过）",
           "_stopped" in src and '"skipped"' in src)

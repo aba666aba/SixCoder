@@ -204,7 +204,7 @@ def cmd_run(args) -> int:
         ws.mkdir(parents=True, exist_ok=True)
         print(f"\n=== 第 {i}/{args.runs} 次：{ws.name} ===", flush=True)
         t0 = time.time()
-        res = company.night(ws, req, args.model, hours=args.hours,
+        res = company.night(ws, req, args.model,
                             use_remote=not args.no_remote, max_rounds=args.max_rounds,
                             emit=lambda k, p: print("  ", k, str(p)[:100], flush=True)
                             if k in ("round", "strategy", "architect") else None)

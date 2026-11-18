@@ -134,10 +134,25 @@ def check(contracts: dict) -> dict:
             ret = str(getattr(f, "returns", "") or "")
             pairs = _example_pairs(f)
 
-            # 1) 参数个数
+            # 1) 参数个数：带默认值的参数**可省略**，示例参数个数落在
+            #    [必选数, 全部数] 区间即合法。旧口径"个数必须相等"会把
+            #    "app 可省略"这类兼容语义判成矛盾（实测 2026-11-08：修复契约
+            #    声明 install_body_capture(app) 而示例是 install_body_capture()
+            #    —— 可省略正是修复任务本身 → 契约自查拒收 → 修复片零订单）。
+            #    注意 params 是 Param 对象：default 属性存**字符串字面量**
+            #    （如 "'None'"），无默认值时才是 Python None；不能对 str(p)
+            #    做 "in" 判断（repr 里永远有 "default=" 字样，实测踩过）。
+            def _has_default(_p) -> bool:
+                _d = getattr(_p, "default", None)
+                if _d is not None:
+                    return True
+                _s = str(_p)
+                return "Param(" not in _s and "=" in _s
+            _n_req = sum(1 for _p in params if not _has_default(_p))
             for args, want, raw in pairs:
-                if len(args) != len(params):
-                    hard.append(f"{path}::{name} 示例参数个数 {len(args)} ≠ 契约声明 {len(params)}"
+                if len(args) > len(params) or len(args) < _n_req:
+                    hard.append(f"{path}::{name} 示例参数个数 {len(args)} 不在契约声明的"
+                                f"可调用区间 [{_n_req}, {len(params)}]"
                                 f"（{raw[:60]}）")
                     break
 

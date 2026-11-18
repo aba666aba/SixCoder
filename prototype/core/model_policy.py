@@ -22,6 +22,19 @@ MIN_PARAMS_B = 4.0        # 建议门槛（不是红线）：4.0 本身不算"�
 _SIZE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*b\b", re.I)
 
 
+class ModelTooSmall(Exception):
+    """历史遗留的"模型太小"异常（曾经用于硬拒低参数量模型）。
+
+    **现在不再被任何入口抛出** —— 现行口径是"选哪个模型是用户的判断"：
+    `verdict()` 的 `ok` 恒为 True、`enforce()`/`require()` 只给一句警告（见本模块 docstring）。
+
+    保留这个类的原因：`core/iterate.py` 的 except 分支捕获它
+    （`except model_policy.ModelTooSmall`）。2026-11-12 实测发现该类**从未被定义**
+    → 那个 except 分支一旦进入就抛 `AttributeError`（找不到属性）而不是捕获原异常，
+    反而把真正的错误盖掉了。现在类存在 → except 分支合法（虽然当前口径下不会触发）。
+    """
+
+
 def params_b(model: str) -> float:
     """从名字里读参数量（`qwen2.5-coder:3b` → 3.0）。读不出来返回 0（视为"未标注"）。"""
     m = _SIZE_RE.search(str(model or ""))

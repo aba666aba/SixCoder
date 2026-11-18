@@ -133,8 +133,7 @@ def main() -> int:
     with _sandbox_temp() as td:
         ws = Path(td)
         before = {p.name for p in ws.iterdir()}
-        res = company.night(ws, CONTRA, "qwen2.5-coder:7b", hours=0.01, use_remote=True,
-                            max_cny=0.05)
+        res = company.night(ws, CONTRA, "qwen2.5-coder:7b", use_remote=True)
         after = {p.name for p in ws.iterdir()}
         check("没有写任何代码文件", not (after - before - {"AGENTS.md", "DELIVERY.md",
                                                           ".sixcoder", "TRACE.md",

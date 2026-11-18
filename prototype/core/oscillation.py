@@ -21,10 +21,16 @@ import json
 from dataclasses import dataclass, field
 
 
-def fingerprint(state: dict) -> str:
+def fingerprint(state: dict, cap_cov: dict | None = None) -> str:
     """把一轮的机械失败状态压成指纹。
 
     只取会影响"下一步该干什么"的事实：红函数、桩、无判据、每模块已验收数。
+
+    2026-11-10：`cap_cov` = 端到端能力覆盖观测结果。
+    **必须算进来** —— 只看契约判据时，契约一旦全过指纹就**恒定不变**，
+    于是每轮都被判成"振荡"而收工（实测：6 轮里端到端能力集合明明在变，
+    却因契约指纹相同被 stop，白跑）。
+    端到端在变 = 这一轮的改动有效果 = 不是振荡。
     """
     facts: list[str] = []
     for path in sorted(state or {}):
@@ -35,6 +41,14 @@ def fingerprint(state: dict) -> str:
         verified = int(st.get("verified") or 0)
         facts.append(f"{path}|v={verified}|red={','.join(red)}|stub={','.join(stubs)}"
                      f"|un={','.join(untested)}")
+    # 端到端能力状态：已通过的能力集合 + 红灯能力集合
+    if cap_cov:
+        _caps = cap_cov.get("caps") or {}
+        _done = sorted(c for c, v in _caps.items()
+                        if str((v or {}).get("status") or "") == "done")
+        _red = sorted(c for c, v in _caps.items()
+                       if str((v or {}).get("status") or "") not in ("done", "descoped"))
+        facts.append(f"|cap_done={len(_done)}|cap_red={','.join(_red)}")
     blob = "\n".join(facts)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -107,6 +121,26 @@ def decide_action(osc: dict, strategies_left: int) -> dict:
                 "reason": osc.get("note", "") + "；换一种打法再试"}
     return {"action": "stop",
             "reason": osc.get("note", "") + "；打法已用完，收工（已列入交付报告）"}
+
+
+def act(osc: dict, act_result: dict, strategy_i: int, n_strategies: int,
+        dec_used: dict | None = None, write_used: dict | None = None) -> tuple[str, object]:
+    """振荡处置的**唯一入口**：返回 ("stop", 原因) 或 ("work", 新的 strategy_i)。
+
+    为什么要单独一个函数（实测 2026-11-07）：旧实现在"换打法"后直接 `continue`，
+    于是这一轮**什么都没干**；下一轮观察到完全相同的状态 → 又振荡 → 又换打法 → 又跳过。
+    round 2–6 五轮没有任何 author_start，纯空转后停机（花掉 ¥0.23、零收获）。
+
+    规矩：换打法是为了"换一种干法再试一次"，**必须在本轮就干活**；同时清空决策/写次数
+    预算，否则新打法继承"这个动作已经用过了"，想动手也动不了。
+    """
+    if act_result.get("action") == "stop":
+        return ("stop", act_result.get("reason") or "打法已用完")
+    new_i = min(int(strategy_i) + 1, max(0, int(n_strategies) - 1))
+    for budget in (dec_used, write_used):
+        if isinstance(budget, dict):
+            budget.clear()
+    return ("work", new_i)
 
 
 def as_json(tracker: Tracker) -> str:

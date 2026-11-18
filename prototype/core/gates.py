@@ -6,6 +6,7 @@ model_text 永不出现在这里的返回值中——它由 agent 单独记录�
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 import re
 import subprocess
@@ -1040,12 +1041,19 @@ def _mentions(text: str, word: str) -> bool:
 
 
 def gate_dict_keys(ws: Path, paths: list[str], allowed: set[str],
-                   contract_text: str = "") -> tuple[GateResult, list[str]]:
+                   contract_text: str = "",
+                   only_funcs: set[str] | None = None) -> tuple[GateResult, list[str]]:
     """字段名幻觉闸门：函数里下标用的键必须是"契约知道存在的键"。
 
     实测来源（nights 4/5/6 与多次重跑）：`summarize` 里写了 `row['domain']`，
     而样例行与表里只有 age/email/birth/id/name → 运行时 KeyError。
     模型不是"推理错"，是**凭空造字段名**，这类错误静态就能判。
+
+    only_funcs = 本模块**当前契约签名表**内的函数名。给了就只扫这些函数 ——
+    文件里的历史函数不在本轮契约里，它们用的键（如 username/role）自然也
+    不在 allowed 里，旧版整文件扫等于让"已验收的历史代码"陪绑判红
+    （实测 2026-11-08 org 切片：models.py 48 个函数的大文件被判红一整天）。
+    签名表给不出来（解析失败/空）时保持旧行为：整文件扫（宁可错杀不可漏放）。
 
     两类结果分开返回，避免越权：
       - 阻塞（GateResult.ok=False）：键在契约里**从未出现过**；
@@ -1072,6 +1080,8 @@ def gate_dict_keys(ws: Path, paths: list[str], allowed: set[str],
             continue
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if only_funcs and node.name not in only_funcs:
                 continue
             # "这个函数到底在不在操作 dict 行"：找出**行变量名**，找不到就跳过这个函数。
             # 误杀实例：远端写的 _default_conn() 里返回 {'conn': ...}，被判"凭空造字段"。
@@ -1155,6 +1165,103 @@ def gate_duplicates(ws: Path, paths: list[str]) -> GateResult:
                           f"{checked} 个文件没有重名定义", int((time.time() - t0) * 1000))
     return GateResult("duplicates", False, "static_rule", f"{len(findings)} 处",
                       "；".join(findings[:3]), int((time.time() - t0) * 1000))
+
+
+def gate_cross_dupes(ws: Path, paths: list[str]) -> GateResult:
+    """跨文件同名函数的语义重复闸门：同名函数出现在多个模块 → 阻塞。
+
+    为什么必须有（2026-11-08 run_student_da 实测）：`run_batch_endpoint` 同时定义在
+    `app/services/batches.py`（透传 batch_id）和 `matching_core/da.py`（按 "-" 拆分，
+    还反向 import services）——两个语义互斥的实现并存，调用方 import 到哪份全看运气；
+    同文件的 `gate_duplicates` 抓不到跨文件形态。test 文件（探针名每轮变号）与引擎段
+    （`_engine_`/`_Body_`）豁免；同名**同体**（纯复制）降为提示。
+    """
+    t0 = time.time()
+    sigs: dict[str, list[tuple[str, str]]] = {}   # 函数名 -> [(rel, 体指纹)]
+    checked = 0
+    for rel in paths:
+        p = Path(ws) / rel
+        if not rel.endswith(".py") or not p.exists():
+            continue
+        base = Path(rel).name
+        if base.startswith("test_") or base.endswith("_test.py"):
+            continue
+        checked += 1
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8-sig", errors="replace"))
+        except SyntaxError:
+            continue
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name.startswith(("_engine_", "_Body_", "__")):
+                continue
+            body = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+            sigs.setdefault(node.name, []).append(
+                (rel, hashlib.sha1(body.encode("utf-8")).hexdigest()[:8]))
+    findings: list[str] = []
+    copied: list[str] = []
+    for name, locs in sorted(sigs.items()):
+        if len(locs) < 2:
+            continue
+        loc_names = "、".join(f"{rel}" for rel, _ in locs)
+        fingerprints = {fp for _, fp in locs}
+        if len(fingerprints) > 1:
+            findings.append(f"函数 {name}() 在 {loc_names} 有 {len(locs)} 份**语义不同**的"
+                            f"实现 —— 调用方 import 到哪份全看运气；留一份，其余改名或删除")
+        else:
+            copied.append(f"{name}() 在 {loc_names} 是逐字节复制（合并到一处）")
+    if findings:
+        detail = "；".join(findings[:3]) + (f"（另有 {len(copied)} 处纯复制）" if copied else "")
+        return GateResult("cross_dupes", False, "static_rule", f"{len(findings)} 处",
+                          detail, int((time.time() - t0) * 1000))
+    if copied:
+        return GateResult("cross_dupes", True, "static_rule", f"copy/{len(copied)}",
+                          "；".join(copied[:2]) + "（跨文件复制，建议合并；不阻塞）",
+                          int((time.time() - t0) * 1000))
+    return GateResult("cross_dupes", True, "static_rule", f"ok/{checked}",
+                      f"{checked} 个文件之间没有同名函数", int((time.time() - t0) * 1000))
+
+
+def dedup_toplevel_defs(ws, rel: str) -> list[str]:
+    """同名重复定义的**机械去重**：保留最后一次定义（含装饰器），删 earlier。
+
+    为什么是修复而不是回滚（实测 2026-11-08 14:36）：作者重写 models.py 反复产生
+    `_get_connection`/`_coerce_count`/`_init_schema` 各 2 份 → 回滚 → 下一轮还是重复
+    → 死循环。而"后定义覆盖前定义"本来就是 Python 的运行时语义 —— 删掉前者，
+    文件行为与 Python 实际执行完全一致。返回去重的名字列表。
+    """
+    p = Path(ws) / rel
+    if not rel.endswith(".py") or not p.exists():
+        return []
+    try:
+        src = p.read_text(encoding="utf-8-sig", errors="replace")
+        tree = ast.parse(src)
+    except (OSError, SyntaxError):
+        return []
+    occ: dict[str, list[tuple[int, int]]] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            start = node.decorator_list[0].lineno if node.decorator_list else node.lineno
+            occ.setdefault(node.name, []).append((start, node.end_lineno or node.lineno))
+    dups = {k: v for k, v in occ.items() if len(v) > 1}
+    if not dups:
+        return []
+    lines = src.splitlines(keepends=True)
+    # 删除区间：每个重名保留最后一次，删前面的（按起始行倒序删，行号不漂移）
+    ranges: list[tuple[int, int]] = []
+    for name, spans in dups.items():
+        for s, e in spans[:-1]:
+            ranges.append((s, e))
+    for s, e in sorted(ranges, reverse=True):
+        del lines[s - 1:e]
+    new_src = "".join(lines)
+    try:
+        ast.parse(new_src)
+    except SyntaxError:
+        return []
+    p.write_text(new_src, encoding="utf-8")
+    return sorted(dups)
 
 
 def _import_name(ws: Path, rel: str) -> tuple[str, Path]:
@@ -1476,6 +1583,67 @@ def _bind_all(tree: ast.AST) -> set[str]:
     return out
 
 
+def _resolve_ws_module(ws: Path, current_rel: str, mod: str):
+    """把 `from app.models import x` 里的 app.models 解析成工作区文件；解析不到 → None。
+
+    只认工作区内的模块（标准库/第三方静态判不了，也不该拦）。
+    """
+    ws = Path(ws)
+    rel = mod.replace(".", "/") + ".py"
+    if (ws / rel).is_file():
+        return ws / rel
+    pkg_init = mod.replace(".", "/") + "/__init__.py"
+    if (ws / pkg_init).is_file():
+        return ws / pkg_init
+    # 相对当前文件的包路径（`from .models import x` 在 app/api/llm.py 里 → app/api/models.py）
+    parts = current_rel.replace("\\", "/").split("/")[:-1]
+    for i in range(len(parts), 0, -1):
+        cand = ws / Path(*parts[:i]) / rel
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _in_try(node: ast.AST, tree: ast.AST) -> bool:
+    """这个 import 是否包在 try 里（try/except ImportError 的降级导入是合法写法）。"""
+    parents: dict[int, ast.AST] = {}
+    for p in ast.walk(tree):
+        for ch in ast.iter_child_nodes(p):
+            parents[id(ch)] = p
+    cur = parents.get(id(node))
+    while cur is not None:
+        if isinstance(cur, ast.Try) and any(
+                isinstance(h.type, ast.Name) and h.type.id in ("ImportError", "Exception", "BaseException")
+                or isinstance(h.type, ast.Tuple) for h in cur.handlers):
+            return True
+        cur = parents.get(id(cur))
+    return False
+
+
+def _top_level_defs(path) -> set[str]:
+    """目标模块的顶层可用名：函数/类/赋值（含 if、try 包住的顶层定义）。"""
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8-sig", errors="replace"))
+    except (OSError, SyntaxError):
+        return set()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, (ast.If, ast.Try)):
+            for sub in ast.walk(node):
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    names.add(sub.name)
+    names.add("__all__")
+    return names
+
+
 def gate_undef(ws: Path, paths: list[str]) -> GateResult:
     """未定义名字闸门：模块里被读取、但**整个模块都没定义**、也不是内建的名字。
 
@@ -1507,11 +1675,82 @@ def gate_undef(ws: Path, paths: list[str]) -> GateResult:
                     missing.setdefault(n.id, n.lineno)
         for name, line in sorted(missing.items(), key=lambda kv: kv[1]):
             findings.append(f"{rel}:{line} 用了 {name}，但本模块没有任何定义/导入")
+
+        # 第二遍：**from-import 的目标符号必须在目标工作区模块里真实存在**。
+        # 上面第一遍只看"本模块绑没绑定"——`from app.models import foo` 就算 foo 是作者
+        # 虚构的，绑定也成立，闸门放行（实测 2026-11-08 00:52：作者虚构
+        # install_body_capture/recover_request_body，结构体检 4 关全过、verified 7/7，
+        # 一到 HTTP 探针就 ImportError，能力永远 absent）。
+        # 目标不是工作区模块（标准库/第三方）静态判不了 → 放过；try/except ImportError
+        # 里的降级导入是合法写法 → 放过。
+        _tried: set[tuple[str, str]] = set()
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.ImportFrom) or n.module is None or n.level > 0:
+                continue
+            target = _resolve_ws_module(ws, rel, n.module)
+            if target is None:
+                continue
+            if _in_try(n, tree):
+                continue
+            names = _top_level_defs(target)
+            for alias in n.names:
+                if alias.name == "*":
+                    continue
+                key = (rel, alias.name)
+                # `from pkg import submodule` 是合法 Python：别名若是**包目录下的
+                # 子模块文件**，直接放行（实测 2026-11-08 13:37：app/services/accounts.py
+                # 真实存在，`from app.services import accounts` 被误判虚构 → 白白回滚）。
+                _is_submod = (target.parent / f"{alias.name}.py").is_file() if str(
+                    target).endswith("__init__.py") else False
+                if alias.name not in names and not _is_submod and key not in _tried:
+                    _tried.add(key)
+                    findings.append(
+                        f"{rel}:{n.lineno} 从 {n.module} import 的 {alias.name} "
+                        f"在那个模块里不存在（虚构接口）——要么把这个函数实现到 "
+                        f"{n.module}，要么改用该模块已有的函数")
     if not findings:
         return GateResult("undef", True, "static_rule", f"ok/{checked}",
                           f"{checked} 个文件没有未定义名字", int((time.time() - t0) * 1000))
     return GateResult("undef", False, "static_rule", f"{len(findings)} 处",
                       "；".join(findings[:3]), int((time.time() - t0) * 1000))
+
+
+def gate_import_smoke(ws: Path, timeout: int = 120) -> GateResult:
+    """入口导入冒烟：`import app.main` 还成不成？
+
+    这是唯一能抓住"跨模块组合坏了"的检查：单文件结构体检全绿 + 函数判据全过，
+    也挡不住"作者 from-import 了一个不存在的符号"（import 算绑定）——只有真的
+    把入口 import 一遍才知道（实测 2026-11-08：verified 7/7 落盘后全工作区炸）。
+    company 在**每次写文件后**调用它做提交闸门：写入前 ok、写入后坏 → 回滚该文件。
+    """
+    t0 = time.time()
+    ws = Path(ws)
+    # 入口不再写死 app/main.py（耦合点修复 2026-11-08）：探测实际入口并把相对
+    # 路径转成模块名（app/main.py → app.main、main.py → main、src/main.py → src.main）。
+    from . import entrypoint as _ep
+    _erel = _ep.entry_rel(ws)
+    if not _erel:
+        return GateResult("import_smoke", True, "static_rule", "n/a",
+                          "没有可探测的入口（app/main.py 等），冒烟不适用",
+                          int((time.time() - t0) * 1000))
+    _emod = _erel[:-3].replace("/", ".")
+    import subprocess as _sp
+    import sys as _sys
+    try:
+        r = _sp.run([_sys.executable, "-c", f"import {_emod}"], cwd=str(ws),
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=timeout)
+    except (_sp.TimeoutExpired, OSError) as exc:
+        return GateResult("import_smoke", False, "static_rule", "n/a",
+                          f"冒烟执行失败：{type(exc).__name__}",
+                          int((time.time() - t0) * 1000))
+    if r.returncode == 0:
+        return GateResult("import_smoke", True, "static_rule", "ok",
+                          f"import {_emod} 成功", int((time.time() - t0) * 1000))
+    err = [ln for ln in (r.stderr or "").strip().splitlines() if ln.strip()]
+    detail = (err[-1] if err else "导入失败")[:220]
+    return GateResult("import_smoke", False, "static_rule", "1 处", detail,
+                      int((time.time() - t0) * 1000))
 
 
 def gate_structure(ws: Path, paths: list[str],

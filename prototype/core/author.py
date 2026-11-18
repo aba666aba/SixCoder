@@ -18,6 +18,17 @@ from pathlib import Path
 
 from . import tokens as _tokens
 
+# ── 远端能力闸门（2026-11-09 用户原则：本地是远端的**放大器**，不是缰绳）────
+# 不为省钱把上下文/反馈/输出掐小：掐小 = 让远端写不出来 = 把"机制问题"
+# 记成"模型不会写"。实测代价：注入上限 12000 让 app/models.py（20,857 字符）
+# 只剩头尾可见 → 远端在中间那段是瞎的；输出 floor 1200 让 26 次"契约函数缺失"
+# 实为**被配额砍断**；判据反馈掐 1200 让远端看不到真正的失败原因。
+# 下面几个上限只按**模型物理上限**兜底，不按成本设。
+REMOTE_CTX_CHARS = 200000      # 目标文件全文注入上限（超出模型窗口由 provider 报错）
+REMOTE_TEXT_CHARS = 40000      # 契约/签名参考等文本块上限
+REMOTE_FEEDBACK_CHARS = 0      # 0 = 判据反馈不掐（要全量，这是远端唯一的失败真相）
+REMOTE_OUT_FLOOR = 4000        # 输出配额下限（顶到上限会自动放大重试）
+
 AUTHOR_PROMPT = """你是资深工程师。按下面的**契约**实现这些函数（改已有文件时**只写这次要写的函数**）。
 
 {protocol}
@@ -321,6 +332,72 @@ def _strip_fence(code: str) -> str:
     return c + ("\n" if c and not c.endswith("\n") else "")
 
 
+# ---------------------------------------------------------------- 产物文件（§20.4 A 档落点 3）
+def parse_artifact_blocks(text: str) -> dict[str, str]:
+    """从回复里抽"产物文件块"：```file:路径 围栏 / <file path="路径"> 块。
+
+    为什么单独一条通道：bodies 路径只收 ```python 里的函数体，module 路径把
+    第一个围栏当**整个模块**——模板/静态资源要是也走这两条路，要么被过滤
+    （_is_code_path 不认 .html）、要么把 HTML 当 Python 写进 .py。
+    围栏信息串必须是**带扩展名的路径**才认（防止把 ```python 误吞）。
+    """
+    t = str(text or "")
+    out: dict[str, str] = {}
+    # ① ```file:app/templates/index.html … ```（冒号可省、可有空格）
+    for m in re.finditer(r"```(?:file:|file：)[ \t]*`?([\w][\w./\\ -]*?\.[A-Za-z0-9]{1,6})`?[ \t]*\r?\n(.*?)```",
+                         t, re.S):
+        out.setdefault(m.group(1).replace("\\", "/").strip(),
+                       _strip_fence_free(m.group(2)))
+    # ② ```app/templates/index.html … ```（围栏信息串直接是路径；限定常见前缀防误吞）
+    for m in re.finditer(r"```[ \t]*`?((?:app|apps|src|static|templates|web|public)[\w./\\ -]*?\.[A-Za-z0-9]{1,6})`?[ \t]*\r?\n(.*?)```",
+                         t, re.S):
+        out.setdefault(m.group(1).replace("\\", "/").strip(),
+                       _strip_fence_free(m.group(2)))
+    # ③ <file path="...">…</file>
+    for m in re.finditer(r"<file\s+path=[\"']([\w][\w./\\ -]*?\.[A-Za-z0-9]{1,6})[\"']\s*>\r?\n?(.*?)</file>",
+                         t, re.S):
+        out.setdefault(m.group(1).replace("\\", "/").strip(),
+                       _strip_fence_free(m.group(2)))
+    return {k: v for k, v in out.items() if v.strip()}
+
+
+def _strip_fence_free(code: str) -> str:
+    """产物内容若被模型再包了一层围栏就剥掉；否则原样（保留 HTML 的换行结构）。"""
+    c = (code or "").strip("\n")
+    m = re.match(r"^[ \t]*```[\w-]*[ \t]*\r?\n(.*?)\r?\n?[ \t]*```[ \t]*$", c, re.S)
+    return (m.group(1) if m else c) + "\n"
+
+
+def write_artifacts(ws: Path, reply: str, arts, emit=None, how: str = "") -> dict:
+    """把回复里的产物文件块写到声明的路径（只写契约声明过的；幂等）。
+
+    返回 {"written": [...], "missing": [...]}：missing = 声明了但这次没交/没写成的。
+    """
+    try:
+        from . import tools as _tools                    # 模块级没导 tools（本文件惯例：函数内导）
+        declared = {a.path: a for a in (arts or []) if getattr(a, "path", "")}
+        if not declared:
+            return {"written": [], "missing": []}
+        blocks = parse_artifact_blocks(reply)
+        written: list[str] = []
+        for path in declared:
+            content = blocks.get(path)
+            if content is None:
+                continue
+            p = _tools.safe_path(ws, path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            written.append(path)
+        missing = [path for path in declared
+                   if path not in written and not (Path(ws) / path).is_file()]
+        if emit and (written or missing):
+            emit("author_artifacts", {"written": written, "missing": missing,
+                                      "how": how})
+        return {"written": written, "missing": missing}
+    except Exception:                                    # noqa: BLE001
+        return {"written": [], "missing": []}
+
+
 def _toplevel_symbols(src: str) -> set[str]:
     """顶层公开符号（函数/类），忽略引擎自己的 `_engine_*` / `_Body_*`。"""
     import ast as _ast
@@ -348,6 +425,32 @@ def _deleted_symbols(old: str, new: str) -> list[str]:
     return sorted(_toplevel_symbols(old) - _toplevel_symbols(new))
 
 
+def _restore_symbols(old: str, new: str, names: list[str]) -> str:
+    """把被误删的顶层符号按**旧实现原样**接回新文件；接不回来返回空串。
+
+    为什么由引擎补而不是打回给模型：缺哪些函数是确定性事实（AST 一比就知道），
+    让远端再猜一次既费钱又会得到同一份"干净文件"。这里只补函数本体，不动新文件
+    里已经写好的内容。
+    """
+    from . import symedit
+    edits: list[dict] = []
+    for name in names:
+        code = symedit.source_of(old, name)
+        if not code.strip():
+            continue
+        edits.append({"op": "add", "symbol": name, "code": code, "after": ""})
+    if not edits:
+        return ""
+    rep = symedit.apply_edits(new, edits)
+    if not rep.ok or not (rep.new_source or "").strip():
+        return ""
+    try:
+        compile(rep.new_source, "<restore>", "exec")
+    except SyntaxError:
+        return ""
+    return rep.new_source
+
+
 def _compile_ok(src: str) -> tuple[bool, str]:
     try:
         compile(src, "<remote>", "exec")
@@ -362,6 +465,8 @@ BODIES_PROMPT = """你是资深工程师。骨架已经由引擎按契约渲染�
 
 {protocol}
 
+{file_block}
+
 {skeleton_block}
 
 {contract_block}
@@ -370,40 +475,154 @@ BODIES_PROMPT = """你是资深工程师。骨架已经由引擎按契约渲染�
 
 {evidence_block}
 
-只输出 JSON（不要解释、不要围栏外的文字）：
-{{"bodies":{{"函数名":"<函数体的若干行，顶格写，引擎会自动缩进>"}},
- "helpers":{{"_辅助函数名":"<完整 def ... 定义，可省略>"}},
- "delegate":[{{"kind":"validation|boilerplate|logging|adapter","target":"函数名","spec":"一句话规格"}}],
- "system_issues":[{{"where":"契约/判据/工具链","issue":"本地缺陷","suggest":"怎么改"}}]}}
+【输出格式：用 ```python 围栏包住代码，不要 JSON、不要解释】
+（下面的例子**就是本次要写的函数名**，照抄名字，别用别的名字）
 
-铁律：
-1. bodies 的键必须是上面的函数名，只给**函数体**（if/for/return 照常写，但不要写 def 行）。
-2. 不要输出整文件、不要输出 import、不要输出 def 行。
-3. 空输入/空值不许崩；契约要求抛的异常必须抛。
-4. 契约里每条示例都要在你的实现上成立。
-5. 机械性内容（样板/校验/日志/适配）可以 delegate 给本地模型写，你只给一句话规格，最多 3 项。
-6. **可维护性硬指标**：单函数圈复杂度 ≤8、嵌套 ≤3、单函数 ≤40 行（本地会判红）。
+```python
+{format_example}
+```
+
+规则：
+1. 每个函数一段，用 `# ===== 函数名 =====` 开头（名字必须和骨架里的一字不差）。
+2. 段内是**函数体**：**顶格写**，不要写 def 行、不要自己加外层缩进（引擎会缩进到 def 下面）。
+3. 段内的 if/for/try 内部的缩进照常写（4 空格），引擎只负责整体平移。
+4. 不要输出整文件、不要输出 import。
+5. 空输入/空值不许崩；契约要求抛的异常必须抛。
+6. 契约里每条示例都要在你的实现上成立。
+7. **可维护性硬指标**：单函数圈复杂度 ≤8、嵌套 ≤3、单函数 ≤40 行（本地会判红）。
    降复杂度用提前返回、字典查表、把大 if 拆成小函数（辅助函数放 helpers）。
+
+辅助函数（可选）：围栏里再用 `# ===== helper:_名字 =====` 开头给**完整 def 定义**，
+引擎会把它放在模块级。
 """
 
 
-def render_skeleton(funcs, existing_src: str = "", module_doc: str = "") -> str:
+def parse_fenced_bodies(text: str) -> tuple[dict, dict]:
+    """从 ```python 围栏里取 {函数名: 函数体} 与 {辅助函数名: 完整 def}。
+
+    为什么换掉 JSON（实测 2026-11-09）：旧协议要求把函数体塞进 JSON 字符串
+    （`{"bodies":{"f":"def f():\n    ..."}}`），缩进和换行全靠手写转义。
+    结果 Flash 反复在 `'(' was never closed` 上卡死——**代码写在围栏里是模型的
+    原生形态，塞进 JSON 是反模式**。
+
+    兼容：围栏里如果直接给了完整 `def`，按名字整体收进 helpers 之外的 bodies 也认
+    （用 AST 判断首个非注释节点是不是 FunctionDef），避免模型"多写了个 def 行"就全废。
+    """
+    import ast as _ast
+    import re as _re
+
+    def _dedent_body(src: str) -> str:
+        lines = src.splitlines()
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        pad = min((len(x) - len(x.lstrip()) for x in lines if x.strip()), default=0)
+        return "\n".join(x[pad:] if x.strip() else "" for x in lines)
+
+    bodies: dict = {}
+    helpers: dict = {}
+    blocks = _re.findall(r"```(?:python|py)?[ \t]*\n(.*?)```", str(text or ""), _re.S)
+    for blk in blocks:
+        cur, buf, is_helper = None, [], False
+        def _flush():
+            nonlocal cur, buf, is_helper
+            if cur is None:
+                return
+            raw = "\n".join(buf)
+            if is_helper:
+                helpers[cur.lstrip("_") if False else cur] = raw.strip("\n")
+            else:
+                code = _dedent_body(raw)
+                if not code.strip():
+                    return bodies.get(cur)
+                try:
+                    tree = _ast.parse(code)
+                except SyntaxError:
+                    tree = None
+                # 模型多写了整段 def：剥掉 def 行，只留函数体
+                if (isinstance(tree, _ast.Module) and len(tree.body) == 1
+                        and isinstance(tree.body[0], (_ast.FunctionDef, _ast.AsyncFunctionDef))):
+                    fn = tree.body[0]
+                    seg = _ast.get_source_segment(code, fn)
+                    if seg:
+                        inner = seg.split("\n", 1)[1] if "\n" in seg else ""
+                        bodies[cur] = _dedent_body(inner)
+                        return
+                bodies[cur] = code
+        for line in blk.splitlines():
+            m = _re.match(r"^\s*#\s*={3,}\s*(?:函数|helper)?[:：]?\s*"
+                          r"(?P<h>helper[:：])?\s*(?P<n>[A-Za-z_]\w*)\s*={3,}\s*$", line)
+            if m:
+                _flush()
+                cur = m.group("n")
+                is_helper = bool(m.group("h")) or cur.startswith("_") and "helper" in line.lower()
+                buf = []
+            elif cur is not None:
+                buf.append(line)
+        _flush()
+    return bodies, helpers
+
+
+def render_skeleton(funcs, existing_src: str = "", module_doc: str = "",
+                    include_bodies: bool = False) -> str:
     """本地渲染骨架：import + 模块 docstring + 每个函数的 def/注解/docstring + 占位体。
 
     这是"省输出"的关键：签名、注解、docstring、import 全由本地生成（确定性、零 token），
     远端只回函数体那几行。
     """
     lines: list[str] = []
-    for ln in (existing_src or "").splitlines():
-        st = ln.strip()
-        if st.startswith(("import ", "from ")):
-            lines.append(st)
+    # 模块级赋值必须随骨架保留（实测 2026-11-08 org 切片：旧版只留 import 行，
+    # 契约要求的 _ORG_STATE 全局在重写后凭空消失 → 模型被迫 globals() 动态建
+    # → 每次姿势不同 → 判红 → models.py 半天 30 次失败）。用 AST 精确取顶层
+    # import/赋值/注解赋值，坏语法退回旧行为（只留 import）。
+    # 注意：所有模块级语句统一铺在文件头、函数桩之前 —— apply_bodies 按 "def "
+    # 行切块填体，赋值若夹在函数桩之间会被并进上一个函数的体里变成局部变量。
+    src0 = existing_src or ""
+    try:
+        import ast as _ast
+        tree = _ast.parse(src0)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        for node in tree.body:
+            if isinstance(node, (_ast.Import, _ast.ImportFrom,
+                                 _ast.Assign, _ast.AnnAssign)):
+                seg = _ast.get_source_segment(src0, node)
+                if seg:
+                    lines.extend(seg.splitlines())
+    else:
+        for ln in src0.splitlines():
+            st = ln.strip()
+            if st.startswith(("import ", "from ")):
+                lines.append(st)
     if lines:
         lines.append("")
     if not module_doc:
         module_doc = "由 SixCoder 生成（骨架由引擎渲染，函数体由远端填写）。"
     lines.append('"""' + module_doc + '"""')
     lines.append("")
+    # 现有实现：include_bodies=True 时原样放进骨架，让作者**看得见**已有函数长什么样。
+    # 旧骨架只有 raise NotImplementedError，作者被要求"只改这几个、其余保留"，
+    # 却完全不知道其余函数实现了什么（实测 2026-11-09：把已验证函数反复重写成别的姿势）。
+    ex_map: dict = {}
+    if include_bodies and existing_src:
+        try:
+            import ast as _ast2
+            _tree = _ast2.parse(existing_src)
+            for _node in _tree.body:
+                if isinstance(_node, (_ast2.FunctionDef, _ast2.AsyncFunctionDef)):
+                    _seg = _ast2.get_source_segment(existing_src, _node)
+                    if _seg:
+                        # 记下旧函数的参数名：签名一变（`(authorization, body)` →
+                        # `(body, teacher_id)`），旧函数体里的变量名就是错的，
+                        # 再塞进骨架只会让模型照抄错名（实测 2026-11-09：
+                        # 判据按新签名传参 → 0/2，整片 rollback）。
+                        _names = [a.arg for a in _node.args.args]
+                        ex_map[_node.name] = (_seg, _names)
+        except SyntaxError:
+            ex_map = {}
+
     for f in funcs:
         params = []
         for p in (getattr(f, "params", None) or []):
@@ -422,7 +641,27 @@ def render_skeleton(funcs, existing_src: str = "", module_doc: str = "") -> str:
         # """...YYYY-MM-DD"""" 这种四引号结尾的非法字符串（实测 clean.py 连炸 6 轮）。
         safe = first.replace('"""', "'''").replace('"', "'").rstrip("'").strip()
         lines.append('    """' + safe + '"""')
-        lines.append("    raise NotImplementedError")
+        _hit = ex_map.get(f.name)
+        if _hit is not None and list(_hit[1]) != [p.name for p in
+                                                 (getattr(f, "params", None) or [])]:
+            # 签名变了 → 旧体作废，重新写；同时把"签名已变更"写进 docstring 提示
+            lines.append("    # 注意：本函数签名已按契约变更，旧实现不可直接复用")
+            _hit = None
+        if _hit is not None:
+            _bl = _hit[0].splitlines()
+            _i = 0
+            while _i < len(_bl) and not _bl[_i].rstrip().endswith(':'):
+                _i += 1
+            _rest = _bl[_i + 1:]
+            while _rest and (not _rest[0].strip()
+                             or _rest[0].strip()[0] in ('"', "'")):
+                _rest.pop(0)
+            if _rest:
+                lines.extend(_rest)
+            else:
+                lines.append("    raise NotImplementedError")
+        else:
+            lines.append("    raise NotImplementedError")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -521,6 +760,18 @@ def rebuild_partial(existing: str, funcs, targets: list[str], bodies: dict,
     返回 (新源码, 真正缺失的函数名)。
     """
     merged = _merge_skeleton(existing, funcs, targets)
+    # **目标函数在文件里还不存在 → 必须把它加进去**（实测 2026-11-09 真机）：
+    # 远端交回了完全正确的函数体（parse_fenced_bodies → ['normalize_quota']），
+    # 但 `_merge_skeleton` 只保留**文件里已有**的函数 → 新函数根本不在骨架里 →
+    # `apply_bodies` 只能替换已有的 def → 新函数被**静默丢掉** →
+    # 判据报"契约函数缺失：<名>（文件里根本没有这些函数）"→ 无限重试。
+    # 夜班日志里 26 次"契约函数缺失"就是这么来的（不是模型不会写）。
+    _have = {ln.split("(", 1)[0].replace("def ", "").strip()
+             for ln in existing.splitlines() if ln.startswith("def ")}
+    _new_targets = [f for f in funcs if f.name in targets and f.name not in _have]
+    if _new_targets:
+        _extra = render_skeleton(_new_targets, existing_src="", include_bodies=False)
+        merged = merged.rstrip() + "\n\n\n" + _extra.strip() + "\n"
     code, missing = apply_bodies(merged, bodies, helpers, stub_missing=False)
     if not missing:
         return code, []
@@ -574,11 +825,56 @@ def _blame_body(funcs, bodies: dict) -> list[str]:
     return out
 
 
+def _fix_imports_after_write(ws: Path, p: Path, emit, how: str) -> str:
+    """写完文件后**立刻**补齐确定性 import（HTTPException / Header / JSONResponse …）。
+
+    为什么必须在落盘后做，而不是只靠每轮的接线阶段（2026-11-10 23:10 实测）：
+      接线（wire_web_routes）在**每轮开头**跑，作者在**之后**才写文件。作者整文件重写
+      会把引擎补的 import 冲掉，而对齐/判据都发生在这之后 → 文件带着
+      `NameError: name 'Header' is not defined` 落盘，判据整模块红，
+      系统记成"模型写不出"，还白跑几轮（当晚 app/api/people.py 就是这么红的）。
+    缺哪个 import 是**确定性信息**，本地补一行即可，不该让远端猜。
+
+    返回补齐后的源码（读不出来就返回空串，调用方忽略即可）。
+    """
+    try:
+        src = p.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return ""
+    out = src
+    added: list[str] = []
+    try:
+        from . import auto as _auto_mod
+        # **必须传 ws**（2026-11-15）：不传时 `_stack(None)` 落回 fastapi
+        # → Django 项目补出来的是 `from fastapi import ...` 或干脆不补
+        # → 远端写的 `models.CharField` / `JsonResponse` 全是 NameError。
+        out, _imp = _auto_mod._ensure_imports(out, ws)
+        added += list(_imp or [])
+        out, _rfix = _auto_mod._ensure_router_decl(out)
+        if _rfix:
+            added.append("router = APIRouter()")
+        out, _local = _auto_mod._ensure_local_imports(ws, out, str(p))
+        added += list(_local or [])
+    except Exception:                                    # noqa: BLE001
+        return src
+    if out != src:
+        try:
+            p.write_text(out, encoding="utf-8")
+        except OSError:
+            return src
+        if emit:
+            emit("author_imports", {"path": str(p), "how": how,
+                                    "added": added[:8], "n": len(added)})
+    return out
+
+
 def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan: str = "",
                   evidence: str = "", step_index: int = 0, task_id: str = "",
                   emit=None, attempts: int = 2, max_out: int = 0,
                   context_budget: int = 0, local_model: str = "",
-                  only: list[str] | None = None, workingset: str = "") -> dict:
+                  only: list[str] | None = None, workingset: str = "",
+                  diagnose: bool = True, tool_loop: bool = True,
+                  tool_rounds: int = 3) -> dict:
     """骨架本地渲染，远端**只回函数体**（省输出的关键一步）。
 
     收益：远端输出从"整个文件（含 import/def/注解/docstring）"降到"几个函数体"；
@@ -593,10 +889,13 @@ def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan
     existing = p.read_text(encoding="utf-8-sig", errors="replace") if p.exists() else ""
     funcs = list(getattr(contract, "funcs", None) or [])
     want_funcs = [f for f in funcs if not only or f.name in only]
-    skeleton = render_skeleton(want_funcs, existing_src=existing)
+    # include_bodies=True：把文件里**已有的函数实现**也放进骨架。
+    # 作者被要求"只改这几个、其余保留"，就必须看得见其余函数现在长什么样，
+    # 否则它会按自己的想象重写，把已验证的实现弄坏（实测 2026-11-09）。
+    skeleton = render_skeleton(want_funcs, existing_src=existing, include_bodies=True)
     if not max_out:
         # 只回函数体：基准取"要填的骨架"（含需要保留的既有签名/注解），再留重构余量
-        max_out = _tokens.output_budget(skeleton, factor=1.2, floor=1600)
+        max_out = _tokens.output_budget(skeleton, factor=1.2, floor=REMOTE_OUT_FLOOR)
         if emit:
             emit("output_budget", {"path": path, "max_out": max_out,
                                    "est_tokens": _tokens.estimate_tokens(skeleton),
@@ -607,32 +906,285 @@ def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan
     contract_txt = ""
     try:
         from . import contract as cm
-        contract_txt = _tokens.cut(cm.describe(contract), 8000)
+        contract_txt = _tokens.cut(cm.describe(contract), REMOTE_TEXT_CHARS)
     except Exception:                                    # noqa: BLE001
         contract_txt = ""
+    # 写前必读（与 author_module 对齐）：片段模式旧版**只给签名骨架**，不给文件全文，
+    # 于是模型蒙着眼睛重写函数体，把已验证的实现改坏（实测 2026-11-09：
+    # `include_bodies` 只补了同名函数体，模块级常量/相邻函数的调用方式仍然看不见）。
+    # 文档 §三 写的是"写前必读全文"，这里是把它真正落到第二条写作路径上。
+    def _read_file_block(retry: bool = False) -> str:
+        """读磁盘上**此刻**的文件内容喂给远端（本地读盘，不花 token）。
+
+        retry=True 是"失败后重贴"：上一轮判红时坏代码**已经落盘**，远端必须看到
+        **它自己刚写的那一份**，否则只能凭记忆改 → 退化成整文件重写。
+        实测 2026-11-09：日志里连续 `decision 跨函数/说不清位置，整文件重写一次`
+        就是这么来的 —— 第 1 轮喂进去的 file_block 是**动手前的旧版**，之后再没更新过。
+        """
+        try:
+            from . import readplan as _rp2
+            _rplan2 = _rp2.plan("edit_existing" if existing.strip() else "new_module",
+                                target=path)
+            _got2 = _rp2.collect(ws, _rplan2, budget_chars=REMOTE_CTX_CHARS)
+            if not _got2.get("text"):
+                return ""
+            head = ("【上一版（刚被判红）的真实内容 —— **这就是写下去被判不合格的那一版**；"
+                    "请只改必要之处，其余逐字保留】"
+                    if retry else
+                    "【现有文件当前真实内容（**必须读过再改**；"
+                    "不要凭想象重写，保留没让你改的部分）】")
+            if emit:
+                emit("read_gate", {"path": path, "chars": len(existing),
+                                   "read_ok": bool(_got2.get("full")),
+                                   "mode": ("retry_refresh" if retry else
+                                            ("full" if _got2.get("full") else "head_tail")),
+                                   "tiers": _rplan2.get("tiers")})
+            return head + "\n" + _got2["text"]
+        except Exception as _e:                             # noqa: BLE001
+            if emit:
+                emit("notice", {"message": f"read_plan 跳过：{type(_e).__name__}"})
+            return ""
+
+    _file_block = _read_file_block()
+
     last = evidence
     issues: list[dict] = []
+    _diagnosed = [False]
+    _failed_src: list = [None]        # 语法检查失败时那份**没写盘**的拼接代码
+
+    def _maybe_diagnose(reason: str) -> str:
+        """每片至多一次：判据失败或**输出解析失败**时让远端带只读工具自诊断。
+
+        实测 2026-11-09 10:12：诊断只接在 verdict 失败路径，真实夜班
+        `order_failed '(' was never closed` 走的是解析失败 → continue → 直接返回，
+        diagnose_done=0，远端永远拿不到「为什么」。改为两条出口共用这一处；
+        `_diagnosed` 保证不因多次失败重复花钱。开关 diagnose=False 可整体回退。
+        """
+        if not diagnose or _diagnosed[0] or not str(reason or "").strip():
+            return reason
+        _diagnosed[0] = True
+        _payload = str(reason)
+        # 「打开第 303 行看」的前提：那份代码得看得见。
+        # _compile_ok(code) 失败后直接 continue，**没有 write_text** —— 出错的是内存里
+        # 拼接后的版本，磁盘上还是旧文件。若只把行号丢给远端，它 read_file(303)
+        # 读到的是另一份代码，反而会得出错误结论。所以把带行号的上下文原样附上，
+        # 并明确说清「磁盘是旧版，别按行号去读」。
+        _m = re.search(r"第\s*(\d+)\s*行", _payload)
+        _src = _failed_src[0]
+        # 只认 author_bodies 解析失败的专属措辞「解析不了」：判据反馈里也可能
+        # 出现「语法错误」字样，那时 _failed_src 是上一次遗留的，不该误附。
+        if _m and _src and "解析不了" in _payload:
+            try:
+                n = int(_m.group(1))
+                lines = str(_src).splitlines()
+                if n > len(lines):
+                    # 版本错位（行号来自另一份代码）也要如实说，不能静默丢证据
+                    lo, hi = max(1, len(lines) - 10), len(lines)
+                    note = (f"【注意：报告行号 {n} 超出拼接版本行数 {len(lines)}，"
+                            f"可能版本错位；下面给出拼接版本尾部】\n")
+                else:
+                    lo, hi = max(1, n - 5), min(len(lines), n + 5)
+                    note = ""
+                ctx = "\n".join(f"  {i}| {lines[i - 1]}"
+                                for i in range(lo, hi + 1) if 0 < i <= len(lines))
+                if ctx:
+                    _payload += ("\n\n【出错代码上下文（内存里拼接后、尚未写盘的版本；"
+                                 "磁盘上的文件是旧版，请勿按行号 read_file 读磁盘，"
+                                 "直接看下面带行号的片段）】\n" + note + ctx)
+            except (ValueError, IndexError, TypeError):
+                pass
+        from . import remotetools as _rtl
+        _diag = _rtl.diagnose_fail(ws, path, _payload, emit=emit)
+        if not _diag:
+            return reason
+        return str(reason) + "\n\n【远端自诊断（只读查证，未改代码）】\n" + _diag
+
+    _need_refresh = [False]      # 上一轮写了盘且被判红 → 下一轮重新读盘
+    _prev_ev = [None]            # 上一轮的失败证据（用来判断"写不出来"）
+    _stuck = [False]             # 同一错误重复出现 → 换路，别原样重试
+    _grew = [0]                  # 输出配额放大次数（顶到上限 → 放大重试，不是能力问题）
+    _tool_fin = ""                # 2026-11-09：工具循环的 finish_reason（截断判定硬信号）
     for attempt in range(1, max(1, attempts) + 1):
+        if attempt > 1 and _need_refresh[0]:
+            # 失败后引擎手里的"文件现状"必须更新：`existing` 是合并基线，
+            # `skeleton` 是给远端看的骨架，`_file_block` 是喂给远端的全文。
+            # 三样都停在动手前的旧版 → 远端看不到自己刚写坏的那份 → 只能整文件重写，
+            # 而且合并基线也是旧的 → 上一轮已经写对的部分被丢掉重来。
+            existing = p.read_text(encoding="utf-8-sig", errors="replace") if p.exists() else ""
+            skeleton = render_skeleton(want_funcs, existing_src=existing, include_bodies=True)
+            _file_block = _read_file_block(retry=True) or _file_block
+            _need_refresh[0] = False
+        # 输出格式示例用**本次真实的函数名**：原来写死的是别的项目的函数名
+        # （create_topic_draft），远端照抄 → 名字不在骨架里 → 被过滤掉 →
+        # 报"契约函数缺失：<函数名>（文件里根本没有这些函数）"（真机实测 2026-11-09）。
+        _ex_names = [n for n in (only or names)][:3] or names[:3]
+        _format_example = "\n".join(
+            f"# ===== {n} =====\n# 在这里写 {n} 的函数体（顶格，不要 def 行）"
+            for n in _ex_names) or "# ===== 目标函数名 =====\n..."
         prompt = BODIES_PROMPT.format(
+            format_example=_format_example,
+            file_block=_file_block,
             protocol=protocol.render("delegate"),
             skeleton_block=f"【骨架（已由引擎渲染好，你只补函数体）】\n```python\n{skeleton}\n```",
             contract_block=f"【契约】\n{contract_txt}",
-            plan_block=(f"【实现方案】\n{_tokens.cut(model_plan.strip(), 2000)}" if model_plan else ""
+            plan_block=(f"【实现方案】\n{_tokens.cut(model_plan.strip(), REMOTE_TEXT_CHARS)}" if model_plan else ""
                         ) + (f"\n{workingset}" if workingset else ""),
-            evidence_block=(f"【上一版被判红，必须改掉】\n{_tokens.cut(last, 1200)}" if attempt > 1 else ""))
+            # 判据反馈是远端**唯一的失败真相**：不掐（只有 provider 上下文兜底）。
+            evidence_block=(f"【上一版被判红，必须改掉】\n{_tokens.cut(last, REMOTE_TEXT_CHARS)}"
+                            if attempt > 1 else ""))
         if attempt > 1 and only:
             prompt += ("\n\n【这次只重写这几个函数体】" + "、".join(only))
+        if attempt > 1 and _stuck[0]:
+            # 同一错误重复 → 明确换路：先查证，再改；别再凭记忆重写一遍
+            prompt += ("\n\n【上一版的失败和这次**完全相同**，说明原样重写没用。"
+                       "请先查证再动手：\n"
+                       "  1. 用 outline / imports / check_import / contract_for / read_file "
+                       "看清这个文件的真实结构、依赖和契约要求；\n"
+                       "  2. 判断它到底是**判据与实现矛盾**、**缺上下文**还是**真的不会写**；\n"
+                       "  3. 只改上面点名的函数，别重写整个文件。")
+        # §20.4 落点 3：契约声明了产物文件 → 提示词带上清单与交回格式
+        _arts_b = list(getattr(contract, "artifacts", None) or [])
+        if _arts_b:
+            try:
+                from . import contract as _cm_a
+                prompt += "\n\n" + _cm_a.artifacts_prompt(_arts_b)
+            except Exception:                            # noqa: BLE001
+                pass
+        # §20.6 C 档：契约里还声明了工程产物（迁移/锁文件/compose/健康检查/
+        # 可观测性）时，提示词必须带上"交回格式与判据要求"。
+        # 只注入段声明而不告诉远端怎么交文件 → 它看到清单也不会产出，
+        # 判据永远红、系统还以为是"模型写不出来"（与 §20.1 证据 2 同病根）。
+        try:
+            from . import enterprise as _ent_a
+            _eng_specs = _ent_a.parse_sections(str(contract_txt or ""))
+            _eng_hint = _ent_a.sections_prompt(_eng_specs)
+            if _eng_hint:
+                prompt += "\n\n" + _eng_hint
+        except Exception:                                # noqa: BLE001
+            pass
         if ctx:
-            prompt += "\n\n【其它模块的签名参考（只读，不要改）】\n" + _tokens.cut(ctx, 8000)
-        r = remote.complete(prompt, task_id=task_id or "bodies", node_id=f"bodies:{path}",
-                            workspace=str(ws), emit=emit, step_index=step_index,
-                            json_mode=True, max_out=max_out)
-        if not r.get("ok"):
-            return {"ok": False, "reason": f"远端调用失败：{r.get('error')}"[:200],
+            prompt += "\n\n【其它模块的签名参考（只读，不要改）】\n" + _tokens.cut(ctx, REMOTE_TEXT_CHARS)
+        # json_mode=False：代码走 ```python 围栏（原生形态），不再塞进 JSON 字符串。
+        # 实测 2026-11-09：JSON 里的多行括号反复 `'(' was never closed`，同样模型、
+        # 同样契约，只换输出协议。
+        # 远端**带只读工具**写码：先看真实代码/契约/依赖，再交函数体。
+        # 这条路之前是**零工具**的：远端只能凭注入的片段猜文件里长什么样 ->
+        # "用了没 import 的名字""字段名猜错""重写已有函数"这类错反复出现。
+        # ToolLoop 早就实现（10 个只读工具），但写作路径只把说明追加进 prompt、
+        # 从不解析/执行/回灌 —— 机制写好了，出口没接上（今天第十次同一种病）。
+        _ans = ""
+        _usage: dict = {}
+        _remote_failed = [False]   # 远端调用本身失败 → 不再补打一次（省一次花费）
+        _remote_err = [""]        # 远端失败的**原始原因**（不丢信息：401/402/网络/限流要分得清）
+        r: dict = {}          # 统一形状：工具路径没有远端响应对象，先给空壳
+        if tool_loop:
+            try:
+                from . import remotetools as _rtl
+
+                def _fc(_instr: str, messages: list, _tools=None) -> dict:
+                    """远端调用：带**原生 function calling**（官方 tools 通路）。"""
+                    nonlocal _usage
+                    rr = remote.complete(_instr, task_id=task_id or "bodies",
+                                        node_id=f"bodies:{path}", workspace=str(ws),
+                                        emit=emit, step_index=step_index,
+                                        json_mode=False, max_out=max_out,
+                                        messages=messages, tools=_tools)
+                    if isinstance(rr, dict):
+                        _usage = rr.get("usage") or {}
+                        if not rr.get("ok"):
+                            _remote_failed[0] = True      # 远端本身失败 → 别再打一次
+                            _remote_err[0] = str(rr.get("error") or "")[:200]
+                        return {"answer": rr.get("answer") or "",
+                                "tool_calls": list(rr.get("tool_calls") or []),
+                                "message": rr.get("message") or {},
+                                # 2026-11-09：finish_reason 必须透传（截断判定的硬信号）
+                                "finish_reason": str(rr.get("finish_reason") or ""),
+                                # 2026-11-10：error 也要透传 —— 要靠它判"这个模型不支持
+                                # tools"（那就换通路，不是当成能力不足）
+                                "error": str(rr.get("error") or "")[:300]}
+                    return {"answer": "", "tool_calls": [], "message": {},
+                            "finish_reason": "", "error": ""}
+
+                from . import capability as _cap0
+                _mode0, _model0, _compat0 = _cap0.current_tool_mode()
+                _lp = _rtl.ToolLoop(ws, max_rounds=tool_rounds, emit=emit, complete_fn=_fc,
+                                    max_out=max_out, tool_mode=_mode0,
+                                    model=_model0, compat=_compat0)
+                _lr = _lp.run(prompt)
+                _ans = str(_lr.get("answer") or "")
+                if emit:
+                    emit("author_tools", {"path": path, "rounds": _lr.get("rounds"),
+                                          "tools": len(_lr.get("tool_calls") or []),
+                                          "denied": len(_lr.get("denied") or [])})
+                _tool_fin = str(_lr.get("finish_reason") or "")
+                r = {"usage": _usage, "by": "", "answer": _ans,
+                     # 2026-11-09：工具循环的 finish_reason 也要传下去（截断判定的硬信号）
+                     "finish_reason": _tool_fin}
+            except Exception as exc:                        # noqa: BLE001
+                if emit:
+                    emit("notice", {"message": f"写码工具循环跳过：{type(exc).__name__}"})
+                _ans = ""
+        if not _ans and not _remote_failed[0]:
+            r = remote.complete(prompt, task_id=task_id or "bodies", node_id=f"bodies:{path}",
+                                workspace=str(ws), emit=emit, step_index=step_index,
+                                json_mode=False, max_out=max_out)
+            if not r.get("ok"):
+                # 2026-11-09：断网要和"远端答错"分开标记。
+                # 断网不是模型能力问题 —— 记成"模型不会写"就会误导后续决策
+                # （换模型/加轮次这类无效动作）。network_unreachable=True 时，
+                # 上层知道这次失败与代码质量无关，可以等网络恢复再来。
+                _err = str(r.get("error") or "")
+                _net = remote.is_network_error(_err)
+                return {"ok": False,
+                        "reason": (f"远端网络不可达（等网络恢复后可重试）：{_err}" if _net
+                                   else f"远端调用失败：{_err}")[:200],
+                        "network_unreachable": _net,
+                        "attempt": attempt, "system_issues": issues}
+            _ans = r.get("answer") or ""
+            _usage = r.get("usage") or {}
+        elif _remote_failed[0]:
+            # 2026-11-09：把远端的**原始原因**带出去。
+            # 原来只写"远端调用失败（工具循环已试过）" —— 401 key 失效 / 402 欠费 /
+            # 网络不通 / 被限流 全被抹平成同一句话，人和报告都看不出该做什么。
+            _why = _remote_err[0] or "（远端没给出原因）"
+            # 2026-11-10 修复：`_remote_mod` 从未导入 → 远端调用一失败就 NameError
+            # 崩溃，把真实错误（401/402/限流）掩盖成崩溃现场（check_budget 实锤）。
+            from . import remote as _remote_mod
+            return {"ok": False,
+                    "reason": f"远端调用失败：{_why}"[:300],
+                    "remote_error": _why,
+                    "remote_fatal": bool(_remote_mod.is_fatal_remote_error(_why)),
                     "attempt": attempt, "system_issues": issues}
-        data = _parse_json(r.get("answer") or "")
-        bodies = (data or {}).get("bodies") or {}
-        helpers = (data or {}).get("helpers") or {}
+        _u = r.get("usage") or {}
+        _used = max(0, int(_u.get("completion_tokens") or 0)
+                    - int(_u.get("reasoning_tokens") or 0))          # 只看正文
+        # 2026-11-09 修：截断判定改用**硬信号** finish_reason=='length'。
+        # 原来用 `_used >= max_out*0.98` 去猜 —— 而 max_out 曾被按任务量算成 3000/1200，
+        # 于是远端正常写 3000 token 正文就被误判成"被配额截断" → 放大重试 → 白烧一轮钱
+        # → 下一轮同一份失败证据 → heal_stop。实测本轮真实夜班：
+        # `output_budget max_out=3000` 紧接 `heal_stop（失败证据与上一轮完全相同）`。
+        # 现在 max_out 恒为模型物理上限（tokens.output_budget 不再按任务量掐），
+        # 数字猜测这条路已经没意义；finish_reason 是远端自己说的，够硬。
+        _fin = str(r.get("finish_reason") or "")
+        _truncated = (_fin == "length") or (_used >= max(1, int(max_out * 0.98)))
+        if _truncated and _grew[0] < 2:
+            _grew[0] += 1
+            _old = max_out
+            max_out = min(384000, max(max_out * 4, REMOTE_OUT_FLOOR))
+            if emit:
+                emit("output_budget", {"path": path, "max_out": max_out, "grew_from": _old,
+                                       "finish_reason": _fin, "content_tokens": _used,
+                                       "why": "上一版输出顶到配额上限，判为截断而非能力问题"})
+            last = (f"上一版输出被截断（正文 {_used} token，finish_reason={_fin or 'n/a'}）。"
+                    "请**完整**输出每个函数体，不要省略、不要用「...」代替。")
+            continue
+        _ans = r.get("answer") or ""
+        data = _parse_json(_ans) or {}
+        bodies, helpers = parse_fenced_bodies(_ans)
+        if not bodies:                       # 回退：老格式（模型仍给了 JSON）
+            bodies = (data or {}).get("bodies") or {}
+        if not helpers:
+            helpers = (data or {}).get("helpers") or {}
         issues += [x for x in ((data or {}).get("system_issues") or []) if isinstance(x, dict)]
         delegated = (data or {}).get("delegate") or []
         if not isinstance(bodies, dict) or not bodies:
@@ -654,6 +1206,7 @@ def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan
                                          bodies, helpers, stub_missing=True)
         ok_syntax, why = _compile_ok(code)
         if not ok_syntax:
+            _failed_src[0] = code                # 这份没写盘，诊断时要把上下文带给远端
             # 先定位是**哪一个函数体**写坏的（窄证据）；下一轮只让它重写那一个
             blame = _blame_body(want_funcs, bodies)
             last = f"填进骨架后解析不了：{why}"
@@ -663,6 +1216,11 @@ def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan
             continue
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(code, encoding="utf-8")
+        code = _fix_imports_after_write(ws, p, emit, "bodies")
+        # §20.4 落点 3：把回复里的产物文件块写到声明的路径（模板/静态资源）。
+        # 缺了不在这里拦 —— 判据（artifact_exists）会红，反馈自动带着"文件不存在"。
+        if getattr(contract, "artifacts", None):
+            write_artifacts(ws, _ans, contract.artifacts, emit, "bodies")
         if delegated and local_model:
             try:
                 _delegate.run(ws, path, delegated, contract, local_model, emit=emit)
@@ -674,7 +1232,20 @@ def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan
             return {"ok": True, "applied": [path], "attempt": attempt, "bodies": sorted(bodies),
                     "by": r.get("by") or "", "system_issues": issues,
                     "usage": r.get("usage") or {}}
-        last = verdict["feedback"]
+        last = _maybe_diagnose(verdict["feedback"])
+        # 刚落盘的那一版就是被判红的版本 → 下一轮必须重新读盘（见循环顶部）
+        _need_refresh[0] = True
+        # **写不出来**的识别：同一份失败证据连续出现 = 远端在同一个地方反复撞墙
+        # （实测 2026-11-09：app/services/topics.py 连续 4 轮 bodies_feedback）。
+        # 这种情况下**不要再原样重试**：换路 —— 明确要求它先用工具查证真实代码/契约，
+        # 并且只改被点名的函数。机制问题（判据矛盾/上下文不足）不该被当成能力问题反复烧钱。
+        _ev_key = (last or "").strip()[:400]
+        if _ev_key and _ev_key == _prev_ev[0]:
+            _stuck[0] = True
+            if emit:
+                emit("stuck_same_evidence", {"path": path, "attempt": attempt,
+                                              "evidence": _ev_key[:160]})
+        _prev_ev[0] = _ev_key
         failed = [n for n in names if n in (last or "")]
         # 粒度阶梯（按证据自动选最细的一档）：
         #   证据定位到行 → 行级补丁（只改那几行）
@@ -703,8 +1274,52 @@ def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan
         if emit:
             emit("bodies_feedback", {"path": path, "attempt": attempt,
                                      "only": only, "evidence": (last or "")[:300]})
-    return {"ok": False, "reason": "只回函数体两次都未通过：" + (last or "")[:300],
+    # 保持下面这行 reason 的原样（台账按代码片段指纹登记，改包裹方式会让它失配）。
+    _ret = {"ok": False, "reason": "只回函数体两次都未通过：" + (last or "")[:300],
             "attempt": attempts, "system_issues": issues}
+    _ret["reason"] = _maybe_diagnose(_ret["reason"])
+    return _ret
+
+
+def _sig_last_line(lines: list[str], start: int, end: int) -> int:
+    """多行签名的最后一行（括号深度归零、且以冒号收尾）。
+
+    实测 2026-11-09：`app/models.py:303 create_topic_draft_record(` 的签名跨 7 行。
+    只取 `def` 那一条**物理行**当桩头，就把签名截断了 → 括号永不闭合 →
+    夜班连续两轮报 `第 303 行语法错误：'(' was never closed`，而 `_blame_body`
+    一个函数都点不出来（每个函数体单独都合法）→ 判成"跨函数/说不清位置"→
+    整文件重写 → 同一处再犯。全仓 52 个含函数模块里 11 个都踩这个。
+    """
+    depth = 0
+    for i in range(start, end):
+        seg = lines[i].split("#", 1)[0]          # 行尾注释里的括号不参与计数
+        depth += sum(seg.count(c) for c in "([{") - sum(seg.count(c) for c in ")]}")
+        if depth <= 0 and seg.rstrip().endswith(":"):
+            return i
+    return start
+
+
+def _doc_lines(lines: list[str], i: int, end: int) -> list[str]:
+    """从第 i 行起若是 docstring，返回**完整**那一段（可能跨多行）。
+
+    原来只留第一条以三引号开头的行：开引号留下、闭引号被丢掉，整份文件从那里起
+    全被吞进字符串（unterminated triple-quoted string literal）。
+    """
+    if i >= end:
+        return []
+    head = lines[i].strip()
+    for q in ('"""', "'''"):
+        if not head.startswith(q):
+            continue
+        if head.count(q) >= 2:                   # 单行 docstring
+            return [lines[i]]
+        k = i + 1
+        while k < end:
+            if q in lines[k]:
+                return lines[i:k + 1]
+            k += 1
+        return lines[i:end]                      # 本来就没闭合：原样带上，交给语法检查报
+    return []
 
 
 def _merge_skeleton(existing: str, funcs, only: list[str]) -> str:
@@ -725,9 +1340,9 @@ def _merge_skeleton(existing: str, funcs, only: list[str]) -> str:
     for name, start, end in blocks:
         out.extend(lines[cursor:start])
         if name in only:
-            out.append(lines[start])
-            doc = [ln for ln in lines[start + 1:end] if ln.strip().startswith('"""')][:1]
-            out.extend(doc)
+            sig_end = _sig_last_line(lines, start, end)
+            out.extend(lines[start:sig_end + 1])         # 签名可能跨多行，必须整段保留
+            out.extend(_doc_lines(lines, sig_end + 1, end))
             out.append("    raise NotImplementedError")
         else:
             out.extend(lines[start:end])
@@ -766,7 +1381,7 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
                   workingset: str = "", verify_fn=None,
                   stop_on_repeat: bool = True,
                   deadline: float | None = None,
-                  tool_loop: bool = False) -> dict:
+                  tool_loop: bool = True, tool_rounds: int = 3) -> dict:
     """让远端把**整个文件**写出来：提炼上下文 → 一次生成 → 本地验收 → 窄证据重试。
 
     max_out=0（默认）→ 按"要写的文件多大"自动算输出配额（见 tokens.output_budget）。
@@ -775,6 +1390,13 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
     deadline 是本片的时间截止点（unix 秒）：单轮 4 次自愈每次可能耗两分钟，
     只在外层 round 边界查时间会让 --slice-hours 形同虚设（实测 dev1106c）。
     """
+    # 进程级栈：一次设定，后续所有 `_stack()`（不带 ws 的几十处调用）都用它。
+    # 不设 = 恒落回 fastapi（Django 项目会补出 `router = APIRouter()` 之类）。
+    try:
+        from . import stack as _stk
+        _stk.activate(ws)
+    except Exception:                                    # noqa: BLE001
+        pass
     from . import contextpack, protocol, remote, tools
     from . import tokens as _tokens
 
@@ -795,8 +1417,14 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
             if _tokens.estimate_tokens(cand) > _tokens.estimate_tokens(want):
                 basis, want = label, cand
         stubby = not src.strip() or "raise NotImplementedError" in src
+        # 2026-11-09 修：原来这里写 `floor=3000 if stubby else 1200` ——
+        # **绕过了 REMOTE_OUT_FLOOR**。函数体路径早就改用 REMOTE_OUT_FLOOR(=4000)，
+        # 整文件路径漏了，于是整文件写作又一次被掐到 1200/3000。
+        # 实测证据（本轮真实夜班）：`output_budget max_out=3000`，远端写不完 →
+        # 判据红 → 下一轮同一失败证据 → `heal_stop（无新信息）` → 白烧一轮钱。
+        # 这正是"掐小 = 把机制问题记成模型能力问题"，按铁律必须放开。
         max_out = _tokens.output_budget(want, factor=2.0 if stubby else 1.5,
-                                        floor=3000 if stubby else 1200)
+                                        floor=REMOTE_OUT_FLOOR)
         if emit:
             emit("output_budget", {"path": path, "max_out": max_out,
                                    "est_tokens": _tokens.estimate_tokens(want),
@@ -833,34 +1461,56 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
     ctx = _layout.render(chunks)
     if emit:
         emit("context_layout", _layout.audit(chunks))
-    # 把**当前文件的全文**也给作者（限长）：只给"焦点符号源码"会让它看不见 import 区
-    # 与模块级接线，于是每轮都从头重写、顺手丢东西（实测 2026-11-07 振荡 6 轮）。
+    # §8.5 读取策略 + 写前必读门禁：**没给过全文，就不许整篇重写**。
+    # 旧行为是"文件超过 12000 字符就静默不注入"，模型照样整篇重写 —— 等于蒙着眼睛改，
+    # 改坏已验收函数是必然结果。现在读取档位由 `core/readplan.py` 决定，并且把
+    # "看没看过全文"变成显式状态：超长只给头尾，同时**禁止**整篇重写（只收补丁）。
+    from . import readplan as _rp
+    READ_CHARS = REMOTE_CTX_CHARS
+    _cur_txt = ""
     try:
         _cur = Path(ws) / path
         if _cur.is_file():
-            _txt = _cur.read_text(encoding="utf-8", errors="replace")
-            if _txt.strip() and len(_txt) <= 12000:
-                ctx += ("\n\n# 当前文件内容（在它基础上**增量修改**：保留已有 import、"
-                        "已有函数、已有路由，别整篇重写）\n```python\n"
-                        + _txt.rstrip() + "\n```\n")
+            _cur_txt = _cur.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        pass
-    req_block = ("【实现方案（必须照它做）】\n" + _tokens.cut(model_plan.strip(), 2500)) if model_plan else ""
+        _cur_txt = ""
+    _rplan = _rp.plan("edit_existing" if _cur_txt.strip() else "new_module", target=path)
+    _got = _rp.collect(ws, _rplan, budget_chars=READ_CHARS)
+    if _got.get("text"):
+        ctx += "\n\n" + _got["text"]
+    read_ok = True if not _cur_txt.strip() else bool(_got.get("full"))
+    if emit:
+        emit("read_gate", {"path": path, "chars": len(_cur_txt), "read_ok": read_ok,
+                           "mode": "full" if read_ok else "head_tail",
+                           "tiers": _rplan["tiers"]})
+    req_block = ("【实现方案（必须照它做）】\n" + _tokens.cut(model_plan.strip(), REMOTE_TEXT_CHARS)) if model_plan else ""
     if workingset:
         req_block = (req_block + "\n\n" + workingset).strip()
     prompt = AUTHOR_PROMPT.format(protocol=protocol.render("files"), context=ctx,
                                   requirements=req_block)
+    # §20.4 落点 3：契约声明了产物文件 → 提示词带上清单与交回格式
+    _arts_m = list(getattr(contract, "artifacts", None) or [])
+    if _arts_m:
+        try:
+            from . import contract as _cm_am
+            prompt += "\n\n" + _cm_am.artifacts_prompt(_arts_m)
+        except Exception:                                # noqa: BLE001
+            pass
     # §13.4 第 3 步：开启工具循环时，把只读工具说明追加给远端（它可发 <tool> 调用）
     if tool_loop:
         try:
             from . import remotetools as _rtl
-            prompt = prompt + "\n\n" + _rtl.tool_loop_guide()
+            # read_ok=True 表示目标文件**全文已注入**（read_gate 拿全了）——
+            # 这时额外告诉它"别再调工具重读同一份内容"：实测每一轮工具调用
+            # 都是一次带完整上下文的付费请求，白读一遍等于把调用量放大 3~4 倍。
+            prompt = prompt + "\n\n" + _rtl.tool_loop_guide(context_complete=bool(read_ok))
         except Exception:                        # noqa: BLE001
             pass
     last = evidence
     issues: list[dict] = []
     _seen_evidence: set[str] = set()                # 已用过的失败证据（防止同证据反复刺激）
     grew = 0                                        # 因为"被截断"而放大配额的次数（最多 2 次）
+    _tool_fin = ""                                # 2026-11-09：工具循环的 finish_reason（截断判定硬信号）
     # 配额放大跨调用要**记住**：以前每次调 author_module 都从 3000 重算，于是同一个模块
     # 每轮都先被截断一次、白烧一次调用（实测 search-index 连输三次）。放大值通过返回值
     # max_out 交给调用方保存（见 company._author_round 的 rec["max_out"]）。
@@ -882,7 +1532,15 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
         # 同一个失败证据再问一遍只会白烧钱（远端看到完全相同的输入，答案大概率也一样）。
         # 自愈轮数放开后这条更关键：它把"反复刺激"限制在"每轮都有新信息"的前提下。
         _ev = (last or "").strip()
-        if attempt > 1 and stop_on_repeat and _ev and _ev in _seen_evidence:
+        # 2026-11-09（用户反馈：「突然断网然后网络恢复的情况下远端调用没用恢复」）：
+        # 断网时**每一轮的失败证据都一样**（都是"网络不可达"）→ 撞上下面这条
+        # "同一份证据再问一遍只会白烧钱"的早停 → 第二轮就 heal_stop，
+        # **网络恢复了也没机会再跑**。
+        # 现在：网络类失败**不走早停**（那不是"没有新信息"，是"根本没能问"），
+        # 并且把它标成 network_unreachable，让上层知道这次失败与代码质量无关。
+        _ev_is_net = remote.is_network_error(_ev)
+        if (attempt > 1 and stop_on_repeat and _ev and _ev in _seen_evidence
+                and not _ev_is_net):
             issues.append({"where": "author", "issue": f"连续两轮失败证据完全相同，提前停止自愈（{path}）",
                            "suggest": "让判据给出更具体的差异（行号/期望值），否则远端没有新信息可用"})
             if emit:
@@ -891,13 +1549,86 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
             break
         _seen_evidence.add(_ev)
         body = prompt if attempt == 1 else (
-            prompt + "\n\n【上一版被机械判据判红，必须改掉】\n" + _tokens.cut(last or "", 1500))
-        r = remote.complete(body, task_id=task_id or "author", node_id=f"author:{path}",
-                            workspace=str(ws), emit=emit, step_index=step_index,
-                            json_mode=False, max_out=max_out)
-        if not r.get("ok"):
-            return {"ok": False, "reason": f"远端调用失败：{r.get('error')}"[:200],
+            prompt + "\n\n【上一版被机械判据判红，必须改掉】\n" + _tokens.cut(last or "", REMOTE_TEXT_CHARS))
+        # 整文件路径**真的跑工具循环**（原生 function calling）：原来只是把工具说明
+        # 追加进 prompt，从不解析/执行/回灌 —— 远端看得见"有工具"，却一个都调不到。
+        # 夜班「整文件模式两版都未通过」29 次就在这条路上（实测 2026-11-09）。
+        _ans = ""
+        _usage: dict = {}
+        _remote_failed = [False]
+        _remote_err = [""]        # 远端失败的**原始原因**（不丢信息）
+        if tool_loop:
+            try:
+                from . import remotetools as _rtl
+
+                def _fc(_instr: str, messages: list, _tools=None) -> dict:
+                    nonlocal _usage
+                    rr = remote.complete(_instr, task_id=task_id or "author",
+                                        node_id=f"author:{path}", workspace=str(ws),
+                                        emit=emit, step_index=step_index,
+                                        json_mode=False, max_out=max_out,
+                                        messages=messages, tools=_tools)
+                    if isinstance(rr, dict):
+                        _usage = rr.get("usage") or {}
+                        if not rr.get("ok"):
+                            _remote_failed[0] = True
+                            _remote_err[0] = str(rr.get("error") or "")[:200]
+                        return {"answer": rr.get("answer") or "",
+                                "tool_calls": list(rr.get("tool_calls") or []),
+                                "message": rr.get("message") or {},
+                                # 2026-11-09：finish_reason 必须透传（截断判定的硬信号）
+                                "finish_reason": str(rr.get("finish_reason") or ""),
+                                # 2026-11-10：error 也要透传（判"模型不支持 tools"→换通路）
+                                "error": str(rr.get("error") or "")[:300]}
+                    return {"answer": "", "tool_calls": [], "message": {},
+                            "finish_reason": "", "error": ""}
+
+                from . import capability as _cap1
+                _mode1, _model1, _compat1 = _cap1.current_tool_mode()
+                _lp = _rtl.ToolLoop(ws, max_rounds=tool_rounds, emit=emit, complete_fn=_fc,
+                                    max_out=max_out, tool_mode=_mode1,
+                                    model=_model1, compat=_compat1)
+                _lr = _lp.run(body)
+                _ans = str(_lr.get("answer") or "")
+                _tool_fin = str(_lr.get("finish_reason") or "")
+                if emit:
+                    emit("author_tools", {"path": path, "rounds": _lr.get("rounds"),
+                                          "tools": len(_lr.get("tool_calls") or []),
+                                          "denied": len(_lr.get("denied") or [])})
+            except Exception as exc:                        # noqa: BLE001
+                if emit:
+                    emit("notice", {"message": f"整文件工具循环跳过：{type(exc).__name__}"})
+                _ans = ""
+        if not _ans and not _remote_failed[0]:
+            r = remote.complete(body, task_id=task_id or "author", node_id=f"author:{path}",
+                                workspace=str(ws), emit=emit, step_index=step_index,
+                                json_mode=False, max_out=max_out)
+            if not r.get("ok"):
+                _err = str(r.get("error") or "")
+                _net = remote.is_network_error(_err)
+                return {"ok": False,
+                        "reason": (f"远端网络不可达（等网络恢复后可重试）：{_err}" if _net
+                                   else f"远端调用失败：{_err}")[:200],
+                        "network_unreachable": _net,
+                        "by": "", "attempt": attempt, "system_issues": issues, "max_out": max_out}
+            _ans = r.get("answer") or ""
+            _usage = r.get("usage") or {}
+        elif _remote_failed[0]:
+            _why = _remote_err[0] or "（远端没给出原因）"
+            # 2026-11-10：整文件路径也必须带 network_unreachable ——
+            # 函数体路径早就有，缺了它 company 层就分不清"断网"和"远端答错"，
+            # 于是网络一抖就把每个模块都判一次失败、整轮 0 产出。
+            _net = remote.is_network_error(_why)
+            return {"ok": False,
+                    "reason": (f"远端网络不可达（等网络恢复后可重试）：{_why}" if _net
+                               else f"远端调用失败：{_why}")[:300],
+                    "network_unreachable": _net,
+                    "remote_error": _why,
+                    "remote_fatal": bool(remote.is_fatal_remote_error(_why)),
                     "by": "", "attempt": attempt, "system_issues": issues, "max_out": max_out}
+        r = {"answer": _ans, "usage": _usage, "ok": True, "by": "",
+             # 2026-11-09：工具循环的 finish_reason 也要传下去（截断判定的硬信号）
+             "finish_reason": _tool_fin}
         # 被配额截断 ≠ 模型不会写：**正文**顶到 max_out 才说明配额太小，放大重试一次。
         # 实测教训（night-v2a）：10/11 次调用恰好停在 1200，全被判成"没给出 files"。
         #
@@ -910,17 +1641,24 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
         used_all = int(_u.get("completion_tokens") or 0)
         used_reason = int(_u.get("reasoning_tokens") or 0)
         used = max(0, used_all - used_reason)          # 只看正文
-        if used >= max(1, int(max_out * 0.98)) and grew < 2:
+        # 2026-11-09 修：改用硬信号 finish_reason=='length'（见函数体路径的同一处说明）。
+        # 数字猜测（used >= max_out*0.98）会把"正常写完"误判成"被截断"，
+        # 代价是放大重试、白烧一次调用，还给模型一句错误的提示。
+        _fin = str(r.get("finish_reason") or "")
+        _truncated = (_fin == "length") or (used >= max(1, int(max_out * 0.98)))
+        if _truncated and grew < 2:
             grew += 1
             old = max_out
-            max_out = min(384000, max(max_out * 4, 3000))
+            max_out = min(384000, max(max_out * 4, REMOTE_OUT_FLOOR))
             if emit:
                 emit("output_budget", {"path": path, "max_out": max_out, "grew_from": old,
+                                       "finish_reason": _fin, "content_tokens": used,
                                        "why": "上一版输出顶到配额上限，判为截断而非能力问题"})
-            last = (f"上一版输出被截断（{used} token 就顶到配额 {old}）。"
+            last = (f"上一版输出被截断（正文 {used} token，finish_reason={_fin or 'n/a'}）。"
                     "请只输出完整 JSON（不要解释、不要省略），必要时删掉非必要注释。")
             continue
         files, got_issues, delegated = _parse_reply(r.get("answer") or "")
+        _whole = bool(files)          # 直接给 files = 整篇重写；补丁/片段合并不算
         issues += got_issues
         _patch_err = ""
         if not files:
@@ -964,6 +1702,7 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
                                                  "names": sorted(_toplevel_names(_fb))[:4]})
                 else:
                     files = [{"path": path, "content": _fb}]
+                    _whole = True
                     if emit:
                         emit("author_fenced", {"path": path, "chars": len(_fb)})
         if not files:
@@ -975,6 +1714,14 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
         if not ok_syntax:
             last = f"生成的代码解析不了：{why}"
             continue
+        # §8.5 硬门禁：没给过全文就不许整篇重写（只收补丁）
+        if _whole and not read_ok:
+            last = ("这个文件超过全文注入上限，本轮你只看到头尾 —— **不许整篇重写**。"
+                    "请用 patches（find 逐字复制你确实看到的旧代码）改；"
+                    "只改你看得见的那几段，看不到的部分不要动。")
+            if emit:
+                emit("read_gate_block", {"path": path, "chars": len(_cur_txt)})
+            continue
         p.parent.mkdir(parents=True, exist_ok=True)
         # 写回前先确认"没把已实现的函数删掉"：删了就打回，不落盘。
         try:
@@ -983,13 +1730,46 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
             _old = ""
         _gone = _deleted_symbols(_old, content)
         if _gone:
-            last = ("你把已实现的函数删掉了：%s。整文件重写不许删已有函数 —— "
-                    "保留它们，只在里面补新功能。" % "、".join(_gone[:6]))
-            if emit:
-                emit("author_regress", {"path": path, "deleted": _gone[:6]})
-            continue
+            # 打回重试是**最贵且最没用**的做法：模型下一轮大概率还是给一份"按契约写的
+            # 干净文件"，同样缺这些函数 → 同一指纹重试到停机（实测 2026-11-07：da.py
+            # 连续多轮 author_fenced → author_regress，一个字都没往前挪）。
+            # 缺哪些函数是**确定性信息**，引擎自己就能补：按旧实现原样接回新文件。
+            _merged_gone = _restore_symbols(_old, content, _gone)
+            if _merged_gone:
+                content = _merged_gone
+                if emit:
+                    emit("author_gone_restored", {"path": path, "funcs": _gone[:6],
+                                                  "chars": len(content)})
+            else:
+                last = ("你把已实现的函数删掉了：%s。整文件重写不许删已有函数 —— "
+                        "保留它们，只在里面补新功能。" % "、".join(_gone[:6]))
+                if emit:
+                    emit("author_regress", {"path": path, "deleted": _gone[:6]})
+                continue
         p.write_text(content, encoding="utf-8")
         _ensure_packages(ws, path)          # 嵌套模块要有包结构才 import 得动
+        content = _fix_imports_after_write(ws, p, emit, "module")
+        # 作者用了 `@router.xxx` 却没写 `router = APIRouter()` → 补一行样板。
+        # **必须在落盘后立刻补**：不然接下来的 import_smoke 会报
+        # `NameError: name 'router' is not defined`，远端为这一行样板返工好几轮
+        # （实测 2026-11-10：attempt=1/2/3 全在改这件事，最后整轮接线还回滚了 32 个文件）。
+        try:
+            from . import auto as _auto_mod
+            _src2 = p.read_text(encoding="utf-8-sig", errors="replace")
+            _src2, _rfix = _auto_mod._ensure_router_decl(_src2)
+            if _rfix:
+                p.write_text(_src2, encoding="utf-8")
+                if emit:
+                    emit("author_router_decl", {
+                        "path": path,
+                        "note": "作者用了 @router 但没定义 router → 引擎补 router = APIRouter()"})
+        except Exception as exc:                         # noqa: BLE001
+            if emit:
+                emit("notice", {"message": f"router 声明修补跳过：{type(exc).__name__}"})
+        # §20.4 落点 3：把回复里的产物文件块写到声明的路径（模板/静态资源）。
+        # 缺了不在这里拦 —— 判据（artifact_exists）会红，反馈自动带着"文件不存在"。
+        if getattr(contract, "artifacts", None):
+            write_artifacts(ws, r.get("answer") or "", contract.artifacts, emit, "module")
         # 委托：远端把机械输出交给本地模型（省远端输出）。委托失败要打回给远端。
         deleg_report = {"done": [], "failed": []}
         if delegated and local_model:
@@ -1035,8 +1815,13 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
 
 def author_modules(ws: Path, paths: list[str], contracts: dict, model_plan: str = "",
                    step_index: int = 0, task_id: str = "", emit=None,
-                   parallel: int = 3) -> dict:
-    """多模块并行写：并行写、串行验（验收顺序由调用方统一做）。"""
+                   parallel: int = 3, local_model: str = "") -> dict:
+    """多模块并行写：并行写、串行验（验收顺序由调用方统一做）。
+
+    `local_model` 曾经被函数体用了、却没在签名里（2026-11-15 静态检查发现）——
+    后果是**空项目 scratch 生成一调用就 NameError**（`fullgen` 三层生成走这里），
+    而它被包在 try 里，只留一条 "层 models 生成跳过" 的 notice，看起来像"没生成"。
+    """
     results: dict[str, dict] = {}
     if not paths:
         return {"ok": True, "results": {}}
@@ -1081,12 +1866,18 @@ def _verify(ws: Path, contracts: dict, scope: list[str] | None = None) -> dict:
     for path, st in state.items():
         for f in (st.get("hard_failed") or []):
             bad.append(f"{path}::{f}")
-        for msg in (st.get("fails") or [])[:2]:
+        for msg in (st.get("fails_all") or st.get("fails") or []):
             t = str(msg)
             if t not in bad:
                 bad.append(t)
     if bad:
-        return {"ok": False, "feedback": "；".join(bad[:6])[:1200]}
+        # 判据反馈是远端**唯一的失败真相**：不掐条数、不掐字数。
+        # 原来只给前 6 条、共 1200 字符 → 远端看不到真正的失败原因，
+        # 只能重写两遍（实测 29 次"整文件模式两版都未通过"就是这么来的）。
+        _fb = "；".join(bad)
+        if REMOTE_FEEDBACK_CHARS:
+            _fb = _fb[:REMOTE_FEEDBACK_CHARS]
+        return {"ok": False, "feedback": _fb}
     return {"ok": True, "feedback": ""}
 
 
@@ -1105,3 +1896,26 @@ def save_issues(ws: Path, issues: list[dict]) -> int:
             f.write(json.dumps(it, ensure_ascii=False) + "\n")
             n += 1
     return n
+
+# ── 成本归因（2026-11-15）────────────────────────────────────────────────
+# 为什么用"末尾包一层"而不是在每个函数体里手动 with：
+# 这两个函数上千行、多个 return，手动加 with 要整体重排缩进（改动面巨大、易错）。
+# 装饰器只多一层调用，`__wrapped__` 保留，自检/回溯看到的仍是原函数。
+def _attributed(fn):
+    import functools
+
+    @functools.wraps(fn)
+    def _wrap(ws, path, *args, **kwargs):
+        try:
+            from . import attribution as _at
+            _ctx = _at.unit(module=str(path), phase=fn.__name__)
+        except Exception:                                # noqa: BLE001
+            return fn(ws, path, *args, **kwargs)
+        with _ctx:
+            return fn(ws, path, *args, **kwargs)
+
+    return _wrap
+
+
+author_module = _attributed(author_module)
+author_bodies = _attributed(author_bodies)

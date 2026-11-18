@@ -94,15 +94,63 @@ def main() -> int:
 
     print("[8] 已接进夜班循环")
     comp = (Path(__file__).resolve().parents[1] / "core" / "company.py").read_text(encoding="utf-8")
-    check("每轮记指纹", "_osc.fingerprint(state)" in comp)
+    # 2026-11-10：指纹现在**带端到端能力状态**（cap_cov）——
+    # 只看契约判据时，契约全过 → 指纹恒定 → 每轮都被判"振荡"收工（假振荡，白跑）。
+    check("每轮记指纹", "_osc.fingerprint(state" in comp)
+    check("指纹带端到端能力状态（契约全过时不误判振荡）",
+          "_osc.fingerprint(state, cap_cov)" in comp)
+    osrc = (Path(__file__).resolve().parents[1] / "core" / "oscillation.py").read_text(encoding="utf-8")
+    check("fingerprint 支持 cap_cov", "cap_cov" in osrc and "cap_red=" in osrc)
+    # 行为级：契约状态相同、端到端不同 → 指纹必须不同
+    _st = {"app/a.py": {"verified": 3, "funcs": 3, "hard_failed": [], "stubs": [], "untested": []}}
+    _c1 = {"caps": {"x": {"status": "done"}, "y": {"status": "absent"}}}
+    _c2 = {"caps": {"x": {"status": "done"}, "y": {"status": "done"}}}
+    check("端到端状态不同 → 指纹不同（不误判振荡）",
+          osc.fingerprint(_st, _c1) != osc.fingerprint(_st, _c2))
+    check("端到端状态相同 → 指纹相同（真振荡仍能识别）",
+          osc.fingerprint(_st, _c1) == osc.fingerprint(_st, dict(_c1)))
     check("振荡后换打法或收工", "detect到振荡" in comp or "检测到振荡" in comp, )
     check("交付报告写振荡摘要", "oscillation" in comp and "未检测到振荡" in comp)
+
+    # 处置入口：换打法**必须在本轮就干活**，且清空决策/写次数预算。
+    # 旧实现 switch 后 continue → 五轮零 author_start 的空转（2026-11-07 实测）。
+    dec = {"a.py": {"rewrite_module": 1}}
+    wu = {"a.py": {"total": 3, "tiers": {1: 2}}}
+    mode, v = osc.act({"oscillating": True}, {"action": "switch_strategy"},
+                      1, 5, dec_used=dec, write_used=wu)
+    check("换打法是 work 而不是跳过", mode == "work", f"{mode},{v}")
+    check("策略下标前进一步", v == 2, str(v))
+    check("决策预算被清空", dec == {}, str(dec))
+    check("写次数预算被清空", wu == {}, str(wu))
+    mode2, why2 = osc.act({"oscillating": True}, {"action": "stop"}, 4, 5, dec_used=dec)
+    check("打法用完才 stop", mode2 == "stop" and isinstance(why2, str), f"{mode2},{why2}")
+    mode3, v3 = osc.act({"oscillating": True}, {"action": "switch_strategy"}, 4, 5)
+    check("已是最后一档不越界", mode3 == "work" and v3 == 4, f"{mode3},{v3}")
+
+    print("[N] 地基保护：被依赖的主干不许自动降级")
+    from core import blueprint as _bpo, replan as _rp
+    _b = _bpo.Blueprint(goal="g")
+    _b.add(_bpo.Cap(id="cap.base", desc="x", funcs_est=1, probe={}))
+    _b.add(_bpo.Cap(id="cap.down1", desc="x", funcs_est=1, probe={}, deps=["cap.base"]))
+    _b.add(_bpo.Cap(id="cap.down2", desc="x", funcs_est=1, probe={}, deps=["cap.base"]))
+    _b.add(_bpo.Cap(id="cap.orphan", desc="x", funcs_est=1, probe={}))
+    _got = _rp.apply_fails(_b, {"cap.base": 3, "cap.orphan": 3})
+    check("地基没被降级", _b.by_id("cap.base").status != "descoped",
+          _b.by_id("cap.base").status)
+    check("孤儿仍可降级（保住原行为）",
+          _b.by_id("cap.orphan").status == "descoped",
+          _b.by_id("cap.orphan").status)
+    check("地基原因写清楚了", "地基" in str(_b.by_id("cap.base").why),
+          str(_b.by_id("cap.base").why)[:80])
+    check("返回列表只含孤儿", _got == ["cap.orphan"], str(_got))
+    check("notes 留痕", any("地基保护" in n for n in _b.notes), str(_b.notes))
 
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")
         return 1
-    print("全部通过（A→B→A 抓得住 / 单向推进不误报 / 原地踏步即报 / 换打法或收工 / 可持久化）")
+    print("全部通过（A→B→A 抓得住 / 单向推进不误报 / 原地踏步即报 / "
+          "换打法必干活 / 可持久化）")
     return 0
 
 

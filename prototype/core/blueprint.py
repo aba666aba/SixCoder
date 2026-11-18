@@ -85,10 +85,19 @@ class Cap:
     @classmethod
     def from_dict(cls, raw: dict) -> "Cap":
         p = raw.get("probe")
+        probe = dict(p) if isinstance(p, dict) else {}
+        # **探针种类的字段名有两种写法**：`kind` 与 `type`（2026-11-15 实测：
+        # 补能力那一步 7 条全写 `"type": "http"` → `kind` 空 → validate 判
+        # "探针种类 (空) 没有执行器" → 整张蓝图致命。模型两种都写，入口统一。）
+        if probe and not probe.get("kind"):
+            for alias in ("type", "probe_kind", "mode"):
+                if probe.get(alias):
+                    probe["kind"] = str(probe[alias]).strip().lower()
+                    break
         return cls(
             id=str(raw.get("id") or "").strip(),
             desc=str(raw.get("desc") or "").strip(),
-            probe=dict(p) if isinstance(p, dict) else {},
+            probe=probe,
             deps=[str(x).strip() for x in (raw.get("deps") or []) if str(x).strip()],
             funcs_est=int(raw.get("funcs_est") or 0),
             modules=[str(x).strip() for x in (raw.get("modules") or []) if str(x).strip()],
@@ -384,6 +393,130 @@ def _subsystem_cycle(subs: list[Subsystem]) -> list[str] | None:
     return None
 
 
+_PATH_NOISE = {"api", "rest", "internal"}
+
+
+def _pick_module(ws, seg: str) -> str:
+    """资源段 → 落点模块。有 ws 就按**实际存在的文件**选，没有就按 FastAPI 主流布局猜。
+
+    为什么改成按实际文件选（实测 2026-11-08）：这个项目所有路由都在 `app/api/` 下，
+    而旧口径产出 `app/topics.py`（文件不存在）→ 路由无处可挂、能力全 404。
+    反过来如果把 `app/api/` 写死，扁平布局（`app/topics.py`）的项目又会全错。
+    只有查文件系统才知道。
+    """
+    seg = str(seg or "").lower()
+    if not re.fullmatch(r"[a-z_]+", seg):
+        return "app/web.py"
+    cands = [f"app/api/{seg}.py", f"app/{seg}.py"]
+    if ws is not None:
+        for m in cands:
+            try:
+                if (Path(str(ws)) / m).is_file():
+                    return m
+            except OSError:
+                break
+        return cands[0]
+    return cands[0]
+
+
+def _singular(word: str) -> str:
+    """资源名归一：topics→topic、majors→major、preferences→preference。
+
+    只做去复数，不做词形学。够用即可：外键字段名（topic_id）本身就是单数，
+    两边归一后能对齐就够了，比引第三方词形库稳。
+    """
+    w = str(word or "").lower().strip()
+    if len(w) > 4 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 4 and (w.endswith("ses") or w.endswith("xes") or w.endswith("ches")):
+        return w[:-2]
+    # `ss/us/is` 结尾不是复数：status→statu、analysis→analysi 会把资源名弄坏，
+    # 而资源名一坏，外键就永远对不上（且静默：只是少一条边，不报错）
+    if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+        return w[:-1]
+    return w
+
+
+def _resource_segs(path: str) -> tuple[list[str], bool]:
+    """路径 → (资源段列表, 是否含参数段)。`/api/v1/org/majors` → (['org','majors'], False)。"""
+    import re as _re
+    raw = [x for x in str(path or "").strip("/").split("/") if x]
+    has_param = any(x.startswith("{") or x.startswith("$") for x in raw)
+    segs = [x for x in raw
+            if not x.startswith("{") and not x.startswith("$")
+            and x.lower() not in _PATH_NOISE
+            and not _re.fullmatch(r"v\d+", x.lower())]
+    return segs, has_param
+
+
+def derive_fk_deps(bp: Blueprint) -> int:
+    """按**外键**补依赖：谁提供了这个资源，谁就是我的前置。
+
+    为什么必须补（2026-11-08 实测）：蓝图 76 条能力里只有 20 条有 deps，而且全是从
+    "上一步响应的字段被下一步用到"推出来的**数据流**依赖。结果 56 条是孤儿节点，
+    拓扑序退化成 cap 顺序 —— 切片先做填空题式的细节能力，主干（发题→填报→匹配→结果）
+    反而排在后面，跑了一天连一条能走通的主干都没有。
+
+    外键是**结构依赖**，比数据流更本质，而且完全机械可得：
+      · 路径占位符 `{batch_id}` → 我操作的对象由 batches 提供
+      · 请求体字段 `topic_id`   → 我引用的实体由 topics 提供
+    资源提供者 = 不含参数段的集合端点（`POST /api/v1/batches`），
+    不是操作端点（`POST /api/v1/batches/{id}/run` 末段是动作，不能当提供者）。
+
+    例：`POST /preferences {topic_id}` → 依赖 `POST /topics`；
+        `POST /batches/{batch_id}/run` → 依赖 `POST /batches`；
+        `POST /org/majors {college_id}` → 依赖 `POST /org/colleges`。
+    这样依赖图长出真正的树，切片才能"先地基后承重"。
+    """
+    import re as _re
+    providers: dict[str, str] = {}
+    for c in bp.caps:
+        pr = c.probe or {}
+        if str(pr.get("kind") or "") != "http":
+            continue
+        for st in (pr.get("steps") or []):
+            st = st or {}
+            if str(st.get("method") or "GET").upper() not in ("POST", "PUT"):
+                continue
+            # 负向用例不提供资源：`cap.auth.forbidden_role` 的链里也有 `POST /topics`
+            # （期望 403），按 setdefault 先到先得会把真正的发题能力挤掉，
+            # 于是"填报志愿"被连到"越权发题"上（实测 2026-11-08）。
+            _stt = st.get("expect_status")
+            if isinstance(_stt, int) and _stt >= 400:
+                continue
+            if isinstance(_stt, list) and _stt and all(
+                    isinstance(x, int) and x >= 400 for x in _stt):
+                continue
+            segs, has_param = _resource_segs(st.get("path") or "")
+            if not segs or has_param:
+                continue                      # 操作端点不是资源提供者
+            providers.setdefault(_singular(segs[-1]), c.id)
+
+    added = 0
+    for c in bp.caps:
+        pr = c.probe or {}
+        if str(pr.get("kind") or "") != "http":
+            continue
+        fks: set[str] = set()
+        for st in (pr.get("steps") or []):
+            st = st or {}
+            for a, b in _re.findall(r"\{(\w+)\}|\$\{(\w+)\}", str(st.get("path") or "")):
+                name = a or b
+                if name.endswith("_id"):
+                    fks.add(_singular(name[:-3]))
+            body = st.get("json")
+            if isinstance(body, dict):
+                for k in body:
+                    if str(k).endswith("_id"):
+                        fks.add(_singular(str(k)[:-3]))
+        for fk in sorted(fks):
+            pid = providers.get(fk)
+            if pid and pid != c.id and pid not in c.deps:
+                c.deps.append(pid)
+                added += 1
+    return added
+
+
 def split_subsystems(bp: Blueprint, *, max_caps: int = SUBSYS_MAX_CAPS) -> list[Subsystem]:
     """能力表 → 子系统 DAG（确定性，同输入同输出）。返回分组并写回 bp.subsystems。
 
@@ -561,6 +694,47 @@ def fit_budget(bp: Blueprint, *, tolerance: float = 0.10) -> list[str]:
 
 # ---------------------------------------------------------------- 远端两跳
 
+def web_rules(stack_name: str = "fastapi") -> str:
+    """Web 项目的能力表怎么写 —— **按栈给落点与探针约定**（2026-11-15）。
+
+    为什么必须分栈（实锤）：旧提示词把 `app.main:app` 与 `app/main.py` 写死，
+    于是 Django 仓库（`config/` + `apps/<域>/`）上推导出来的 84 条能力**落点全是 `app/*`**
+    → 引擎按 `apps/**/*.py` 扫候选 → 一个都找不到 → 端点全 404；
+    更糟的是它会**重建 `app/` 目录**，与现有 Django 结构打架。
+    """
+    name = str(stack_name or "").lower()
+    if name == "django":
+        return """1. `app` 全表固定写同一个：`config.asgi:application`
+   （产物必须在 `config/asgi.py` 暴露名为 `application` 的 ASGI 应用）。
+2. **落点（modules）只能在这三处**，写别的地方都接不上：
+   · `apps/<域>/views.py` —— 业务函数（一条能力 3~8 个函数）
+   · `apps/<域>/urls.py` —— 路由（由引擎渲染，能力里**不要**要求"实现路由"）
+   · `apps/<域>/models.py` 已存在，**不要**在能力里重复建表；数据层改动才写这里
+   · `matching_core/<模块>.py` —— 纯算法（已存在 DA / blocking / metrics / teacher_prefs）
+   · `services/rules-engine/` —— Drools 的 DRL 与 Java（已存在 11 条规则）
+   **禁止**出现 `app/` 前缀（那是迁移前的旧结构，已挪到 `_legacy_app/`）。
+3. path 一律**带尾斜杠**（`config/urls.py` 里 include 的前缀都是 `/api/v1/xxx/` 形式）：
+   `/api/v1/topics/`、`/api/v1/topics/1/`。唯一例外 `/api/v1/health`（无尾斜杠，已存在）。
+4. 一条能力 = 一条**自包含**的请求链。需要登录态的，在同一条 steps 里先 POST 建用户、
+   再 POST 登录，用 `"save": {"token": "token"}` 配 `Authorization: Bearer ${token}` 传递；
+   **不许依赖别的能力留下的数据**（每条能力独立进程跑，不保证顺序）。
+5. 判据必须确定：`expect_status` + `expect_json`（值写死，不许 "any"/"*"）。
+   列表判不了全量时，改判总数或某一条的具体字段。
+6. 错误路径单列能力：未授权 401、参数非法 400/422、资源不存在 404。
+7. 页面能力用 `body_has`（如 `["<title", "选题"]`）判服务端渲染真的挂了什么；
+   ECharts 这类前端图表，判**数据接口**（JSON）+ 页面里有容器（`body_has`），
+   不要判"图表画出来了"（无浏览器观测手段）。"""
+
+    return """1. `app` 全表固定写同一个：`app.main:app`（产物必须在该位置暴露名为 `app` 的 ASGI 应用）。
+2. 一条能力 = 一条**自包含**的请求链。需要登录态的，在同一条 steps 里先 register 再 login，
+   用 `"save": {"token": "token"}` 配 `${token}` 传递；**不许依赖别的能力留下的数据**。
+3. 判据必须确定：`expect_status` + `expect_json`（值要写死，不许 "any"/"*"）。
+4. 错误路径要单列能力：未授权 401、参数非法 422、资源不存在 404。
+5. 前端：用 `{"kind":"http","app":"app.main:app","method":"GET","path":"/",
+   "body_has":["<title 里的字>","登录"]}` 判页面真的挂了什么。
+6. modules 要写清分层（如 app/main.py、app/auth.py、app/models.py），一条能力 3~8 个函数。"""
+
+
 DERIVE_PROMPT = """你是软件架构师。把下面这一句**目标**变成一张"能力表"，只输出 JSON。
 
 【什么叫一条能力】
@@ -607,20 +781,11 @@ DERIVE_PROMPT = """你是软件架构师。把下面这一句**目标**变成一
 - modules：大致落在哪些文件（可以空）
 
 【Web / HTTP 项目（看到就照做，这条优先级最高）】
-目标里只要出现 Web、网站、页面、前端、HTTP、REST、API、接口、服务、uvicorn、FastAPI、
-Flask、Django、登录页、看板 等字样，就**一律用 http 探针，不许用 cli 探针**
-（"python main.py register" 对 Web 服务毫无意义，会把整个项目做歪）。规则：
-1. `app` 全表固定写同一个：`app.main:app`（产物必须在这个位置暴露名为 `app` 的 ASGI 应用）。
-2. 一条能力 = 一条**自包含**的请求链。需要登录态的，就在同一条 steps 里先 register 再 login，
-   用 `"save": {"token": "token"}` 配 `${token}` 传递；**不许依赖别的能力留下的数据**
-   （每条能力在独立进程里跑，进程之间不共享内存，也不保证顺序）。
-3. 判据必须确定：`expect_status` + `expect_json`（值要写死，不许写 "any"/"*"）。
-   列表型响应判不了全量时，改判总数/某一条的具体字段，或换成一条按 id 查询的能力。
-4. 错误路径要单列能力：未授权 401、参数非法 422、资源不存在 404。
-5. 前端：用 `{"kind":"http","app":"app.main:app","method":"GET","path":"/",
-   "body_has":["<title 里的字>","登录"]}` 判页面真的挂了什么。
-6. modules 要写清分层（如 app/main.py、app/auth.py、app/models.py、app/schemas.py），
-   一条能力 3~8 个函数，别把全部路由塞进 main.py。
+目标里只要出现 Web、网站、页面、前端、HTTP、REST、API、接口、服务、Django、
+登录、看板 等字样，就**一律用 http 探针，不许用 cli 探针**。
+**具体写法由技术栈决定 —— 严格照下面这段，写错落点等于整张表作废**：
+
+@WEB_RULES@
 
 【硬要求】
 1. 每条都必须能**独立观测**：不许出现"写完 A 才能观测 B，但 A 本身观测不到"的链条。
@@ -880,6 +1045,23 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
     if not caps:
         return 0
     reg, login = _cap_for(caps, "/register"), _cap_for(caps, "/login")
+
+    _dep_hits = [0]
+
+    def _dep(cap_obj, dep_cap) -> None:
+        """前置步骤用到谁，就必须依赖谁。
+
+        实测 2026-11-09：`cap.topic.create_draft` 的链第 1 步是 `POST /auth/login`，
+        而 `cap.auth.login_token` 自己还是 absent（auth.py 里根本没有 login 函数）。
+        旧代码只把前置**塞进链里**、不加依赖 → 这条能力被照常派单，跑一轮必然 404，
+        白花一片的钱，还把"做不出来"记到能力头上。
+        """
+        if dep_cap is None or dep_cap is cap_obj:
+            return
+        if dep_cap.id not in cap_obj.deps:
+            cap_obj.deps.append(dep_cap.id)
+            _dep_hits[0] += 1
+
     changed = 0
     for c in caps:
         probe = c.probe if isinstance(c.probe, dict) else {}
@@ -890,7 +1072,9 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
         user = "u_" + re.sub(r"[^a-z0-9]+", "_", str(c.id).lower())[:20]
         pre: list[dict] = []
         joined = _jtext(new)
-        need_auth = "${token" in joined
+        # 旧判定只认字面 `${token`（2026-11-15 实测）：蓝图里写的是 `${atoken}` /
+        # `${teacher_token}` 时判"不需要鉴权" → 不补登录 → 第一步就 401。
+        need_auth = bool(re.search(r"\$\{\w*(?:token|auth)\w*\}", joined, re.I))
         has_reg = any("/register" in str((s or {}).get("path") or "") for s in new)
         has_login = any("/login" in str((s or {}).get("path") or "") for s in new)
         # ① 链里有登录，却没有注册 → 先注册（否则登录必然 401）
@@ -898,15 +1082,18 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
             st = _auth_step(reg, "/register", user, want_token=False)
             if st:
                 pre.append(st)
+                _dep(c, reg)
         # ② 用到 ${token}，却没有登录 → 补注册 + 登录
         if need_auth and not has_login and login is not None:
             if not has_reg and reg is not None:
                 st = _auth_step(reg, "/register", user, want_token=False)
                 if st:
                     pre.append(st)
+                    _dep(c, reg)
             st = _auth_step(login, "/login", user, want_token=True)
             if st:
                 pre.append(st)
+                _dep(c, login)
         # ④ 本链里的账号必须统一：注册用谁，登录就得用谁。
         #    否则链是"注册 u_xxx → 登录 u1"，永远 401（实测 2026-11-07 参考实现 8/9）。
         if has_login:
@@ -938,7 +1125,7 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
                 continue
             var = m.group(1)
             base = re.split(r"[{:]", path, maxsplit=1)[0].rstrip("/")
-            maker = None
+            maker, owner = None, None
             for cand in caps:
                 if cand is c:
                     continue
@@ -946,7 +1133,7 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
                     cs = cs or {}
                     if (str(cs.get("method") or "").upper() == "POST"
                             and str(cs.get("path") or "").rstrip("/") == base):
-                        maker = cs
+                        maker, owner = cs, cand
                         break
                 if maker:
                     break
@@ -956,6 +1143,7 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
                 if "expect_status" not in mstep:
                     mstep["expect_status"] = [200, 201]
                 pre.append(mstep)
+                _dep(c, owner)
                 new[i]["path"] = re.sub(r"\{%s\}" % re.escape(var), "${%s}" % var, path)
                 new[i]["path"] = re.sub(r":%s(?=/|$)" % re.escape(var),
                                         "${%s}" % var, new[i]["path"])
@@ -973,9 +1161,14 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
         #    （"no such table: tickets"）。找同资源的 POST 创建能力，插到最后一步之前。
         last = (new[-1] if new else {})
         lpath = str((last or {}).get("path") or "")
+        # **比较要去掉查询串**（2026-11-15 实测）：`GET /api/v1/topics/?keyword=图`
+        # 与链里的 `POST /api/v1/topics/` 明明同资源，但整串比较判"没有创建步骤"
+        # → 又插一条重复的创建步骤，还带着别的能力的 token 变量 → 探针永远跑不通。
+        _lbase = lpath.split("?", 1)[0].rstrip("/")
         if str((last or {}).get("method") or "").upper() == "GET" and "/auth/" not in lpath:
             has_post = any(str((sm or {}).get("method") or "").upper() == "POST"
-                           and str((sm or {}).get("path") or "") == lpath for sm in new)
+                           and str((sm or {}).get("path") or "").split("?", 1)[0].rstrip("/")
+                           == _lbase for sm in new)
             if not has_post:
                 creator = None
                 for cand in caps:
@@ -992,8 +1185,11 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
                         break
                 if creator is not None:
                     seed = json.loads(json.dumps(creator))
-                    seed["save"] = {k: ["id", "ticket_id", "pk"] for k in
-                                    ("ticket_id", "id", "user_id", "uid", "board_id")}
+                    # **不许覆盖 saver 的名字**：旧代码把 save 硬写成
+                    # ticket_id / id / user_id / uid / board_id（ticket 项目的字段），
+                    # 于是 Django 项目里也出现这几个变量，而链上保存的是 `t1`/`tid`
+                    # → 变量对不上、后续 ${token} 又指向不存在的名字（2026-11-15）。
+                    # 种子自己怎么 save 就怎么留；调用方只关心"表里有数据"。
                     seed.setdefault("expect_status", [200, 201, 409])
                     new.insert(len(new) - 1, seed)
                     # 只判 200 太弱：空实现直接返回 `[]` 也能过（实测 2026-11-07——
@@ -1015,10 +1211,347 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
             if notes is not None:
                 notes.append(f"{c.id}: http 探针已补齐自包含链（+{len(pre)} 步："
                              + "/".join(str(s.get('path')) for s in pre) + "）")
+        # ⑦ 角色串味修补（2026-11-18）：同一用户名多角色注册 + 同名多次 login
+        #    会让所有 token 都是末次注册的角色 → teacher token 建题被 403 → 假 bug。
+        #    注册/登录都换成按角色独立的账号，从**蓝图源头**就对，不靠执行层兜底。
+        #    幂等；只改用户名字段，判据不动。函数级 import 避免循环依赖。
+        from . import probe as _probe_mod
+        _fixed, _role_notes = _probe_mod.dedupe_role_users(probe.get("steps") or [])
+        if _fixed != (probe.get("steps") or []):
+            probe["steps"] = _fixed
+            c.probe = probe
+            changed += 1
+            if notes is not None:
+                notes.extend(f"{c.id}: {n}" for n in _role_notes)
+    # 占位符一致性：插进来的步骤可能带着别的能力的变量名
+    changed += repair_placeholders(bp, notes)
+    # 只加依赖、没动 steps 的能力也要算进 changed，否则调用方以为"没变"就不写盘
+    changed += _dep_hits[0]
     return changed
 
 
-def fill_http_modules(bp: "Blueprint") -> int:
+def repair_placeholders(bp: "Blueprint", notes: list[str] | None = None) -> int:
+    """把**引用了却没保存**的 `${var}` 改到链上真有的变量名。
+
+    为什么必须有（2026-11-15 实测）：引擎插入的"种子/补齐"步骤从**别的能力**复制
+    请求体，头里带的是那条能力的变量（`${ttoken}` / `${token}`），而本链保存的是
+    `s1token` / `t1`；也有反过来的情况。占位符解析不到 → 探针直接失败，
+    报告会把"链写错了"记成"产品没做出来"，白派单。
+
+    只做**同类改名**（token↔token、id↔id），不做语义猜测：
+      · 引用的名字含 token/auth → 用链上第一个含 token 的已保存变量；
+      · 引用的名字以 _id 结尾或叫 id → 用链上第一个 id 类已保存变量；
+      · 对不上就**留着**并记一条备注（让人看见，而不是悄悄改错）。
+    """
+    changed = 0
+    for c in bp.caps:
+        probe = c.probe if isinstance(c.probe, dict) else {}
+        if str(probe.get("kind") or "") != "http":
+            continue
+        steps = probe.get("steps")
+        if not isinstance(steps, list) or not steps:
+            continue
+        saved: list[str] = []
+
+        def _fix(s: str) -> str:
+            nonlocal changed
+            for var in set(re.findall(r"\$\{(\w+)\}", s or "")):
+                if var in saved:
+                    continue
+                low = var.lower()
+                if "token" in low or "auth" in low:
+                    pool = [v for v in saved if "token" in v.lower() or "auth" in v.lower()]
+                else:
+                    # 同前缀编号变量（t1/t2/t3、c1/c2/c3）：优先用**同前缀**的已保存变量，
+                    # 其次才是通用 id 类。实测 2026-11-15：`prefs.mine` 引用了 ${t2}/${t3}
+                    # 但链上只建了一个题（只 save 了 t1）→ 探针解析不到直接失败。
+                    pref = re.match(r"^([A-Za-z_]+)\d+$", var)
+                    pool = ([v for v in saved if pref and v.startswith(pref.group(1))]
+                            or [v for v in saved
+                                if v.lower().endswith("id") or v.lower() == "id"]
+                            or [v for v in saved if re.match(r"^[A-Za-z_]+\d+$", v)])
+                if not pool:
+                    if notes is not None:
+                        notes.append(f"{c.id}: 占位符 ${{{var}}} 在链上没有对应变量（保留原样）")
+                    continue
+                s = s.replace("${%s}" % var, "${%s}" % pool[0])
+                changed += 1
+                if notes is not None:
+                    notes.append(f"{c.id}: 占位符 ${{{var}}} → ${{{pool[0]}}}（链上没有前者）")
+            return s
+
+        for st in steps:
+            if not isinstance(st, dict):
+                continue
+            for key in ("path",):
+                if isinstance(st.get(key), str):
+                    st[key] = _fix(st[key])
+            if isinstance(st.get("headers"), dict):
+                st["headers"] = {k: _fix(v) if isinstance(v, str) else v
+                                 for k, v in st["headers"].items()}
+            if "json" in st:
+                # **必须递归**：占位符常在数组里（`"topic_ids": ["${t2}", "${t3}"]`）。
+                # 只处理顶层字符串会导致"看着修了、其实没修"（2026-11-15 实测：
+                # prefs.mine 的两处 ${t2}/${t3} 就在 list 里，修复函数返回 0 变更）。
+                def _walk(obj):
+                    if isinstance(obj, str):
+                        return _fix(obj)
+                    if isinstance(obj, list):
+                        return [_walk(x) for x in obj]
+                    if isinstance(obj, dict):
+                        return {k: _walk(v) for k, v in obj.items()}
+                    return obj
+                st["json"] = _walk(st["json"])
+            for k in (st.get("save") or {}):
+                saved.append(k)
+        c.probe = probe
+    return changed
+
+
+def align_probe_expectations(bp: "Blueprint", notes: list[str] | None = None) -> int:
+    """让 http 探针的 `expect_json` 与**它自己发出去的请求**自洽。
+
+    为什么必须有（实测 2026-11-10，毕设项目）：
+      `cap.auth.login_token` 链上注册的是 `u_cap_auth_login_token`，
+      却断言 login / me 返回 `{"username": "stu1"}`；
+      `cap.org.direction_create` POST 的是 `{"name":"人工智能","code":"AI"}`，
+      却断言返回 `{"name":"计算机学院","code":"CS"}`（隔壁 colleges 步骤的值）。
+    这类探针**永远不可能通过** —— 产品代码是对的，判据是错的。
+    引擎于是把"修产品"的工作单一次次派给远端，远端怎么改都过不了：
+    覆盖停在 17/84，而每轮还在烧钱（实测 201 次调用 ≈ ¥3.07 一轮）。
+
+    口径：**判据不能自相矛盾**。同一条链里，
+      · 步骤自己的请求体里出现过的同名字段 → 断言值以它为准；
+      · 同路径的创建步骤里出现过的同名字段 → 断言值以它为准；
+      · 两者都没有 → 保留原值（那是业务常量，比如 `{"code":"unauthorized"}`）。
+    只改**字符串字面量**的错值，不动数字/布尔（数字错是真 bug）。
+
+    这是**确定性修补**，零 token，且**幂等** —— 所以可以在每轮观测前重复调用
+    （重规划会改写能力表，修一次不够，得每次观测前都重新对齐）。
+    返回对齐的字段数。
+    """
+    changed = 0
+    for c in bp.caps:
+        probe = c.probe if isinstance(c.probe, dict) else {}
+        if str(probe.get("kind") or "") != "http":
+            continue
+        steps = probe.get("steps")
+        if not isinstance(steps, list) or not steps:
+            continue
+        # 同链里每个路径的**创建步骤**请求体（POST + 同路径）
+        creators: dict[str, dict] = {}
+        for st in steps:
+            if not isinstance(st, dict):
+                continue
+            if str(st.get("method") or "").upper() != "POST":
+                continue
+            body = st.get("json")
+            if isinstance(body, dict):
+                creators[str(st.get("path") or "").rstrip("/")] = body
+        # 同链里"账号类"字段的权威值：注册步骤发出去的 username。
+        # `GET /auth/me` 这种步骤自己不带请求体，断言的 username 只能来自
+        # 链上早先的注册 —— 实测 cap.auth.login_token 第3步断言 `stu1`，
+        # 而注册发的是 `u_cap_auth_login_token`，于是永远红。
+        identity: dict[str, str] = {}
+        for st in steps:
+            if not isinstance(st, dict):
+                continue
+            body = st.get("json")
+            if not isinstance(body, dict):
+                continue
+            for k, v in body.items():
+                lk = str(k).lower()
+                if isinstance(v, str) and v and ("user" in lk or "email" in lk
+                                                 or lk in ("account", "login_name")):
+                    identity.setdefault(lk, v)
+        for st in steps:
+            if not isinstance(st, dict):
+                continue
+            ej = st.get("expect_json")
+            if not isinstance(ej, dict):
+                continue
+            own = st.get("json") if isinstance(st.get("json"), dict) else None
+            creator = creators.get(str(st.get("path") or "").rstrip("/"))
+            for k, v in list(ej.items()):
+                if not isinstance(v, str) or not v:
+                    continue
+                cand = None
+                if own is not None and isinstance(own.get(k), str) and own.get(k):
+                    cand = own[k]
+                elif creator is not None and isinstance(creator.get(k), str) and creator.get(k):
+                    cand = creator[k]
+                elif str(k).lower() in identity:
+                    # 账号身份字段：本步没有请求体、也没有同路径创建者 → 取链上注册值
+                    cand = identity[str(k).lower()]
+                if cand is None or cand == v:
+                    continue
+                # 只在"值明显来自别的实体"时才改：两者都是本步/同路径的字面量
+                ej[k] = cand
+                changed += 1
+                if notes is not None:
+                    notes.append(f"{c.id}: 探针期望值自洽化 {k}: {v} → {cand}")
+    return changed
+
+
+def url_prefix_apps(ws) -> dict[str, str]:
+    """从工程的 URLconf 读「端点前缀 → 业务域」：`path("api/v1/auth/", include("apps.accounts.urls"))`。
+
+    为什么不用猜（2026-11-15）：注入/审计给的能力落点写成 `app/api/auth.py`，
+    而 Django 仓里做认证的是 `apps/accounts`（域名叫 accounts，不叫 auth）。
+    按文件名猜永远猜不到；而 `config/urls.py` 里**写着**这个映射 —— 读它。
+    """
+    import re as _re
+    from pathlib import Path as _P
+    ws = _P(ws)
+    out: dict[str, str] = {}
+    cands = [ws / "config" / "urls.py", ws / "project" / "urls.py"]
+    cands += sorted(ws.glob("*/urls.py"))
+    for f in cands:
+        if not f.is_file():
+            continue
+        try:
+            txt = f.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        for m in _re.finditer(
+                r"path\(\s*[\"']([^\"']*)[\"']\s*,\s*include\(\s*[\"']apps\.(\w+)\.",
+                txt):
+            pref = "/" + m.group(1).strip("/") + "/"
+            out.setdefault(pref.replace("//", "/"), m.group(2))
+    return out
+
+
+LEGACY_PREFIXES = ("app/", "apps/api/", "server/", "src/api/")
+
+
+def normalize_injected(bp: "Blueprint", ws=None) -> int:
+    """把**引擎注入的机制能力**（shipgate / 质量闸门）归一化到当前栈。
+
+    注入的能力是引擎自己造的（鉴权必检、参数校验、404、幂等、持久化、不变式），
+    但它们的 `app` / `modules` / 占位符是按 FastAPI 写法硬写的：
+      · `"app": "app.main:app"` 或干脆缺省 → 探针起不来；
+      · `modules: ["app/api/auth.py"]` → 接线扫不到（Django 是 apps/<域>/views.py）；
+      · `$${topic_id}`（双重转义）→ 占位符永远解析不了。
+    这些都不是"产品没做出来"，是**注入端没跟着栈走** —— 必须在注入后立刻归一，
+    否则每一轮都有一批注定失败的探针把报告染红（假红比漏报更毁信任）。
+
+    只做四件确定性的事：补 app、修 `$$`、给前置 POST 补 save、重映射落点。
+    """
+    ws = Path(ws) if ws else None
+    try:
+        from . import stack as _st
+        _ad = _st.from_workspace(ws) if ws is not None else _st.current()
+        app_ref = getattr(_ad, "app_ref", "") or ""
+    except Exception:                                    # noqa: BLE001
+        app_ref = ""
+
+    changed = 0
+    for c in bp.caps:
+        if str(getattr(c, "status", "")) == "descoped":
+            continue
+        pr = c.probe if isinstance(c.probe, dict) else {}
+        if str(pr.get("kind") or "") != "http":
+            continue
+        # ① app 缺省 / 指向旧栈 → 用当前栈的入口
+        if app_ref and str(pr.get("app") or "") != app_ref:
+            pr["app"] = app_ref
+            changed += 1
+        # ② `$${x}` 是双重转义，探针永远解析不了
+        blob = json.dumps(pr, ensure_ascii=False)
+        if "$${" in blob:
+            pr = json.loads(blob.replace("$${", "${"))
+            c.probe = pr
+            changed += 1
+        # ③ 占位符 `xx_id` 没 save 时，给它前面同路径的 POST 补一条 save
+        steps = [s for s in (pr.get("steps") or []) if isinstance(s, dict)]
+        saved = set()
+        for st in steps:
+            for ph in re.findall(r"\$\{(\w+)\}", json.dumps(st, ensure_ascii=False)):
+                if ph in saved:
+                    continue
+                base = str(st.get("path") or "").split("${")[0].rstrip("/")
+                for prev in steps:
+                    if prev is st or str(prev.get("method")).upper() != "POST":
+                        continue
+                    if str(prev.get("path") or "").rstrip("/") != base:
+                        continue
+                    sv = prev.get("save") if isinstance(prev.get("save"), dict) else {}
+                    if ph not in sv:
+                        sv[ph] = "id"
+                        prev["save"] = sv
+                        changed += 1
+                    break
+            for k in (st.get("save") or {}):
+                saved.add(k)
+    # ④ 落点重映射（app/api/x.py → apps/x/views.py）
+    changed += remap_modules(bp, ws=ws)
+    changed += repair_placeholders(bp)
+    return changed
+
+
+def remap_modules(bp: "Blueprint", ws=None) -> int:
+    """把**旧结构落点**（`app/api/xxx.py`）重映射到当前栈的落点。
+
+    为什么需要（2026-11-15 实锤）：审计/补能力这两步是**独立的一次远端调用**，
+    它们只看到"能力表"文本，看不到栈约定，于是补出来的 5 条能力落点写成
+    `app/api/analytics.py` —— 而 Django 仓里根本没有 `app/`（已挪到 `_legacy_app/`）。
+    引擎按 `apps/**/*.py` 扫候选 → 这 5 条永远接不上（端点 404），
+    且会在产物里**重建 app/ 目录**，与现有结构打架。
+
+    映射顺序（都不猜）：
+      ① `app/api/<stem>.py` → `apps/<stem>/views.py`（该域存在时）
+      ② `app/<stem>.py`     → `apps/<stem>/views.py`（该域存在时）
+      ③ 仍不行 → `_pick_module(ws, 资源段)`（按栈的 module_for 定）
+    只动**明显是旧结构**的落点；`apps/` / `matching_core/` / `services/` 一律不碰。
+    """
+    from pathlib import Path as _P
+    ws = _P(ws) if ws else None
+    _prefmap = url_prefix_apps(ws) if ws is not None else {}
+    changed = 0
+    for c in bp.caps:
+        if not c.modules:
+            continue
+        new: list[str] = []
+        for m in c.modules:
+            mm = str(m).replace("\\", "/")
+            if not mm.startswith(LEGACY_PREFIXES):
+                new.append(mm)
+                continue
+            stem = _P(mm).stem
+            cand = ""
+            # ① **URLconf 里的权威映射**：端点前缀 → 业务域（auth→accounts）
+            if _prefmap:
+                for pth in reversed(_probe_paths(c.probe)):
+                    for pref, appdir in _prefmap.items():
+                        if str(pth).startswith(pref) and ws is not None \
+                                and (ws / "apps" / appdir).is_dir():
+                            cand = "apps/%s/views.py" % appdir
+                            break
+                    if cand:
+                        break
+            # ② 文件名与域同名（topics → apps/topics）
+            if not cand and ws is not None and (ws / "apps" / stem).is_dir():
+                cand = "apps/%s/views.py" % stem
+            if not cand and ws is not None and (ws / "matching_core" / (stem + ".py")).is_file():
+                cand = "matching_core/%s.py" % stem
+            if not cand:
+                seg = ""
+                for pth in reversed(_probe_paths(c.probe)):
+                    parts = [x for x in str(pth).strip("/").split("/")
+                             if x and not x.startswith(("$", "{"))
+                             and x.lower() not in ("api", "rest", "v1", "v2", "v3")]
+                    if parts:
+                        seg = parts[0]
+                        break
+                cand = _pick_module(ws, seg) if (ws is not None and seg) else mm
+            if cand and cand not in new:
+                new.append(cand)
+                changed += 1
+        c.modules = new
+    return changed
+
+
+def fill_http_modules(bp: "Blueprint", ws=None) -> int:
     """给 http 能力**确定性地**分配落点模块（模型写的 modules 经常是空的）。
 
     为什么必须由引擎定：实测（2026-11-07）目标里写着 FastAPI，契约合成却输出了
@@ -1030,20 +1563,37 @@ def fill_http_modules(bp: "Blueprint") -> int:
                "tags": "tickets", "auth": "auth", "users": "users", "user": "users",
                "tickets": "tickets", "dashboard": "dashboard", "": "web"}
     changed = 0
+    # 幽灵模块：`app/api.py` 这个文件根本不存在（`api` 是版本前缀，不是资源）。
+    # 实测 2026-11-08：31 条能力都挂着它 → 剂量统计和切片装箱全算错
+    # （每片 1 条就把模块名额占掉一半，76 条能力切出 21 片）。
+    _noise_stem = {"api", "rest", "internal", "main", "__init__", "app", "web"}
     for c in bp.caps:
         if str((c.probe or {}).get("kind") or "") != "http":
             continue
         if c.modules:
-            continue
+            keep = [m for m in c.modules if Path(m).stem.lower() not in _noise_stem]
+            if keep and len(keep) == len(c.modules):
+                continue                    # 没有幽灵模块，尊重已分配的落点
+            c.modules = keep                # 清掉幽灵；清空了就走下面重算
+            if keep:
+                changed += 1
+                continue
         # 用**最后一步**的路径定落点（前面几步是自包含补齐的注册/登录，不代表这条能力）
+        # 资源段要跳过 `api` / `v1..v9` / `rest` 这类**版本前缀**：`/api/v1/topics`
+        # 的落点是 `topics`，不是 `api`（旧实现给了 `app/api.py` —— 文件根本不存在，
+        # 整条能力的路由被跳过，2026-11-08 实测）。
         paths = _probe_paths(c.probe)
         seg = ""
+        _skip = {"api", "rest", "internal", "v1", "v2", "v3", "v4", "v5"}
         for p in reversed(paths):
-            parts = [x for x in str(p).strip("/").split("/") if x and not x.startswith("$")]
+            parts = [x for x in str(p).strip("/").split("/")
+                     if x and not x.startswith("$") and not x.startswith("{")]
+            parts = [x for x in parts
+                     if x.lower() not in _skip and not re.fullmatch(r"v\d+", x.lower())]
             if parts:
                 seg = parts[0]
                 break
-        c.modules = [f"app/{seg_map.get(seg, seg if re.fullmatch(r'[a-z_]+', seg) else 'web')}.py"]
+        c.modules = [_pick_module(ws, seg)]
         changed += 1
     return changed
 
@@ -1061,8 +1611,8 @@ EXTEND_PROMPT = """你是软件架构师。下面这个项目**已经做完了�
    给 http 探针（写 steps，必要时自带注册/登录前置），或 py_call / pytest。
 3. 粒度 3~8 个函数，别把 20 个函数塞进一条。
 4. **不要和已有能力重复观测同一个行为**；也不要再造一遍"注册/登录"。
-5. 前端类能力用 `{{"kind":"http","app":"app.main:app","method":"GET","path":"/",
-   "body_has":["<html"]}}` 这种形状；多条前端能力请分别落在不同路径（/tickets 页面、/login 页面…）。
+5. **落点与探针按技术栈写死，写错等于整条作废**：
+@STACK_WEB@
 
 【目标】
 {goal}
@@ -1083,8 +1633,16 @@ def extend(bp: "Blueprint", goal: str, *, need: int = 4, llm=None, ws=None) -> d
     llm = llm or _default_llm
     have = "\n".join(f"- {c.id}：{c.desc[:60]}（{describe_probe(c.probe)}）"
                      for c in bp.caps) or "（还没有）"
+    # 补能力也必须按栈给落点（旧提示词写死 app.main:app → Django 仓库上补出来的
+    # 全是 app/* 落点，接线层一条都找不到，2026-11-15 实测）。
+    try:
+        from . import stack as _stk_ext
+        _web = web_rules(_stk_ext.current(ws).name if ws is not None else _stk_ext.active_name())
+    except Exception:                                    # noqa: BLE001
+        _web = web_rules("fastapi")
     prompt = (EXTEND_PROMPT.replace("{need}", str(max(1, int(need))))
               .replace("{have}", have[:4000])
+              .replace("@STACK_WEB@", _web)
               .replace("{goal}", Blueprint.clip(goal or bp.goal, 4000)))
     r = llm(prompt, json_mode=True, task_id="blueprint-extend", node_id="plan", max_out=12000)
     if not r.get("ok"):
@@ -1130,7 +1688,15 @@ def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = Tru
     bp = Blueprint(goal=goal, version=1, total_budget_cny=float(budget_cny or 0.0),
                    created_at=time.time())
 
+    # 栈名决定"落点与探针"那一段（Django 的落点是 apps/<域>/views.py，不是 app/main.py）。
+    # 不给 ws 时取进程级当前栈（night/full 入口已 activate）。
+    try:
+        from . import stack as _stk_bp
+        _stack_name = _stk_bp.current(ws).name if ws is not None else _stk_bp.active_name()
+    except Exception:                                    # noqa: BLE001
+        _stack_name = "fastapi"
     prompt = (DERIVE_PROMPT.replace("@GOAL@", Blueprint.clip(goal, 6000))
+              .replace("@WEB_RULES@", web_rules(_stack_name))
               .replace("@BUDGET@", f"{bp.total_budget_cny:.2f}")
               .replace("@PER_FUNC@", f"{CNY_PER_FUNC:.4f}")
               .replace("@N_FUNCS@", str(_n_funcs_for(bp.total_budget_cny))))
@@ -1204,7 +1770,14 @@ def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = Tru
     _n_http = normalize_http(bp, notes)
     if _n_http and emit:
         emit("probe_normalized", {"probes": _n_http})
-    _n_mod = fill_http_modules(bp)
+    # 外键 → 结构依赖（必须早于 split_subsystems：子系统依赖是从能力依赖聚合的）
+    _n_fk = derive_fk_deps(bp)
+    if _n_fk and emit:
+        emit("fk_deps", {"added": _n_fk})
+    _n_mod = fill_http_modules(bp, ws=ws)
+    _n_legacy = remap_modules(bp, ws=ws)
+    if _n_legacy and emit:
+        emit("modules_remapped", {"caps": _n_legacy})
     if _n_mod and emit:
         emit("modules_assigned", {"caps": _n_mod,
                                   "modules": sorted({m for c in bp.caps for m in (c.modules or [])})})
@@ -1356,6 +1929,20 @@ def save(bp: Blueprint, ws) -> Path:
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(bp.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(p)
+    # 溯源日志（2026-11-08：蓝图两次被写回 3 done，查不到写者——save 必须留痕）。
+    # 一行一次保存：时间/pid/done 计数/调用栈前三帧。append-only，出问题直接查它。
+    try:
+        import traceback as _tb
+        log = p.parent / "blueprint_save.jsonl"
+        frames = [f"{f.filename.split('/')[-1].split(chr(92))[-1]}:{f.lineno}:{f.name}"
+                  for f in _tb.extract_stack()[-4:-1]]
+        rec = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), "pid": os.getpid(),
+               "done": sum(1 for c in bp.caps if c.status == "done"),
+               "total": len(bp.caps), "version": bp.version, "callers": frames}
+        with log.open("a", encoding="utf-8") as lf:
+            lf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:                                    # noqa: BLE001
+        pass                                             # 日志失败不挡生产
     return p
 
 

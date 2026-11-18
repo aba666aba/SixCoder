@@ -24,10 +24,10 @@ shutil.copytree(SRC, DST, ignore=shutil.ignore_patterns(
 REQ = "生成一个计算器"
 print("工作区：", DST)
 
-res = company.night(DST, REQ, "qwen2.5-coder:7b", hours=0.08, use_remote=True,
-                    max_cny=0.2, emit=lambda k, p: (k in ("order_failed", "decision",
-                                                          "order_done", "stop")
-                                                    and print(f"  [{k}] {str(p)[:200]}")))
+res = company.night(DST, REQ, "qwen2.5-coder:7b", use_remote=True,
+                    emit=lambda k, p: (k in ("order_failed", "decision",
+                                             "order_done", "stop")
+                                       and print(f"  [{k}] {str(p)[:200]}")))
 print(f"\n结果：{res.verified}/{res.total}｜{res.reason[:120]}")
 
 txt = (DST / "calc.py").read_text(encoding="utf-8") if (DST / "calc.py").exists() else ""

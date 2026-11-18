@@ -72,17 +72,26 @@ def _scan_file(p: Path) -> set[str]:
 
 
 def scan(ws) -> set[str]:
-    """产物里用到的**第三方**顶层模块（排除自己包、标准库）。"""
+    """产物里用到的**第三方**顶层模块（排除自己包、标准库）。
+
+    自己包必须排除：`matching_core` / `app` 这类工作区内的本地包，从引擎所在目录
+    `find_spec` 一定找不到，会被当成"缺依赖"去 `pip install matching_core` —— 必然失败，
+    还会把本地包写进 requirements.txt（用户照着一装就报错）。实测 2026-11-07 夜班：
+    每一片都报"依赖装不上：matching_core"，requirements.txt 里也真写着它。
+    """
     ws = Path(ws)
     roots = [p for p in ws.iterdir() if p.is_dir() and p.name not in
              (".sixcoder", ".git", "__pycache__", ".pytest_cache", ".mypy_cache", "tests", "venv", ".venv")]
+    local = {p.name for p in roots if (p / "__init__.py").is_file() or any(p.glob("*.py"))}
+    local |= {p.stem for p in ws.glob("*.py")}
     mods: set[str] = set()
     for root in roots:
         for p in root.rglob("*.py"):
             mods |= _scan_file(p)
     for p in ws.glob("*.py"):
         mods |= _scan_file(p)
-    return {m for m in mods if m not in STDLIB and not m.startswith("_")}
+    return {m for m in mods
+            if m not in STDLIB and not m.startswith("_") and m not in local}
 
 
 def installable(mods: set[str]) -> list[str]:
@@ -103,7 +112,16 @@ def missing(mods: set[str]) -> set[str]:
 
 
 def _is_asgi(ws: Path) -> bool:
-    """项目里有没有 ASGI 应用（决定 requirements 要不要带 uvicorn）。"""
+    """项目里有没有 ASGI 应用（决定 requirements 要不要带 uvicorn / django）。
+
+    §20.7 接缝 5：应用标记由当前栈给，不再写死 `FastAPI(`。
+    默认栈 fastapi 的判定与改动前逐字一致。
+    """
+    try:
+        from . import stack as _st
+        ad = _st.current(ws)
+    except Exception:                                    # noqa: BLE001
+        ad = None
     for p in Path(ws).rglob("*.py"):
         if ".sixcoder" in p.parts:
             continue
@@ -111,7 +129,10 @@ def _is_asgi(ws: Path) -> bool:
             t = p.read_text(encoding="utf-8-sig", errors="replace")
         except OSError:
             continue
-        if "FastAPI(" in t or "Starlette(" in t:
+        if ad is not None:
+            if ad.is_app_source(t):
+                return True
+        elif "FastAPI(" in t or "Starlette(" in t:
             return True
     return False
 
@@ -146,8 +167,14 @@ def ensure(ws, *, install: bool = True, timeout: int = 180) -> dict:
         want = installable(mods)
         # ASGI 应用必须能 `uvicorn app.main:app` 起来：uvicorn 不会被 import，
         # 所以扫 import 扫不到它，得按"项目里有 FastAPI()"这条事实补上。
-        if _is_asgi(ws) and "uvicorn" not in {w.lower() for w in want}:
-            want = sorted(set(want) | {"fastapi", "uvicorn"})
+        # §20.7：依赖清单按栈取（Django 栈要 django 而不是 fastapi）。
+        if _is_asgi(ws):
+            try:
+                from . import stack as _st2
+                _deps = set(_st2.current(ws).deps)
+            except Exception:                            # noqa: BLE001
+                _deps = {"fastapi", "uvicorn"}
+            want = sorted(set(want) | _deps)
         if want:
             req.write_text("\n".join(want) + "\n", encoding="utf-8")
     except OSError:

@@ -36,7 +36,7 @@ class GateResult:
 
 
 _SKIP_DIRS = {".git", ".sixcoder", "__pycache__", "node_modules", ".venv", "venv",
-              "dist", "build", ".mypy_cache", ".pytest_cache"}
+              "dist", "build", ".mypy_cache", ".pytest_cache", ".tmp"}
 
 
 def _py_files(ws: Path) -> list[Path]:
@@ -83,6 +83,67 @@ def _layer_of(rel: str, layers: list[str]) -> int:
     return -1
 
 
+def _layer_map(ws: Path, layers: list[str], files: list[Path]) -> dict[str, int]:
+    """文件 → 层号（-1 = 定不了）。
+
+    三级匹配（2026-11-08 耦合点修复：以前只靠目录名/治理名的子串巧合，对不上就
+    返回 -1 **静默豁免**——治理文件写 "Repo" 而目录叫 `repositories/` 时，整个
+    目录的依赖方向门禁失效且没人知道）：
+      1) 名字匹配：治理层名 vs 路径（原逻辑，快路径）；
+      2) 目录共识：同目录其它文件已定层的众数（目录是层的自然聚合）；
+      3) import 锚定：F 依赖的已分层文件最低层 L1、依赖 F 的最高层 L2，
+         只有 L1==L2 才判（区间多点 = 有歧义，不猜——猜错比不判更贵）。
+    仍定不了的如实返回 -1，由 gate_layers 统计并声明"哪些文件不受检查"。
+    """
+    rels = [p.relative_to(ws).as_posix() for p in files]
+    out: dict[str, int] = {r: _layer_of(r, layers) for r in rels}
+    # 2) 目录共识
+    from collections import Counter
+    by_dir: dict[str, Counter] = {}
+    for r, lv in out.items():
+        if lv >= 0:
+            by_dir.setdefault(str(Path(r).parent), Counter())[lv] += 1
+    for r in list(out):
+        if out[r] < 0:
+            c = by_dir.get(str(Path(r).parent))
+            if c:
+                out[r] = c.most_common(1)[0][0]
+    # 3) import 锚定（只为仍未定的文件建图）
+    pending = [r for r, lv in out.items() if lv < 0]
+    if not pending:
+        return out
+    idx = _module_index(ws)
+    rel2mod = {p.relative_to(ws).as_posix(): m for m, p in idx.items()}
+    mod2rel = {m: p.relative_to(ws).as_posix() for m, p in idx.items()}
+    graph: dict[str, set[str]] = {}
+    rgraph: dict[str, set[str]] = {}
+    for m, p in idx.items():
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError:
+            graph[m] = set()
+            continue
+        deps: set[str] = set()
+        for n in ast.walk(tree):
+            deps |= _import_targets(n, m, idx)
+        graph[m] = deps
+        for d in deps:
+            rgraph.setdefault(d, set()).add(m)
+    for r in pending:
+        me = rel2mod.get(r)
+        if not me:
+            continue
+        dep_layers = [out[mod2rel[d]] for d in graph.get(me, ())
+                      if mod2rel.get(d) and out.get(mod2rel[d], -1) >= 0]
+        user_layers = [out[mod2rel[u]] for u in rgraph.get(me, ())
+                       if mod2rel.get(u) and out.get(mod2rel[u], -1) >= 0]
+        if dep_layers and user_layers:
+            lo, hi = min(dep_layers), max(user_layers)
+            if lo == hi:
+                out[r] = lo
+    return out
+
+
 def gate_layers(ws: Path, level: str = "M") -> GateResult:
     """架构依赖方向（M 级起执行）：只许"低层 ← 高层"单向依赖，反向即违规。
 
@@ -100,10 +161,15 @@ def gate_layers(ws: Path, level: str = "M") -> GateResult:
         return GateResult("layers", True, "static_rule", "no-layers",
                           "没有声明分层方向（.sixcoder/governance/architecture.md）→ 无法判，"
                           "按『做不到就如实说』处理，不给通过结论", int((time.time() - t0) * 1000))
+    files = _py_files(ws)
+    layer_map = _layer_map(ws, layers, files)
+    unmatched = sum(1 for lv in layer_map.values() if lv < 0)
     violations: list[str] = []
-    for p in _py_files(ws):
-        rel = str(p.relative_to(ws))
-        src_layer = _layer_of(rel, layers)
+    for p in files:
+        # 键形态必须与 layer_map 一致（posix）：str(relative_to) 在 Windows 下是
+        # 反斜杠，get 不中会让整个门禁静默空转（实测 2026-11-08）。
+        rel = p.relative_to(ws).as_posix()
+        src_layer = layer_map.get(rel, -1)
         if src_layer < 0:
             continue
         try:
@@ -124,11 +190,15 @@ def gate_layers(ws: Path, level: str = "M") -> GateResult:
                 if dst > src_layer:
                     violations.append(f"{rel}（{layers[src_layer]}）from {n.module}（{layers[dst]}）"
                                       f"—— 反向依赖")
+    tail = ""
+    if unmatched:
+        tail = (f"；{unmatched}/{len(files)} 个文件定不了层（名字/目录/import 三级匹配都不中），"
+                "对它们不检查依赖方向——请核对 architecture.md 的层名与实际目录")
     if violations:
         return GateResult("layers", False, "static_rule", f"{len(violations)} 处",
-                          "；".join(violations[:3]), int((time.time() - t0) * 1000))
+                          "；".join(violations[:3]) + tail, int((time.time() - t0) * 1000))
     return GateResult("layers", True, "static_rule", "ok",
-                      f"依赖方向合规（{len(layers)} 层：{' → '.join(layers)}）",
+                      f"依赖方向合规（{len(layers)} 层：{' → '.join(layers)}）" + tail,
                       int((time.time() - t0) * 1000))
 
 
@@ -401,6 +471,64 @@ def _import_targets(node: ast.AST, me: str, idx: dict[str, Path]) -> set[str]:
     return out
 
 
+def _sccs(graph: dict[str, set[str]]) -> list[list[str]]:
+    """Tarjan 强连通分量（迭代版，防深递归）。
+
+    为什么必须换掉 DFS 起点法（2026-11-08 跨模块审查抓到的引擎自 bug）：旧版
+    `_cycle(起点)` 把"能**到达**环的节点"误判成"在环上"（A→B→C→B 时 A 也会被
+    报成环成员）——实测引擎自身自审时 checks.check_architect 只是 import 了
+    core.auto（真环在 core 内部），却被点名；产物仓库的 cyclic 报告同理失真。
+    SCC 的定义就是"互相可达"——size>1 的分量才是真环，一个都不会多报。
+    """
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    onstk: set[str] = set()
+    stk: list[str] = []
+    out: list[list[str]] = []
+    counter = [0]
+    for root in sorted(graph):
+        if root in index:
+            continue
+        index[root] = low[root] = counter[0]
+        counter[0] += 1
+        stk.append(root)
+        onstk.add(root)
+        work = [(root, iter(sorted(graph.get(root, ()))))]
+        while work:
+            v, it = work[-1]
+            advanced = False
+            for w in it:
+                if w not in graph:
+                    continue
+                if w not in index:
+                    index[w] = low[w] = counter[0]
+                    counter[0] += 1
+                    stk.append(w)
+                    onstk.add(w)
+                    work.append((w, iter(sorted(graph.get(w, ())))))
+                    advanced = True
+                    break
+                elif w in onstk:
+                    low[v] = min(low[v], index[w])
+            if advanced:
+                continue
+            work.pop()
+            if work:
+                pv = work[-1][0]
+                low[pv] = min(low[pv], low[v])
+            if low[v] == index[v]:
+                comp: list[str] = []
+                while True:
+                    w = stk.pop()
+                    onstk.discard(w)
+                    comp.append(w)
+                    if w == v:
+                        break
+                if len(comp) > 1 or comp[0] in graph.get(comp[0], ()):
+                    out.append(comp)
+    return out
+
+
 def health_metrics(ws: Path) -> dict:
     """持续架构健康度（XL 级）：模块度、无环性、最大依赖深度、重复 import 密度。
 
@@ -421,21 +549,10 @@ def health_metrics(ws: Path) -> dict:
             deps |= _import_targets(n, name, idx)
         graph[name] = deps
 
-    def _cycle(node: str, seen: set[str], stack: set[str]) -> bool:
-        if node in stack:
-            return True
-        if node in seen:
-            return False
-        seen.add(node)
-        stack.add(node)
-        for d in graph.get(node, ()):  # noqa: SIM118
-            if _cycle(d, seen, stack):
-                return True
-        stack.discard(node)
-        return False
-
-    seen: set[str] = set()
-    cyclic = [m for m in graph if _cycle(m, seen, set())]
+    # 环检测用 _sccs（Tarjan）——旧 DFS 起点法把"能到达环的节点"误判成环成员
+    # （2026-11-08 跨模块审查实锤：checks.check_architect 只是 import 了 core.auto
+    # 就被点名），已删除。
+    cyclic = sorted(m for comp in _sccs(graph) for m in comp)
     def _depth(node: str, memo: dict[str, int], stack: set[str]) -> int:
         if node in memo:
             return memo[node]

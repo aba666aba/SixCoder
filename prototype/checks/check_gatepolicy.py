@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import arch  # noqa: E402
+from core import gates as _gates_mod  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FAILS: list[str] = []
@@ -184,8 +185,35 @@ def main() -> int:
           all(g.ok for g in unmeasurable) and all(str(g.detail).strip() for g in unmeasurable),
           str([(g.gate, g.evidence_ref) for g in unmeasurable]))
 
+    # ---- 虚构接口闸门（2026-11-08 00:52 真机事故）----
+    # 作者 `from app.models import install_body_capture` —— 这个函数根本不存在；
+    # 旧闸门只看"本模块绑没绑定"，import 就算绑定 → 结构体检 4 关全过、verified 7/7，
+    # 一到 HTTP 探针就 ImportError，能力永远 absent。
+    import tempfile
+    _gws = Path(tempfile.mkdtemp())
+    (_gws / "pkg").mkdir()
+    (_gws / "pkg/__init__.py").write_text("", encoding="utf-8")
+    (_gws / "pkg/models.py").write_text("def real_fn() -> int:\n    return 1\n", encoding="utf-8")
+    (_gws / "pkg/api.py").write_text(
+        "from pkg.models import real_fn, ghost_fn\n\n\n"
+        "def use() -> int:\n    return real_fn()\n", encoding="utf-8")
+    (_gws / "pkg/ok.py").write_text(
+        "from pkg.models import real_fn\n\n\ndef use() -> int:\n    return real_fn()\n", encoding="utf-8")
+    (_gws / "pkg/degrade.py").write_text(
+        "try:\n    from pkg.models import ghost_fn\nexcept ImportError:\n    ghost_fn = None\n\n\n"
+        "def use():\n    return ghost_fn\n", encoding="utf-8")
+
+    g_bad = _gates_mod.gate_structure(_gws, ["pkg/api.py"])
+    check("虚构接口被拦下", not g_bad.ok and "ghost_fn" in g_bad.detail, g_bad.detail[:120])
+    check("反馈给出两条出路（实现到目标模块 / 改用已有）",
+          "实现到 pkg.models" in g_bad.detail, g_bad.detail[:160])
+    g_ok = _gates_mod.gate_structure(_gws, ["pkg/ok.py"])
+    check("真实符号不误报", g_ok.ok, g_ok.detail[:120])
+    g_try = _gates_mod.gate_structure(_gws, ["pkg/degrade.py"])
+    check("try/except ImportError 的降级导入放行", g_try.ok, g_try.detail[:120])
+
     print(f"\n{'全部通过' if not FAILS else '失败：' + str(FAILS)}"
-          "（S 跳过 / M 阻断且达标放行 / 豁免可追溯 / 跳过不冒充通过）")
+          "（S 跳过 / M 阻断且达标放行 / 豁免可追溯 / 跳过不冒充通过 / 虚构接口拦下）")
     return 0 if not FAILS else 1
 
 

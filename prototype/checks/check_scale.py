@@ -118,6 +118,25 @@ def main() -> int:
     check("按实测定级时报告里出现警告", "需求里没写目标代码规模" in text2)
     check("S 级报告里明确写了不跑架构测试", "architecture" in text2 or "架构" in text2)
 
+    # [11] 2026-11-09 修：甲方用**行数**声明规模（如「目标代码规模：30000 行」）
+    #      原来只认字母档位 → 回落到"按仓库实测推断"，依据写错（实测是当前进度，
+    #      不是目标规模）。现在认行数声明并按行数落档。
+    check("认行数声明：目标代码规模 30000 行", scale.declared_from_requirement(
+        "目标代码规模：30000 行") == "S")
+    check("认行数声明：带 Markdown 加粗也认得", scale.declared_from_requirement(
+        "目标代码规模：**30000 行**（10000–50000 行级别）") == "S")
+    check("行数声明能取到具体行数（用于报告写依据）",
+          scale._declared_lines("目标代码规模：**30000 行**（10000–50000 行级别）") == 30000)
+    check("行数声明：50 万行 → L 级", scale.declared_from_requirement(
+        "目标代码规模：500000 行") == "L")
+    check("行数声明优先级：不误抓括号里的范围上界",
+          scale._declared_lines("目标代码规模：**30000 行**（10000–50000 行级别）") == 30000)
+    r = scale.resolve("目标代码规模：**30000 行**（10000–50000 行级别）", None)
+    check("resolve 的依据是 requirement 不是 measured", r["source"] == "requirement")
+    check("resolve 在声明了规模时不报警告", r["warning"] == "")
+    check("没声明规模的仍走实测并保留警告",
+          scale.resolve("随便什么需求", None)["source"] == "measured")
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")

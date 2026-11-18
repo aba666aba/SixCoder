@@ -86,8 +86,8 @@ def main() -> int:
         p2, b2, k2 = endpoint_for(oa, r)
         check("继承全局智谱地址", b2 == r["base_url"], b2)
         check("无档案 key 时继承全局 key", k2 == "sk-ZHIPU-GLOBAL-KEY", k2)
-        check("payload 走 OpenAI 兼容格式", p2.get("thinking") == {"type": "disabled"}
-              and "reasoning_effort" not in p2, str(p2))
+        check("payload 走 OpenAI 兼容格式（不塞 thinking / reasoning_effort）",
+              "thinking" not in p2 and "reasoning_effort" not in p2, str(p2))
 
         print("[4] 档案显式填的网址永远优先")
         ds_explicit = {**ds, "base_url": "https://my-proxy.example.com/v1"}

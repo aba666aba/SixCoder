@@ -9,9 +9,79 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-SETTINGS = Path(__file__).resolve().parent.parent / "data" / "settings.json"
+# 允许用环境变量指向另一份配置 —— **自检必须用它**：
+# 用户会在界面上改模型/价格/启用状态（`data/settings.json` 是本地配置，不进库），
+# 自检若读真实配置，用户一改配置就有一批自检红，而且看起来像代码坏了
+# （实测 2026-11-10 23:50：check_pricing / check_single_model / check_remote_profiles
+#  在用户禁用 pro、改过价格之后全红；换一份干净配置立刻全绿 —— 是自检的问题，不是代码的）。
+SETTINGS = Path(os.environ.get("SIXCODER_SETTINGS")
+                or (Path(__file__).resolve().parent.parent / "data" / "settings.json"))
+
+# ---------------------------------------------------------------- 厂商预设
+#
+# 2026-11-09 用户口径：**厂商是一等公民**。
+#   · 界面：点开「远端」→ 一个下拉（deepseek / glm / openai）+ 三个长方矩形；
+#     矩形中间是大字厂商名，右侧偏右是「正在使用」的单选标记；点矩形弹出该厂商的配置。
+#   · DeepSeek 与 GLM **开箱带默认模型**（含默认调用参数与思考等级），用户只填 apikey；
+#     OpenAI **不带**默认模型，用户自己加。
+#
+# 每家的默认参数都来自**官方文档**（2026-11-09 核对），不是猜的：
+#   · DeepSeek：https://api.deepseek.com —— reasoning_effort = none/low/high/max
+#   · GLM：https://open.bigmodel.cn/api/paas/v4 —— thinking.type=enabled/disabled，
+#     reasoning_effort = max/high/low（**没有 none**，GLM-5.3 起强制开启思考）
+#   · OpenAI：https://api.openai.com/v1 —— 通用兼容，各模型思考能力不同
+PROVIDER_IDS = ("deepseek", "glm", "openai")
+
+PROVIDER_PRESETS: dict[str, dict] = {
+    "deepseek": {
+        "label": "DeepSeek",
+        "base_url": "https://api.deepseek.com",
+        # 官方支持的四档（none = 不思考）
+        "efforts": ["none", "low", "high", "max"],
+        "models": [
+            {"id": "flash", "label": "DeepSeek Flash（主力）", "model": "deepseek-flash",
+             "efforts": ["none", "low", "high", "max"], "max_output_tokens": 0,
+             "temperature": 0.2, "priority": 10,
+             "pricing": {"offpeak": {"in_hit": 0.02, "in_miss": 1.0, "out": 4.0},
+                         "peak": {"in_hit": 0.04, "in_miss": 2.0, "out": 8.0}}},
+            {"id": "pro", "label": "DeepSeek Pro（更强，默认不启用）",
+             "model": "deepseek-v4-pro", "efforts": ["none", "low", "high", "max"],
+             "max_output_tokens": 0, "temperature": 0.2, "priority": 20, "enabled": False,
+             "pricing": {"offpeak": {"in_hit": 0.15, "in_miss": 4.5, "out": 13.5},
+                         "peak": {"in_hit": 0.30, "in_miss": 9.0, "out": 27.0}}},
+        ],
+    },
+    "glm": {
+        "label": "GLM",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        # GLM 官方 reasoning_effort 只有 max/high/low；**没有 none**
+        # （"不思考"要用 thinking.type=disabled，而 GLM-5.3 起已不支持禁用）。
+        "efforts": ["low", "high", "max"],
+        "models": [
+            {"id": "glm-5.3", "label": "GLM-5.3（深度思考）", "model": "glm-5.3",
+             "efforts": ["low", "high", "max"], "max_output_tokens": 131072,
+             "temperature": 1.0, "priority": 10,
+             "pricing": {"offpeak": {"in_hit": 0.02, "in_miss": 1.0, "out": 4.0},
+                         "peak": {"in_hit": 0.04, "in_miss": 2.0, "out": 8.0}}},
+            {"id": "glm-5.3-flash", "label": "GLM-5.3-Flash（轻快）", "model": "glm-5.3-flash",
+             "efforts": ["low", "high", "max"], "max_output_tokens": 131072,
+             "temperature": 1.0, "priority": 20,
+             "pricing": {"offpeak": {"in_hit": 0.01, "in_miss": 0.5, "out": 2.0},
+                         "peak": {"in_hit": 0.02, "in_miss": 1.0, "out": 4.0}}},
+        ],
+    },
+    "openai": {
+        "label": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        # OpenAI 通用兼容：各模型思考能力不同，默认单档，用户自己配。
+        "efforts": ["none"],
+        # **故意不带默认模型**（用户口径：OpenAI 里面的默认模型没有，需要自己填写）
+        "models": [],
+    },
+}
 
 DEFAULTS = {
     "remote": {
@@ -244,6 +314,18 @@ def _norm_model_profile(raw: dict) -> dict:
                 "in_miss": num(b.get("in_miss"), 0.0, 1e4, 0.0),
                 "out": num(b.get("out"), 0.0, 1e4, 0.0)}
 
+    # 工具能力声明（2026-11-10）：三态 true / false / ""（未设置 → 查本地能力表）。
+    # 不支持原生 function calling 的模型（GLM 视觉模型、部分精简版）要显式关掉，
+    # 否则请求硬带 tools → 端点 400 → 被当成"模型能力不足"反复重试。
+    _st = str(raw.get("supports_tools") if raw.get("supports_tools") is not None
+              else "").strip().lower()
+    if _st in ("true", "1", "yes", "y", "支持", "on"):
+        _st = True
+    elif _st in ("false", "0", "no", "n", "不支持", "off"):
+        _st = False
+    else:
+        _st = ""
+
     return {
         "id": mid or model,
         "label": str(raw.get("label") or mid or model)[:48],
@@ -254,6 +336,7 @@ def _norm_model_profile(raw: dict) -> dict:
         "enabled": bool(raw.get("enabled", True)),
         "priority": num(raw.get("priority"), -9999, 9999.0, 10.0),
         "efforts": _norm_efforts(raw.get("efforts")) or ["none"],
+        "supports_tools": _st,
         "max_output_tokens": num(raw.get("max_output_tokens"), 0, 393216, 0),
         "temperature": num(raw.get("temperature"), 0.0, 2.0, 0.2),
         "pricing": {"offpeak": price_block(pricing.get("offpeak")),
@@ -279,20 +362,422 @@ def _norm_profiles(raw) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------- 厂商（一等公民）
+
+KEY_ROLES = ("writer", "reviewer1", "reviewer2")
+
+
+def _norm_key_class(raw: dict, idx: int, provider_id: str = "") -> dict:
+    """单个 key 类规范化（2026-11-18 多远端协作：厂商 → key → 模型 三层）。
+
+    为什么要有 key 这一层（用户口径）：同一厂商可以有多把 key（不同账号/不同余额池），
+    写作者与审核者**必须用不同的 key** —— 三方协商若走同一把 key，限流会把
+    "审核者缺席"误判成"审核者反对"。key 类是审核者/写作者分离的最小单位。
+
+    `role`（2026-11-18 晚，用户口径）：三个角色都可能是**同一个厂商的不同 key**，
+    所以角色挂在 key 类上显式指派（writer / reviewer1 / reviewer2 / 空=不参与）。
+    `current` 保留做兼容（= role 是 writer），读写两处必须同步，不许各说各话。
+    """
+    raw = raw or {}
+    kid = str(raw.get("id") or ("k%d" % (idx + 1))).strip()[:32]
+    models = []
+    for m in _norm_profiles(raw.get("models")):
+        m = dict(m)
+        m["provider"] = provider_id
+        models.append(m)
+    role = str(raw.get("role") or "").strip().lower()
+    if role not in KEY_ROLES:
+        role = ""
+    # 注意：**不在这里**把 current 派生成 writer —— 单个 key 看不到兄弟，
+    # 旧配置的 current=True 会把用户刚指派给别的 key 的 writer 顶掉（实测踩过）。
+    # 「无任何显式角色时按 current 派生」在 _norm_provider 里统一裁决。
+    return {
+        "id": kid,
+        "label": str(raw.get("label") or kid)[:48],
+        "api_key": str(raw.get("api_key") or "").strip(),
+        "role": role,
+        "current": bool(raw.get("current", False)),
+        "models": models,
+    }
+
+
+def _norm_provider(raw: dict, pid: str = "") -> dict:
+    """单个厂商档案规范化。非法值一律收敛，绝不让手滑把配置写坏。"""
+    raw = raw or {}
+    preset = PROVIDER_PRESETS.get(pid) or {}
+    pid = str(raw.get("id") or pid or "").strip().lower()
+    if pid not in PROVIDER_PRESETS:
+        pid = "deepseek"
+    label = str(raw.get("label") or preset.get("label") or pid)[:48]
+    base_url = str(raw.get("base_url") or preset.get("base_url") or "")[:200].rstrip("/")
+    key = str(raw.get("api_key") or "").strip()
+    # 思考等级：该厂商**拥有**的档位（用户口径：只需填 apikey 与拥有的思考强度等级）
+    effs = _norm_efforts(raw.get("efforts"))
+    if not effs:
+        effs = list(preset.get("efforts") or ["none"])
+    # key 类层：显式 keys 优先；没有就**自动合成单个 key 类**
+    # （旧配置/只填厂商级 key 的用户无感：一个 key 类 = 老行为）。
+    raw_keys = raw.get("keys")
+    keys = [_norm_key_class(k, i, pid)
+            for i, k in enumerate(raw_keys) if isinstance(k, dict)] \
+        if isinstance(raw_keys, list) else []
+    # **只有"配置里根本没有 keys 字段"（老配置）才合成 k1**；显式给了空列表
+    # = 用户把 key 全删了（2026-11-18 用户口径：一把也支持删，删了要真落地），
+    # 这里再合成一把会让删除永远不生效。
+    if not keys and raw_keys is None:
+        keys = [_norm_key_class({"id": "k1", "label": "主 key", "api_key": key,
+                                 "current": True,
+                                 "models": raw.get("models")}, 0, pid)]
+    # key 类内没填 key → 继承厂商级 key（填在厂商框上的那个）
+    for k in keys:
+        if not k["api_key"]:
+            k["api_key"] = key
+    # id 唯一 + **空位复用**（2026-11-18 晚：id 对用户隐藏，只在内部用；
+    # 删掉一把 key 腾出的 k2 必须能被下一把自动复用，编号不许一路涨）。
+    used_ids: set[str] = set()
+    for k in keys:
+        kid = str(k.get("id") or "")
+        if not kid or kid in used_ids:
+            i = 1
+            while f"k{i}" in used_ids:
+                i += 1
+            k["id"] = f"k{i}"
+            kid = k["id"]
+        used_ids.add(kid)
+    # 角色归一（2026-11-18 晚）：**显式角色优先**；全都没有角色时（旧配置）
+    # 才把 current=True 的那把派生成 writer。然后保证 writer 唯一、reviewer 各至多一个，
+    # current 与 role 永远同步（current ⇔ role=='writer'）。
+    if keys and not any(k.get("role") for k in keys):
+        for k in keys:
+            if k.get("current"):
+                k["role"] = "writer"
+                break
+    writers = [k for k in keys if k.get("role") == "writer"]
+    if keys and not writers:
+        keys[0]["role"] = "writer"
+        writers = [keys[0]]
+    seen_roles: set[str] = set()
+    for k in keys:
+        r = str(k.get("role") or "")
+        if r == "writer" and k is not writers[0]:
+            r = ""
+        if r and r in seen_roles:
+            r = ""
+        k["role"] = r
+        if r:
+            seen_roles.add(r)
+        k["current"] = (r == "writer")
+    # 该厂商的模型档案：内嵌在厂商里（弹窗里直接编辑）。
+    # 兼容旧口径：若 keys 里没有模型而厂商级 models 有，把厂商级 models 归到
+    # 「正在使用」的 key 类（迁移不丢档案）。
+    if keys and not any(k.get("models") for k in keys):
+        for m in _norm_profiles(raw.get("models")):
+            m = dict(m)
+            m["provider"] = pid
+            cur_k = next((k for k in keys if k.get("current")), keys[0])
+            cur_k["models"].append(m)
+    return {
+        "id": pid,
+        "label": label,
+        "base_url": base_url,
+        "api_key": key,
+        "efforts": effs,
+        "current": bool(raw.get("current", False)),
+        "keys": keys,
+        "models": [m for k in keys for m in (k.get("models") or [])],
+    }
+
+
+def providers() -> list[dict]:
+    """三个厂商（deepseek / glm / openai）的当前配置。
+
+    **厂商是真相源**；`models()` 由它派生。
+    旧配置（只有 `remote.models[]`）在第一次读取时**自动迁移**：
+      · compat=deepseek 的档案 → deepseek 厂商
+      · compat=openai 且 base_url 含 bigmodel → glm 厂商
+      · 其余 openai 兼容档案 → openai 厂商
+    迁移不丢用户填过的 key / 参数 / 思考等级。
+    """
+    r = get_remote()
+    raw = r.get("providers")
+    if not isinstance(raw, list) or not raw:
+        raw = _migrate_providers(r)
+    out = [_norm_provider(p, str((p or {}).get("id") or "")) for p in raw]
+    have = {p["id"] for p in out}
+    for pid in PROVIDER_IDS:                 # 补齐缺的三家（用预设，不覆盖已有）
+        if pid not in have:
+            out.append(_norm_provider(dict(PROVIDER_PRESETS[pid]), pid))
+    # 「正在使用」有且只有一个
+    cur = [p for p in out if p.get("current")]
+    if not cur:
+        for p in out:
+            if p["id"] == "deepseek":
+                p["current"] = True
+                break
+    else:
+        for p in out:
+            p["current"] = (p["id"] == cur[0]["id"])
+    order = {pid: i for i, pid in enumerate(PROVIDER_IDS)}
+    out.sort(key=lambda p: order.get(p["id"], 99))
+    return out
+
+
+def _migrate_providers(r: dict) -> list[dict]:
+    """旧 `remote.models[]` → 三家厂商（一次性迁移，保留用户填过的一切）。"""
+    old = _norm_profiles((r or {}).get("models"))
+    buckets: dict[str, list[dict]] = {pid: [] for pid in PROVIDER_IDS}
+    for p in old:
+        compat = str(p.get("compat") or "").strip().lower()
+        base = str(p.get("base_url") or "").strip().lower()
+        if compat == "deepseek":
+            pid = "deepseek"
+        elif "bigmodel" in base or "zhipu" in base or "z.ai" in base:
+            pid = "glm"
+        elif compat == "openai":
+            pid = "openai"
+        else:
+            pid = "deepseek"
+        p = dict(p)
+        p["provider"] = pid
+        buckets[pid].append(p)
+    out = []
+    for pid in PROVIDER_IDS:
+        preset = PROVIDER_PRESETS[pid]
+        prof_models = buckets[pid]
+        # 预置模型 + 用户档案（用户档案在前，保留可编辑）
+        merged = prof_models + [dict(m) for m in preset.get("models") or []]
+        seen = set()
+        uniq = []
+        for m in merged:
+            mid = str(m.get("id") or "")
+            if mid and mid in seen:
+                continue
+            if mid:
+                seen.add(mid)
+            uniq.append(m)
+        # 厂商**有预置模型**时，用户的老档案默认停用（但保留、可编辑、可再启用）：
+        # 预置的是当前官方推荐 + 思考档齐全的模型，老档案往往是早期模型
+        # （实测：老档案 glm-4-flash 只有 none 一档，而官方 glm-5.3 支持 low/high/max）。
+        # 不停用的话 active_model 会挑中老档案 → 远端只剩一档思考。
+        if preset.get("models"):
+            for m in uniq[:len(prof_models)]:
+                m["enabled"] = False
+        out.append({
+            "id": pid,
+            "label": preset["label"],
+            "base_url": preset["base_url"],
+            "api_key": "",
+            "efforts": list(preset.get("efforts") or ["none"]),
+            "current": (pid == "deepseek"),
+            "models": uniq,
+        })
+    # 老配置里的全局 key 归到「正在使用」的那家
+    gkey = str((r or {}).get("api_key") or "").strip()
+    if gkey:
+        for p in out:
+            if p.get("current"):
+                p["api_key"] = gkey
+    return out
+
+
+def save_providers(provs: list[dict]) -> list[dict]:
+    """整表写回厂商配置（界面的增/删/改最后都收敛到这里）。"""
+    data = load()
+    remote = data.setdefault("remote", {})
+    clean = []
+    for p in provs or []:
+        pid = str((p or {}).get("id") or "").strip().lower()
+        if pid not in PROVIDER_PRESETS:
+            continue
+        n = _norm_provider(p, pid)
+        old_all = providers() if "providers" in remote else []
+        # 厂商级 key 为空 → 保留原有（界面传空表示"不修改"）
+        if not str((p or {}).get("api_key") or "").strip():
+            old = next((x for x in old_all if x["id"] == pid), None)
+            if old:
+                n["api_key"] = old.get("api_key") or ""
+        # key 类的 key 为空 → 同样保留原有（界面把 key 打码后回传，不能被清掉）
+        old = next((x for x in old_all if x["id"] == pid), None)
+        if old:
+            old_keys = {k["id"]: k for k in (old.get("keys") or [])}
+            for k in n.get("keys") or []:
+                if not k.get("api_key") and k["id"] in old_keys:
+                    k["api_key"] = old_keys[k["id"]].get("api_key") or ""
+        clean.append(n)
+    remote["providers"] = clean
+    # 旧的平铺字段同步成「正在使用」那家的值（兼容老代码路径）
+    cur = next((p for p in clean if p.get("current")), None)
+    if cur:
+        remote["provider"] = cur["id"]
+        remote["compat"] = cur["id"]
+        remote["base_url"] = cur.get("base_url") or ""
+        remote["api_key"] = cur.get("api_key") or ""
+        if cur.get("models"):
+            first = cur["models"][0]
+            remote["model"] = first.get("model") or ""
+    save(data)
+    return clean
+
+
+def current_provider() -> dict:
+    """正在使用的那个厂商。"""
+    ps = providers()
+    for p in ps:
+        if p.get("current"):
+            return p
+    return ps[0] if ps else _norm_provider({}, "deepseek")
+
+
+def provider_key(pid: str) -> str:
+    """某个厂商的 key（优先「正在使用」的 key 类；模型级留空时继承它）。"""
+    pid = str(pid or "").strip().lower()
+    for p in providers():
+        if p["id"] == pid:
+            for k in p.get("keys") or []:
+                if k.get("current") and str(k.get("api_key") or "").strip():
+                    return str(k["api_key"])
+            return str(p.get("api_key") or "").strip()
+    return ""
+
+
+def key_classes(pid: str) -> list[dict]:
+    """某个厂商的全部 key 类（多远端协作按 key 分角色用）。"""
+    for p in providers():
+        if p["id"] == str(pid or "").strip().lower():
+            return list(p.get("keys") or [])
+    return []
+
+
+def default_models_for(pid: str) -> list[dict]:
+    """新 key 的**默认模型**（2026-11-18 晚用户口径：新增 key 不配模型，
+    自动按厂商默认填好，用户点进去自己改）。
+
+    来源顺序：厂商预置模型（PROVIDER_PRESETS）→ 该厂商现有任意 key 的模型。
+    都没有就返回空（调用方允许空）。
+    """
+    pid = str(pid or "").strip().lower()
+    preset = PROVIDER_PRESETS.get(pid) or {}
+    ms = [dict(m) for m in (preset.get("models") or []) if isinstance(m, dict)]
+    if not ms:
+        for p in providers():
+            if p["id"] != pid:
+                continue
+            for k in p.get("keys") or []:
+                if k.get("models"):
+                    ms = [dict(m) for m in k["models"]]
+                    break
+    out = []
+    for m in ms:
+        m = dict(m)
+        m["provider"] = pid
+        m["api_key"] = ""            # 模型级 key 留空 → 继承所属 key 类的 key
+        out.append(m)
+    return out
+
+
 def models() -> list[dict]:
-    """当前所有远端模型档案（按优先顺序）。空配置时回落到内置两条。"""
+    """当前所有远端模型档案（按优先顺序）。**由厂商派生**。
+
+    旧配置（只有 `remote.models[]`）会自动迁移到厂商层，迁移后这里返回的是
+    迁移结果 —— 所以调用方不需要知道厂商层存在。
+    """
+    # 厂商层是真相源；providers() 内部已处理"旧配置 → 厂商"的迁移，
+    # 所以这里**直接用 providers()**，不再看 settings 里有没有 providers 字段
+    # （旧配置下那个字段不存在，但迁移结果才是真相）。
+    out = []
+    for p in providers():
+        # key 类层（2026-11-18）：厂商 → key → 模型。key 的继承顺序：
+        # **模型级 > key 类级 > 厂商级**，并盖上 key_id 章供角色解析用。
+        pkey = str(p.get("api_key") or "").strip()
+        for k in p.get("keys") or []:
+            kkey = str(k.get("api_key") or "").strip() or pkey
+            for m in k.get("models") or []:
+                mm = dict(m)
+                mm["provider"] = p["id"]
+                mm["key_id"] = k["id"]
+                mm["compat"] = p["id"] if p["id"] in ("deepseek", "glm") else "openai"
+                if not mm.get("base_url"):
+                    mm["base_url"] = p.get("base_url") or ""
+                if not str(mm.get("api_key") or "").strip():
+                    mm["api_key"] = kkey
+                out.append(mm)
+        # 兜底：某些老路径直接挂在厂商级 models 上（没归进 key 类）
+        have = {id(m) for k in (p.get("keys") or []) for m in (k.get("models") or [])}
+        for m in p.get("models") or []:
+            if id(m) in have:
+                continue
+            mm = dict(m)
+            mm["provider"] = p["id"]
+            mm.setdefault("key_id", next((k["id"] for k in (p.get("keys") or [])
+                                          if k.get("current")), "k1"))
+            mm["compat"] = p["id"] if p["id"] in ("deepseek", "glm") else "openai"
+            if not mm.get("base_url"):
+                mm["base_url"] = p.get("base_url") or ""
+            if not str(mm.get("api_key") or "").strip():
+                mm["api_key"] = pkey or str(mm.get("api_key") or "")
+            out.append(mm)
+    if out:
+        return out
     got = _norm_profiles(get_remote().get("models"))
     if got:
         return got
     return _norm_profiles(DEFAULTS["remote"]["models"])
 
 
+def _bucket_models(profiles: list[dict]) -> dict[str, list[dict]]:
+    """把模型档案按厂商分桶（口径与 `_migrate_providers` 完全一致）。
+
+    抽成函数是为了让 `save_models()` 与一次性迁移共用同一份归类规则 ——
+    两处规则漂移会出现"迁移时归 deepseek、保存后归 openai"这种静默错配。
+    """
+    buckets: dict[str, list[dict]] = {pid: [] for pid in PROVIDER_IDS}
+    for p in profiles or []:
+        compat = str((p or {}).get("compat") or "").strip().lower()
+        base = str((p or {}).get("base_url") or "").strip().lower()
+        if compat == "deepseek":
+            pid = "deepseek"
+        elif "bigmodel" in base or "zhipu" in base or "z.ai" in base:
+            pid = "glm"
+        elif compat == "openai":
+            pid = "openai"
+        else:
+            pid = "deepseek"
+        q = dict(p)
+        q["provider"] = pid
+        buckets[pid].append(q)
+    return buckets
+
+
 def save_models(profiles: list[dict]) -> list[dict]:
-    """整表写回（界面的增/删/改最后都收敛到这里）。返回规范化后的结果。"""
+    """整表写回模型档案。返回规范化后的结果。
+
+    2026-11-11 修真 bug：**厂商层 `providers` 才是 `models()` 的真相源**
+    （11-09「厂商是一等公民」口径）。旧实现只写 `remote["models"]`，
+    而 `models()` 由 `providers()` 派生 —— 写完立刻读不到：
+      · 调用方以为"启用/停用模型"保存成功，实际阶梯没变；
+      · 自检 `save_models()` 后断言 `ladder()` 变化 → 全批假红；
+      · 更坏的是各脚本互相读脏配置，还会把测试档案写进用户真配置。
+    这里同时写回厂商层，并保留旧字段（兼容旧配置回滚 / 老代码路径）。
+
+    刻意**不套用** `_migrate_providers` 的"预置模型优先、停用老档案"逻辑：
+    那是首次迁移的一次性策略；显式 `save_models` 是调用方的主权动作，
+    它设的 enabled=True 不许被悄悄改回 False。
+    """
     data = load()
     remote = data.setdefault("remote", {})
     clean = _norm_profiles(profiles)
-    remote["models"] = clean
+    remote["models"] = clean               # 旧字段保留，向后兼容
+    buckets = _bucket_models(clean)
+    old = {str((p or {}).get("id") or ""): dict(p)
+           for p in (remote.get("providers") or [])
+           if isinstance(p, dict) and (p or {}).get("id")}
+    out = []
+    for pid in PROVIDER_IDS:
+        p = dict(old.get(pid) or PROVIDER_PRESETS[pid])
+        p["id"] = pid
+        p["models"] = buckets.get(pid, [])
+        out.append(p)
+    remote["providers"] = out
     save(data)
     return clean
 
@@ -309,7 +794,12 @@ def active_model() -> dict | None:
     返回 None 表示"一个可用的远端模型都没有"。
     """
     r = get_remote()
-    profs = models()
+    # **只从「正在使用」的厂商里选**（2026-11-09 用户口径：厂商级单选"正在使用"，
+    # 一次运行只用一个厂商；厂商内部再按 priority 选模型）。
+    cur = current_provider()
+    profs = [p for p in models() if str(p.get("provider") or "") == cur.get("id")] \
+        or [p for p in models() if p.get("provider") == cur.get("id")] \
+        or models()
     want_id = str(r.get("active_model") or "").strip()
     if want_id:
         for p in profs:
@@ -325,12 +815,12 @@ def active_model() -> dict | None:
     for p in profs:
         if p.get("enabled", True):
             return p
-    if flat_model or str(r.get("base_url") or "").strip() or str(r.get("api_key") or "").strip():
+    if flat_model or str(cur.get("base_url") or "").strip() or str(cur.get("api_key") or "").strip():
         return _norm_model_profile({"id": flat_model or "flat", "label": flat_model or "平铺配置",
                                     "model": flat_model or "deepseek-flash",
-                                    "compat": r.get("compat") or r.get("provider") or "deepseek",
-                                    "base_url": r.get("base_url") or "",
-                                    "api_key": r.get("api_key") or "",
+                                    "compat": cur.get("id") or "deepseek",
+                                    "base_url": cur.get("base_url") or "",
+                                    "api_key": cur.get("api_key") or "",
                                     "enabled": True})
     return None
 
@@ -532,6 +1022,16 @@ def public_remote(reveal: bool = False) -> dict:
         # **api_key 一律剥掉**：实测接口曾把 models[i].api_key 带出来（当时是空串，
         # 但只要配过就会泄漏）。对外只给 key_configured + 掩码。
         "models": [sanitize_profile(p) for p in models()],
+        # 厂商层（一等公民）：界面渲染"下拉 + 三个长方矩形 + 每家的模型列表"用这份。
+        # api_key 一律只给掩码 + 是否已配置（绝不回明文）。
+        "providers": [{
+            "id": p["id"], "label": p["label"], "base_url": p["base_url"],
+            "efforts": list(p.get("efforts") or []),
+            "current": bool(p.get("current")),
+            "key_configured": bool(p.get("api_key")),
+            "key_masked": mask(p.get("api_key") or ""),
+            "models": [sanitize_profile(m) for m in (p.get("models") or [])],
+        } for p in providers()],
         "ladder": [{"profile_id": s["profile_id"], "model": s["model"],
                     "effort": s["effort"]} for s in ladder()],
     }

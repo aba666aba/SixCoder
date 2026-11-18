@@ -166,7 +166,7 @@ def _report_lines(ws: Path, keys: tuple[str, ...]) -> list[str]:
     return out
 
 
-def run_one(t: dict, ws: Path, out_root: Path, hours: float, max_cny: float) -> dict:
+def run_one(t: dict, ws: Path, out_root: Path) -> dict:
     slug = t["slug"]
     out = out_root / slug
     out.mkdir(parents=True, exist_ok=True)
@@ -187,9 +187,9 @@ def run_one(t: dict, ws: Path, out_root: Path, hours: float, max_cny: float) -> 
 
     before = remote.usage_summary("")
     t0 = time.time()
-    res = company.night(ws, t["req"], "qwen2.5-coder:7b", hours=hours,
+    res = company.night(ws, t["req"], "qwen2.5-coder:7b",
                         use_remote=not t.get("local", False),
-                        max_cny=max_cny, emit=emit)
+                        emit=emit)
     spent_s = time.time() - t0
     after = remote.usage_summary("")
     cost = round(float(after["cost_cny"]) - float(before["cost_cny"]), 4)
@@ -201,7 +201,7 @@ def run_one(t: dict, ws: Path, out_root: Path, hours: float, max_cny: float) -> 
         {k: {kk: (sorted(vv) if isinstance(vv, set) else vv)
              for kk, vv in v.items() if kk in ("funcs", "verified", "verified_names", "stubs",
                                                "missing", "untested", "notes", "fails",
-                                               "hard_failed", "engine_errors")}
+                                               "hard_failed", "engine_failed", "engine_errors")}
          for k, v in state.items()}, ensure_ascii=False, indent=1), encoding="utf-8")
 
     info = {
@@ -245,9 +245,8 @@ def main() -> int:
     ap.add_argument("--dir", default="D:/Download/cal")
     ap.add_argument("--batch", default="1")
     ap.add_argument("--slugs", default="")
-    ap.add_argument("--hours", type=float, default=0.08)
-    ap.add_argument("--max-cny-each", type=float, default=0.6)
-    ap.add_argument("--budget", type=float, default=20.0)
+    ap.add_argument("--budget", type=float, default=20.0,
+                    help="本实验自己的兜底花费线（实验脚本口径，与引擎停机线无关）")
     a = ap.parse_args()
 
     if a.slugs:
@@ -262,17 +261,17 @@ def main() -> int:
     ws = Path(a.dir)
     out_root = PROTO.parent / "_logs" / "lab"
     out_root.mkdir(parents=True, exist_ok=True)
-    print(f"实验目录：{ws}｜{len(todo)} 种系统类型｜单个上限 ¥{a.max_cny_each}｜总预算 ¥{a.budget}\n")
+    print(f"实验目录：{ws}｜{len(todo)} 种系统类型｜实验兜底线 ¥{a.budget}\n")
 
     spent_all = 0.0
     results: list[dict] = []
     for t in todo:
         if spent_all >= a.budget:
-            print(f"已达总预算 ¥{a.budget}，停止")
+            print(f"已达实验兜底线 ¥{a.budget}，停止")
             break
         print(f"=== [{t['slug']}] {t['name']}")
         try:
-            info = run_one(t, ws, out_root, a.hours, a.max_cny_each)
+            info = run_one(t, ws, out_root)
         except Exception as exc:                          # noqa: BLE001
             print(f"  **引擎抛异常** {type(exc).__name__}: {exc}  ← 这是要修的 bug")
             import traceback

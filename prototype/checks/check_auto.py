@@ -99,14 +99,13 @@ MAIN_FULL = CORE_OK
 
 def make_runner(log: list, write_code: bool = True, cost: float = 0.05):
     """假执行器：按简报里列出的能力，真的往仓库里写代码（这样覆盖是真判的）。"""
-    def run(ws, brief, contract_path, budget, **kw):
+    def run(ws, brief, contract_path, **kw):
         import re
         # 只取"本轮要做的能力"这一节：简报后面还有"不要改坏"清单（已通过的能力），
         # 那是**保护名单**，不是本轮的活
         head = brief.split("# 不要改坏")[0].split("# 入口脚本的硬要求")[0]
         caps = re.findall(r"^- (cap\.[a-z0-9_.]+)：", head, re.M)
-        log.append({"caps": caps, "budget": budget, "contract": contract_path,
-                    "brief": brief})
+        log.append({"caps": caps, "contract": contract_path, "brief": brief})
         if write_code:
             ws = Path(ws)
             if "cap.store.record" in caps:
@@ -139,16 +138,14 @@ def main() -> int:
     log: list = []
     em = Emitter()
     llm = FakeLLM()
-    res = auto.night_auto(ws, "做一个 CSV 统计工具", budget_cny=10.0, llm=llm,
+    res = auto.night_auto(ws, "做一个 CSV 统计工具", llm=llm,
                           runner=make_runner(log), emit=em)
     check("按能力数全部通过才 ok", bool(res["ok"]), str(res["reason"]))
     check("覆盖 3/3", res["ratios"] == {"done": 3, "total": 3, "pct": 100.0}, str(res["ratios"]))
     n_sl = int(res["slices"])
     check("至少跑了一片，且每片都有真实产出", n_sl >= 1 and len(log) == n_sl, str((n_sl, len(log))))
-    check("每片都拿到非零预算", all(row["budget"] > 0 for row in log),
-          str([row["budget"] for row in log]))
-    check("单片预算不超过剩余总预算", all(row["budget"] <= 10.0 + 1e-9 for row in log),
-          str([row["budget"] for row in log]))
+    check("每片都带契约路径（不再有片级预算参数）",
+          all(row.get("contract") for row in log), str(log[:1]))
     check("花费按切片累加", abs(res["spent_cny"] - 0.05 * n_sl) < 1e-6,
           f"{res['spent_cny']} vs {0.05 * n_sl}")
     check("蓝图落盘（续跑要用）", (ws / blueprint.BLUEPRINT_FILE).exists())
@@ -193,7 +190,7 @@ def main() -> int:
     check("续跑仍然是完成态", bool(res2["ok"]) and res2["ratios"]["pct"] == 100.0, str(res2["ratios"]))
     check("续跑原因说清是'待办清空'", "待办" in res2["reason"], res2["reason"])
 
-    print("[3] 预算：装不下就**主动砍范围**；花了就停；一分没花也要说清")
+    print("[3] 预算上限机制已移除（2026-11-10）：不再按钱停机/砍范围；有缺口仍要如实说")
     SMALL_CAPS = [
         {"id": "cap.store.record", "desc": "make_record('a') 返回 {'name': 'a'}",
          "probe": {"kind": "py_call", "module": "store", "func": "make_record",
@@ -206,27 +203,23 @@ def main() -> int:
     ws3 = Path(tempfile.mkdtemp(prefix="auto-"))
     log3: list = []
     # 一片就花了 ¥0.20（超过总预算 ¥0.15）→ 下一轮必须停，并把缺口如实列出
-    res3 = auto.night_auto(ws3, "做一个 CSV 统计工具", budget_cny=0.15,
+    res3 = auto.night_auto(ws3, "做一个 CSV 统计工具", max_slices=1,
                            llm=FakeLLM(caps=SMALL_CAPS),
                            runner=make_runner(log3, write_code=False, cost=0.20))
-    check("钱到顶就收工", "预算用尽" in res3["reason"], res3["reason"])
-    check("只跑了 1 片", res3["slices"] == 1, str(res3["slices"]))
+    check("不因花钱而停（唯一停机线=系统预算×1.05，测试环境未设→跑到 max_slices）",
+          "预算" not in res3["reason"], res3["reason"])
+    check("只跑了 1 片（max_slices 生效）", res3["slices"] == 1, str(res3["slices"]))
     check("有缺口时 ok 必须是 False（不许报完成）", not res3["ok"], str(res3["ok"]))
     check("缺口列出来了", len(res3["gaps"]) >= 1, str(res3["gaps"]))
-    ws3b = Path(tempfile.mkdtemp(prefix="auto-"))
-    res3b = auto.night_auto(ws3b, "做一个 CSV 统计工具", budget_cny=0.02, llm=FakeLLM(),
-                            runner=make_runner([], write_code=True))
-    check("预算装不下任何一条能力 → 一分不花、如实说人工介入",
-          res3b["spent_cny"] == 0.0 and res3b["slices"] == 0
-          and "人工介入" in res3b["reason"],
-          f"{res3b['spent_cny']} {res3b['slices']} {res3b['reason']}")
-    check("砍掉的能力记在 budget_cut 里（不是静默消失）", bool(res3b.get("budget_cut")),
-          str(res3b.get("budget_cut")))
+    # 旧的「预算装不下 → 砍范围（budget_cut）」机制已删除：静态钉死不许回来
+    _src = (Path(__file__).resolve().parents[1] / "core" / "auto.py").read_text(
+        encoding="utf-8")
+    check("budget_cut 缩范围机制已移除", "budget_cut" not in _src)
 
     print("[4] 停滞 → 重规划 → 降级留痕（并且一定终止）")
     ws4 = Path(tempfile.mkdtemp(prefix="auto-"))
     log4: list = []
-    res4 = auto.night_auto(ws4, "做一个 CSV 统计工具", budget_cny=20.0, llm=FakeLLM(),
+    res4 = auto.night_auto(ws4, "做一个 CSV 统计工具", llm=FakeLLM(),
                            runner=make_runner(log4, write_code=False))
     check("一句能力都没做成 → ok=False", not res4["ok"], str(res4["ok"]))
     check("至少重规划过一次", res4["replans"] >= 1, str(res4["replans"]))
@@ -257,7 +250,7 @@ def main() -> int:
     ws4b = Path(tempfile.mkdtemp(prefix="auto-"))
     reg_log: list = []
 
-    def reg_runner(ws, brief, contract_path, budget, **kw):
+    def reg_runner(ws, brief, contract_path, **kw):
         import re as _re
         head = brief.split("# 不要改坏")[0].split("# 入口脚本的硬要求")[0]
 
@@ -275,12 +268,12 @@ def main() -> int:
                                          encoding="utf-8")
         return {"ok": True, "reason": "假执行器", "verified": 1, "total": 1, "spent_s": 0.1,
                 "cost_cny": 0.05, "delivery": ""}
-    res4b = auto.night_auto(ws4b, "做一个带测试的小工具", budget_cny=5.0, max_slices=1,
+    res4b = auto.night_auto(ws4b, "做一个带测试的小工具", max_slices=1,
                             llm=FakeLLM(caps=REGR), runner=reg_runner)
     check("先让第一条能力通过（为回归提供前提）",
           res4b["blueprint"].by_id("cap.store.record").status == "done",
           res4b["blueprint"].by_id("cap.store.record").status)
-    res4b2 = auto.night_auto(ws4b, "做一个带测试的小工具", budget_cny=5.0, max_slices=1,
+    res4b2 = auto.night_auto(ws4b, "做一个带测试的小工具", max_slices=1,
                              llm=FakeLLM(caps=REGR), runner=reg_runner)
     regs = res4b2.get("regressions") or []
     check("回归被记录（绿→红不能悄悄发生）", bool(regs), str(regs))
@@ -291,7 +284,7 @@ def main() -> int:
           str((res4b2["blueprint"].notes or [])[-3:]))
     rep4b = Path(res4b2["report"]).read_text(encoding="utf-8")
     check("报告里有回归章节（人能看到'哪些本来是通的'）", "回归" in rep4b, rep4b[:200])
-    res4b3 = auto.night_auto(ws4b, "做一个带测试的小工具", budget_cny=5.0, max_slices=2,
+    res4b3 = auto.night_auto(ws4b, "做一个带测试的小工具", max_slices=2,
                              llm=FakeLLM(caps=REGR), runner=reg_runner)
     check("回归之后还能把它修回来（不放弃）",
           res4b3["blueprint"].by_id("cap.store.record").status == "done",
@@ -396,8 +389,12 @@ def main() -> int:
     got2 = auto.contract_for_slice(ws5, {"id": "s02", "caps": [], "funcs": 8, "modules": []}, "简报")
     check("只有模块名、0 个函数的契约不算缓存（会被重新合成）",
           got2.get("by") != "cached", str(got2))
-    check("重新合成后落盘", (d / "s02.txt").read_text(encoding="utf-8").strip()
-          == SLICE_CONTRACT_TEXT.strip())
+    # 口径（2026-11-12）：落盘文本 = 原考卷 + 引擎接线约束尾巴（auto._wire_constraints，
+    # auto.py:2726-2728 —— 接线约束必须进契约，远端才知道引擎要求什么）。
+    # 故这里断言"原考卷被完整保留"，而不是与原文本全等（那是口径过期，不是代码错）。
+    _landed = (d / "s02.txt").read_text(encoding="utf-8").strip()
+    check("重新合成后落盘（原考卷完整保留 + 接线约束尾巴）",
+          SLICE_CONTRACT_TEXT.strip() in _landed, _landed[:200])
 
     print("[5d] 入口示例不许泄漏到别的模块（否则会去重写不相干的模块）")
     TEXT2 = ("1) entry.py：入口\n   - main(argv: list[str]) -> int：入口\n\n"
@@ -464,27 +461,29 @@ def main() -> int:
     ws_m = Path(tempfile.mkdtemp(prefix="mean-"))
     mlog: list = []
 
-    def stall_runner(ws, brief, contract_path, budget, **kw):
+    def stall_runner(ws, brief, contract_path, **kw):
         import re as _re
         head = brief.split("# 不要改坏")[0].split("# 入口脚本的硬要求")[0]
         mlog.append({"caps": _re.findall(r"^- (cap\.[a-z0-9_.]+)：", head, _re.M),
-                     "contract": contract_path, "budget": budget})
+                     "contract": contract_path})
         return {"ok": True, "reason": "什么都不写", "verified": 0, "total": 1,
                 "spent_s": 0.1, "cost_cny": 0.05, "delivery": ""}
-    mres = auto.night_auto(ws_m, "做一个 CSV 统计工具", budget_cny=5.0, max_slices=3,
+    mres = auto.night_auto(ws_m, "做一个 CSV 统计工具", max_slices=3,
                            llm=FakeLLM(caps=SMALL_CAPS), runner=stall_runner)
     check("无收益的切片被计为无效尝试", mres["wasted"] >= 1, str(mres["wasted"]))
     check("有效调用率如实反映（无效 > 0 就不是 100%）",
           mres["meaningful_rate"] < 1.0, str(mres["meaningful_rate"]))
-    # 换策略的判据：无效之后**重新合成契约**（而不是继续吃缓存）。数 syntheszie 调用次数。
-    check("无效之后换策略：契约被重新合成（不吃旧缓存）", synth_calls[0] >= mres["slices"],
-          f"合成 {synth_calls[0]} 次 / 切片 {mres['slices']} 次")
+    # 口径变更（2026-11-07）：**无效之后不重合成考卷**。旧断言要求"不无效就重新合成"，
+    # 结果是同一片三份考卷、已完成模块全部判退化、da.py 重写 7 次。
+    # 现在无效只缩片 + 换打法（fail_note 带证据），考卷保持同一份 → 可复现、可比对。
+    check("无效之后仍用同一份考卷（可复现）", synth_calls[0] <= max(1, mres["slices"]),
+          f"合成 {synth_calls[0]} 次 / 切片 {mres['slices']} 次（>越界说明又换考卷了）")
     mrep = Path(mres["report"]).read_text(encoding="utf-8")
     check("报告里写明意义性（人能看到多少次调用是白花）", "意义性" in mrep, mrep[:200])
 
     print("[9] 轮数上限与'全降级不等于完成'")
     ws7 = Path(tempfile.mkdtemp(prefix="auto-"))
-    res7 = auto.night_auto(ws7, "做一个 CSV 统计工具", budget_cny=20.0, llm=FakeLLM(),
+    res7 = auto.night_auto(ws7, "做一个 CSV 统计工具", llm=FakeLLM(),
                            runner=make_runner([], write_code=False), max_slices=1)
     check("max_slices 生效", res7["slices"] == 1, str(res7["slices"]))
     all_desc = blueprint.Blueprint(goal="x", caps=[
@@ -496,6 +495,37 @@ def main() -> int:
     res8 = auto.night_auto(ws7, "", llm=FakeLLM(), runner=make_runner([]))
     check("全部降级 → ok=False（不许当完成）", not res8["ok"], str(res8["ok"]))
     check("全部降级 → 明确说要人工介入", "人工介入" in res8["reason"], res8["reason"])
+
+    # 考卷（切片契约）一旦生成，**不许因为"这次没收获"就重合成**：
+    # 新考卷语义一变，之前通过的模块全被判退化 → 全量重写 → 又没收获 → 又换考卷。
+    # 实测 2026-11-07：同一片被换了三份考卷（{"student"} → {"student_id"}），da.py 重写 7 次。
+    src_auto = Path(auto.__file__).read_text(encoding="utf-8")
+    check("没收获时不许换考卷", "force_refresh = True" not in src_auto,
+          "auto.py 里又出现了 force_refresh = True：考卷会被重合成，已完成模块全部作废")
+    check("没收获要发 slice_wasted 事件（可观测）", "slice_wasted" in src_auto)
+
+    # 探针期望值必须跟着契约走（2026-11-07：探针要 s42、契约写 v1，能力永远 absent）
+    class _Cap:
+        def __init__(self, probe):
+            self.probe = probe
+    class _BP:
+        def __init__(self, caps):
+            self._c = caps
+        def by_id(self, cid):
+            return self._c.get(cid)
+    _probe = {"kind": "http", "steps": [
+        {"method": "POST", "path": "/api/v1/x", "expect_status": 201,
+         "expect_json": {"dataset_version": "small_2x2-s42", "students": 2}}]}
+    _bp2 = _BP({"cap.x": _Cap(_probe)})
+    _sl = {"id": "s1", "caps": ["cap.x"]}
+    _text = ('- seed_dataset 返回 {"dataset_version": "small_2x2-v1", "students": 2}。'
+             '- dataset_version 固定为字符串 "small_2x2-v1"。')
+    n = auto._sync_probe_expectations(_bp2, _sl, _text)
+    ej = _probe["steps"][0]["expect_json"]
+    check("探针字符串字段与契约对齐", n == 1 and ej["dataset_version"] == "small_2x2-v1",
+          str(ej))
+    check("数字字段不动（数字错了是真 bug）", ej["students"] == 2, str(ej))
+    check("契约里没有的字段不动", ej.get("nope", "没加") == "没加", str(ej))
 
     print()
     if FAILS:

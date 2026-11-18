@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import ast
 import time
 from pathlib import Path
 
@@ -200,25 +201,44 @@ def render_workingset(ws_decl: dict) -> str:
 
 # ------------------------------------------------------------------ 反向依赖
 def reverse_deps(ws: Path, changed: list[str], limit: int = 40) -> list[tuple[str, str]]:
-    """谁 import 了这些文件（反向依赖）。改了别人依赖的东西，必须知道会波及谁。"""
+    """谁 import 了这些文件（反向依赖）。改了别人依赖的东西，必须知道会波及谁。
+
+    用 AST 取真实 import 再比**模块尾段**，不用字符串搜：旧实现只认
+    `import store` / `from store import ...`，遇到 `from app.store import save`
+    （多包项目里最常见的写法）一律漏掉 —— 实测 2026-11-07：`app/store.py` 的反向依赖
+    返回空，于是"改了会波及谁"永远是"没人"，工作集声明也就没意义。
+    """
     ws = Path(ws)
-    mods = {Path(p).stem for p in changed or []}
-    if not mods:
+    want = {Path(p).stem for p in changed or []}
+    if not want:
         return []
+    changed_set = {str(Path(p).as_posix()) for p in changed}
     out: list[tuple[str, str]] = []
-    for p in ws.rglob("*.py"):
+    for p in sorted(ws.rglob("*.py")):
         if any(part in {".git", ".sixcoder", "__pycache__"} for part in p.parts):
             continue
         try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError):
             continue
-        for m in mods:
-            if f"import {m}" in text or f"from {m} import" in text:
-                rel = str(p.relative_to(ws))
-                if rel not in changed:
-                    out.append((rel, m))
+        hit = ""
+        for node in ast.walk(tree):
+            mods: list[str] = []
+            if isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                mods = [node.module]
+            for m in mods:
+                tail = m.split(".")[-1]
+                if tail in want:
+                    hit = tail
                     break
+            if hit:
+                break
+        if hit:
+            rel = p.relative_to(ws).as_posix()
+            if rel not in changed_set:
+                out.append((rel, hit))
         if len(out) >= limit:
             break
     return sorted(out)

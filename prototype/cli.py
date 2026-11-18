@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import re
 import sys
@@ -52,7 +53,21 @@ def _slim(payload: dict) -> str:
             "phase", "goal", "version", "caps", "funcs", "slice", "cap", "gained", "left",
             "budget_cny", "cost_cny", "spent_cny", "pct", "coverage", "replans", "descoped",
             "contract", "why", "added", "rewired", "funcs_cap", "problems", "next_funcs_cap", "streak", "entry", "n", "changes",
-            "questions", "answered", "samples", "ids")
+            "questions", "answered", "samples", "ids",
+            # 远端能力闸门的可观测字段（2026-11-09）：read_ok / max_out 这些**不在白名单**
+            # → 日志里只剩 path=，"远端到底满不满血"根本看不见（第九次同一种病：
+            # 机制写好了，某条出口没接上）。这几个字段是判断"上下文给全没有、
+            # 配额够不够"的唯一证据，必须打出来。
+            "read_ok", "mode", "tiers", "chars", "max_out", "est_tokens", "basis",
+            "grew_from", "tools", "rounds", "by", "applied", "line_patch",
+            # 回归守护的可观测字段（2026-11-10 23:10）：不在白名单 → 日志只剩 why=，
+            # "这次到底守没守、基线几条、拦了几条"全靠猜（当晚就猜错一次）。
+            "guarded_n", "base_n", "guard_note",
+            "first_pass_rate", "mod_total", "mod_first_pass",
+            "prompt_tokens", "completion_tokens", "reasoning_tokens", "used", "truncated",
+            # 失败证据：bodies_feedback / decision 的"为什么错"（原来只剩 path+attempt，
+            # 失败原因在日志里看不见 → 只能靠猜。跟 read_ok 同一类病：出口没接上）
+            "evidence", "only", "findings", "precision", "targets", "action", "level")
     parts = [f"{k}={payload[k]}" for k in keep if k in payload]
     if not parts:
         # 新事件的字段没进白名单时别再打一行空白（文档 18.5 踩过、dev1106a 又复现：
@@ -182,6 +197,180 @@ def cmd_run(args) -> None:
         sys.exit(1)
 
 
+def _run_estimate(repo, text: str, model: str) -> None:
+    """两步法第一步：构建蓝图 + 估算花费（不跑夜班），把「预计需要多少钱」展示给用户充值。
+
+    单价（谷/峰）与系统预算都来自 .sixcoder/budget.json（用户/运维填写），引擎不编造价格。
+    """
+    if not text.strip():
+        print("[FAIL] 估算需要 --goal 或 --requirement")
+        sys.exit(2)
+    from core import blueprint as _bp
+    from core import budget_estimate as _be
+    print("> 估算模式：构建蓝图并估算花费（不实际开工）")
+    got = _bp.derive(text, llm=_bp._default_llm, ws=repo)
+    if not got.get("ok"):
+        print(f"[FAIL] 蓝图推导失败：{got.get('problems')}")
+        sys.exit(2)
+    bp = got["blueprint"]
+    try:
+        _bp.save(bp, repo)
+    except Exception:                                     # noqa: BLE001
+        pass
+    est = _be.estimate_from_blueprint(repo)
+    if not est.get("ok"):
+        print(f"[WARN] 估算不可用：{est.get('reason')}")
+        return
+    print(_be.format_report(est))
+    snap = _be.budget_snapshot(repo)
+    if snap.get("has_stop_line"):
+        print(f"> 系统预算 ¥{snap['system_budget_cny']:.2f}；总花费超过 ¥{snap['stop_threshold_cny']:.2f} 自动收工。")
+    else:
+        print("> 未设系统预算（.sixcoder/budget.json 无 system_budget_cny）→ 不启停机线。")
+    print("> 开工前把对应金额充入 API 账户；填好 .sixcoder/budget.json 的单价字段可看到金额估算。")
+
+
+def cmd_ui_watch(args) -> None:
+    """界面监督：按轮跑 D7，记台账，按"连续失败"给判定（开发文档 §13.10）。"""
+    from core import blueprint as _bp
+    from core import uiwatch as _uw
+
+    repo = Path(args.repo).resolve()
+    if not repo.is_dir():
+        print(f"> 仓库不存在：{repo}")
+        return
+    if getattr(args, "history", False):
+        print(_uw.render_history(repo, limit=int(getattr(args, "limit", 20) or 20)))
+        return
+    base = str(getattr(args, "ui_base", "") or "")
+    if not base:
+        print("> 缺 --ui-base（前端服务地址，如 http://127.0.0.1:5173）")
+        print("> 只想看历史台账：加 --history")
+        return
+    b = _bp.load(repo)
+    only = None
+    raw = str(getattr(args, "only", "") or "").strip()
+    if raw:
+        only = [x.strip() for x in raw.split(",") if x.strip()]
+
+    def printer(kind, payload) -> None:
+        if kind == "ui_round":
+            print("   round %(round)d  %(caps)d 条探针  失败 %(fail)d  %(ms)dms"
+                  % payload, flush=True)
+        elif kind == "notice":
+            print("   注意：%s" % payload.get("message", ""), flush=True)
+
+    rounds = int(getattr(args, "rounds", 1) or 1)
+    interval = int(getattr(args, "interval", 0) or 0)
+    print(f"> 界面监督  repo={repo}  base={base}  轮数={rounds}  间隔={interval}s")
+    v = _uw.watch(repo, b, base_url=base, rounds=rounds, interval_s=interval,
+                  only=only, emit=printer)
+    print()
+    print("> 判定 %s：%s" % (v.get("action"), v.get("why")))
+    if not rounds or v.get("rounds"):
+        print("> 本轮 %s 轮，覆盖 %s 条探针" % (v.get("rounds"), v.get("caps")))
+    if v.get("median_ms"):
+        print("> 耗时 本轮 %sms，历史中位数 %sms%s"
+              % (v.get("cur_ms"), v.get("median_ms"), "（偏慢）" if v.get("slow") else ""))
+    print()
+    print(_uw.render_history(repo, limit=10))
+
+
+def cmd_full(args) -> None:
+    """全量生成 + 错误报告流程（开发文档 §13）。
+
+    默认**只出报告不改代码**（安全）；要它动手修加 `--repair`。
+    """
+    from core import fullgen
+
+    repo = Path(args.repo).resolve()
+    if not repo.is_dir():
+        print(f"> 仓库不存在：{repo}")
+        return
+    detect_only = not bool(getattr(args, "repair", False))
+    print(f"> 仓库 {repo}  模式={'仅检测（出报告）' if detect_only else '检测+修复循环'}")
+    print(f"> 全量检测 D1–D6（D6 端到端默认跳过，加 --e2e 才跑，很慢）")
+
+    def printer(kind, payload) -> None:
+        if kind == "full_round":
+            _ch = payload.get("cache_hit", -1)
+            _chtxt = ("  缓存命中 %.0f%%" % (_ch * 100)) if isinstance(_ch, (int, float)) and _ch >= 0 else ""
+            print("   round %(round)d  E=%(errors)d（P0=%(p0)d P1=%(p1)d）"
+                  "  done=%(done)s/%(total)s  → %(action)s" % payload + _chtxt, flush=True)
+            if payload.get("why"):
+                print(f"      {payload['why']}", flush=True)
+        elif kind == "full_repair":
+            print(f"   repair  {payload['file']}  错误 {payload['errors']} 条", flush=True)
+        elif kind == "full_switch":
+            print(f"   换策略：{payload.get('why','')}", flush=True)
+        elif kind == "full_mode":
+            print("   场景：%s（%d 个业务模块）"
+                  % ("空项目→从零写" if payload.get("mode") == "scratch"
+                     else "已有仓库→分析优化", payload.get("modules", 0)), flush=True)
+        elif kind == "full_domain_done":
+            print("   域 %s %s（%d 字符）" % (payload.get("domain"),
+                                          "✓" if payload.get("ok") else "✗",
+                                          payload.get("chars", 0)), flush=True)
+        elif kind == "full_domain_start":
+            print("   域 %s（%d 条能力）生成中…" % (payload.get("domain"),
+                                                  payload.get("caps") or 0), flush=True)
+        elif kind == "detector" and payload.get("name") == "d7":
+            print("   d7 界面: %d 条" % payload.get("errors", 0), flush=True)
+        elif kind == "detector":
+            print(f"   {payload['name']}: {payload['errors']} 条", flush=True)
+        elif kind == "full_layer":
+            print(f"   生成层 {payload['layer']}（{payload['files']} 文件）", flush=True)
+        elif kind == "notice":
+            print(f"   注意：{payload.get('message','')}", flush=True)
+
+    if getattr(args, "gen_contract_only", False):
+        from core import blueprint as _bp
+        print("> 只生成全项目契约（分域）。这一步慢，跑完就锁定了。")
+        b = _bp.load(repo)
+        g = fullgen.generate_contract_by_domain(
+            repo, b, emit=printer, max_domains=int(getattr(args, "max_domains", 0) or 0))
+        print()
+        print("> ok=%s 域数=%s 函数=%s 端点=%s 字符=%s"
+              % (g.get("ok"), len(g.get("domains") or []), g.get("funcs"),
+                 g.get("routes"), g.get("chars")))
+        for d in (g.get("domains") or []):
+            print("   %-10s %s  %d 条能力  %d 字符 %s"
+                  % (d.get("name"), "✓" if d.get("ok") else "✗",
+                     d.get("caps") or 0, d.get("chars") or 0,
+                     ("问题：" + str(d.get("problems"))) if not d.get("ok") else ""))
+        print("> 锁定文件 %s" % g.get("path"))
+        if not g.get("ok"):
+            print("> 失败原因：%s" % (g.get("problems") or []))
+        return
+
+    r = fullgen.run(repo, emit=printer, max_rounds=int(args.max_rounds or 6),
+                    detect_only=detect_only,
+                    from_scratch=bool(getattr(args, "from_scratch", False)),
+                    max_files=int(getattr(args, "max_files", 6) or 6),
+                    per_file=bool(getattr(args, "per_file", False)),
+                    refresh_contract=bool(getattr(args, "refresh_contract", False)),
+                    mode=str(getattr(args, "gen_mode", "auto") or "auto"),
+                    ui_base=str(getattr(args, "ui_base", "") or ""),
+                    only_e2e=None if getattr(args, "e2e", False) else None)
+    print()
+    print("> 结果：" + ("收敛/可继续" if r.get("ok") else "已停（见下）"))
+    print(f"> 场景 {r.get('mode','?')}  轮数 {r['rounds']}  耗时 {r['elapsed_s']}s")
+    st = r.get("stats") or {}
+    if st:
+        print(f"> 错误 {st.get('total')} 条（P0={st.get('P0')} P1={st.get('P1')} "
+              f"P2={st.get('P2')} P3={st.get('P3')}）")
+    v = r.get("verdict") or {}
+    if v:
+        print(f"> 判据 {v.get('action')}：{v.get('why')}")
+    print(f"> 报告 {r.get('report')}")
+
+
+# 收敛判据叫人（振荡/停滞/预算/远端配置）时的退出码：watchdog 见到它必须**真的停下**，
+# 不许当 rc=0 的"正常跑完"续跑（2026-11-16 实测空转烧 ¥5）。
+# 与 tools/watchdog_night.py 的 HUMAN_STOP_RC 同值（check_watchdog_schedule.py 钉一致）。
+HUMAN_STOP_RC = 42
+
+
 def cmd_night(args) -> None:
     """夜班（公司制）：甲方模式提需求 → 内部做完所有决策 → 早上读交付报告。
 
@@ -250,6 +439,11 @@ def cmd_night(args) -> None:
         print(f"[FAIL] {exc}")
         sys.exit(4)
 
+    # 两步法第一步：只构建蓝图 + 估算花费，不实际开工（供用户充值参考）
+    if getattr(args, "estimate", False):
+        _run_estimate(repo, (goal or requirement), model)
+        sys.exit(0)
+
     def printer(kind, payload) -> None:
         # 默认打印**所有**事件。以前用 kind 白名单决定可见性，结果新加的
         # selfcheck_done / wiring / probe_aligned / regression 全被吞掉，
@@ -265,8 +459,7 @@ def cmd_night(args) -> None:
         from core import blueprint as _bp
         print(f"> 全自主模式：目标「{goal}」")
         print(f"> 仓库 {repo}  model={model}")
-        print(f"> 总预算 " + (f"¥{args.max_cny:.2f}" if args.max_cny else "（未设，不封顶）")
-              + (f"｜时间 {args.hours}h" if args.hours else ""))
+        print("> 预算机制：无用户上限；唯一停机线 = 系统总预算 ×1.05（见 .sixcoder/budget.json）")
         approve = None
         if getattr(args, "approve_plan", False):
             def approve(bp) -> bool:                     # noqa: F811
@@ -307,23 +500,55 @@ def cmd_night(args) -> None:
             if _arch.get("asked_only"):
                 sys.exit(0)
             _arch.pop("asked_only", None)
-        res = _auto.night_auto(repo, goal, budget_cny=args.max_cny, hours=args.hours,
-                               model=model,
-                               max_slices=getattr(args, "max_slices", 0) or 0,
-                               max_rounds=args.max_rounds,
-                               slice_hours=getattr(args, "slice_hours", 0.0) or 0.0,
-                               fresh=getattr(args, "fresh", False),
-                               emit=None if args.quiet else printer, approve=approve,
-                               spec_samples=_samples, arch=_arch or None,
-                               selfcheck=not getattr(args, "no_selfcheck", False))
-        print("\n■ " + _auto.describe(res))
-        if res.get("report"):
-            print(f"  自主报告 {res['report']}")
-        for row in (res.get("descoped") or [])[:6]:
-            print(f"  降级 {row}")
-        for row in (res.get("blocked") or [])[:6]:
-            print(f"  受阻 {row.get('cap')}：{row.get('why')}")
-        sys.exit(0 if res.get("ok") else 1)
+        # **新路径（唯一）**：判型 → 供料 → 整仓施工 → 全量验证（core/night.py）
+        # 旧路径（night_auto：切片 + 每片契约 + 片预算）已冻结，只在"人参与设计"
+        # 的那几个参数（--clarify/--ask/--interview/验收样例）出现时才回落，
+        # 因为那属于另一个模式，新路径不承担架构问答。
+        _need_legacy = bool(
+            getattr(args, "clarify", False) or getattr(args, "ask", False)
+            or getattr(args, "answers", "") or getattr(args, "interview", False)
+            or getattr(args, "spec_sample", ""))
+        # 应急逃生口：新路径若当晚出问题，设 SIXCODER_NIGHT_LEGACY=1 即可回到旧路径，
+        # 不用改代码（改代码要重启看门狗，深夜里代价更大）。
+        if os.environ.get("SIXCODER_NIGHT_LEGACY", "") not in ("", "0", "false", "False"):
+            _need_legacy = True
+            print("[NOTE] SIXCODER_NIGHT_LEGACY=1 → 强制走旧路径（切片式 night_auto）")
+        if _need_legacy:
+            print("[NOTE] 检测到架构问答/验收样例参数 → 走旧路径（night_auto，切片式）；"
+                  "纯夜班请只给 --repo/--goal-file，走整仓路径")
+            res = _auto.night_auto(repo, goal, model=model,
+                                   max_slices=getattr(args, "max_slices", 0) or 0,
+                                   max_rounds=args.max_rounds,
+                                   fresh=getattr(args, "fresh", False),
+                                   emit=None if args.quiet else printer, approve=approve,
+                                   spec_samples=_samples, arch=_arch or None,
+                                   selfcheck=not getattr(args, "no_selfcheck", False))
+            print("\n■ " + _auto.describe(res))
+            if res.get("report"):
+                print(f"  自主报告 {res['report']}")
+            for row in (res.get("descoped") or [])[:6]:
+                print(f"  降级 {row}")
+            for row in (res.get("blocked") or [])[:6]:
+                print(f"  受阻 {row.get('cap')}：{row.get('why')}")
+            sys.exit(0 if res.get("ok") else 1)
+
+        from core import night as _night_mod
+        res = _night_mod.run(repo, goal, model=model,
+                             max_rounds=args.max_rounds,
+                             fresh=getattr(args, "fresh", False),
+                             emit=None if args.quiet else printer,
+                             remote_profile=getattr(args, "remote_model", "") or "",
+                             plan=plan,
+                             refresh_contract=bool(getattr(args, "refresh_contract", False)))
+        print(f"\n■ 夜班结束（{getattr(res, 'mode', '?')}）："
+              f"{res.verified}/{res.total} 验收通过｜{res.spent_s:.0f}s｜{res.reason}")
+        if getattr(res, "delivery_path", ""):
+            print(f"  交付报告 {res.delivery_path}")
+        _human = str(getattr(res, "need_human", "") or "")
+        if _human:
+            print(f"  [叫人] {_human}（退出码 {HUMAN_STOP_RC}：看门狗不会续跑）")
+            sys.exit(HUMAN_STOP_RC)
+        sys.exit(0 if res.ok else 1)
 
     # 规模分级：不同代码规模该有的约束不一样，提需求时就要写明目标规模。
     from core import scale as _scale
@@ -337,23 +562,23 @@ def cmd_night(args) -> None:
     print(f"> 门禁：执行 {', '.join(_scale.gate_plan(scope['level'])['run'])}")
     print(f">       不做 {', '.join(n for n, _ in _scale.gate_plan(scope['level'])['skip']) or '（无）'}")
     print(f"> {policy.describe(pol)}")
-    print(f"> 仓库 {repo}  model={model}  预算 {args.hours}h")
+    print(f"> 仓库 {repo}  model={model}")
     if plan.strip():
         print("> 实现方案（权威）已注入：", plan.strip().splitlines()[0][:60])
 
-    # 预算：没给就按代码规模取默认（S 0.5h / M 2h / L 6h / XL 12h）
-    hours = args.hours or _scale.default_hours(scope["level"])
-    print(f"> 预算 {hours}h（{'按规模默认' if not args.hours else '命令行指定'}）")
-    res = company.night(repo, requirement, model, hours=hours,
+    res = company.night(repo, requirement, model,
                         use_remote=not args.no_remote,
                         max_rounds=args.max_rounds,
                         emit=None if args.quiet else printer, plan=plan,
                         remote_profile=getattr(args, "remote_model", "") or "",
-                        max_cny=getattr(args, "max_cny", 0.0) or 0.0,
                         scale_level=(scope.get("level") if args.scale else ""))
     print(f"\n■ 夜班结束：{res.verified}/{res.total} 验收通过｜{res.spent_s:.0f}s｜{res.reason}")
     if res.delivery_path:
         print(f"  交付报告 {res.delivery_path}")
+    _human = str(getattr(res, "need_human", "") or "")
+    if _human:
+        print(f"  [叫人] {_human}（退出码 {HUMAN_STOP_RC}：看门狗不会续跑）")
+        sys.exit(HUMAN_STOP_RC)
     if not res.ok:
         sys.exit(1)
 
@@ -445,7 +670,8 @@ def cmd_plan(args) -> None:
     bp = blueprint.load(ws)
     if not bp.caps:
         print("[FAIL] 还没有蓝图：先跑一次 "
-              '`sixcoder night --repo <目录> --goal "一句话目标" --max-cny 1`')
+              '`sixcoder night --repo <目录> --goal "一句话目标" --estimate` 看估算，'
+              '再去掉 --estimate 正式开工')
         sys.exit(2)
     if what == "show":
         print(blueprint.summary(bp))
@@ -494,6 +720,100 @@ def cmd_plan(args) -> None:
         return
     print(f"[FAIL] 不认识的视图：{what}（show / slices / cover / trace）")
     sys.exit(2)
+
+
+def cmd_model(args) -> None:
+    """领域模型：一份 model.json + 四张图（ER / 状态 / 时序 / 组件）。只读、零花费。
+
+    为什么要这一层（2026-11-08）：流水线原来是"需求 → 能力清单 → 切片 → 代码"，
+    中间没有模型，于是每一处改都只改自己那一小块 —— 没有"整体"可以对照，
+    改一个字段不知道会影响谁。模型层把实体/状态/主干/组件固化成唯一真相，
+    代码校验和文档图都从它出，才不会一处改完全盘散。
+
+    只建四种关系（用户明确"只构建需要的关系即可"）：用例/DFD/甘特/WBS 那些
+    要么是本层四张图的另一种画法，要么是项目管理产物，不另建真相。
+    """
+    _need("agent.run")
+    from core import blueprint as _bp
+    from core import model as _md
+    ws = Path(args.repo)
+    bp = _bp.load(ws)
+    m = _md.ensure(bp, ws, write=args.write)
+    if args.enrich:
+        from core import remote as _rm
+        print("语义补全（远端只补状态转换与不变式，事实由引擎校验）…")
+        got = _md.enrich(m, _rm.complete, bp.goal or "")
+        if got.get("ok"):
+            print(f"  采纳 {got.get('applied', 0)} 条转换；丢弃 {len(got.get('dropped') or [])} 条")
+            for d in (got.get("dropped") or [])[:6]:
+                print(f"    丢弃：{d}")
+        else:
+            print(f"  跳过：{got.get('error')}")
+    probs = _md.validate(m)
+    # 缺口：先自动消解能消解的（图论源点 / 入度排序），剩下的如实列出来
+    left = _md.resolve_gaps(m, bp)
+
+    print(f"仓库 {ws}")
+    print(f"实体 {len(m.entities)}｜主干步数 {sum(len(f.steps) for f in m.flows)}"
+          f"｜组件 {len(m.components)}｜模型自洽问题 {len(probs)}")
+    print()
+    for e in m.entities:
+        fk = [f"{f.name}→{f.fk}" for f in e.fields if f.fk]
+        st = f" 状态 {','.join(e.statuses)}（初始 {e.initial}）" if e.statuses else ""
+        print(f"  {e.name:16s} {len(e.fields):2d} 字段"
+              + (f" 外键 {','.join(fk)}" if fk else "") + st)
+    for fl in m.flows:
+        print(f"\n  主干流 {fl.name}（{len(fl.steps)} 步）：")
+        for i, s in enumerate(fl.steps, 1):
+            print(f"    {i:2d}. {s['method']:5s} {s['path']}")
+    if probs:
+        print("\n  模型问题：")
+        for p in probs[:10]:
+            print(f"    - {p}")
+    if left:
+        print(f"\n  缺口 {len(left)} 项（引擎不猜，未消解的如实列出）：")
+        for g in left[:12]:
+            who = f"{g.entity}: " if g.entity else ""
+            print(f"    [{g.kind}] {who}{g.detail}")
+            print(f"        消解方式：{g.how}")
+    else:
+        print("\n  缺口 0 项（能机械消解的都消解了）")
+
+    # 不变式 → 可执行探针（模板化；造不出真实请求体就不造，绝不编字段）
+    inv_caps = _md.invariant_probes(m, bp)
+    if inv_caps:
+        print(f"\n  可从不变式生成的负向探针 {len(inv_caps)} 条：")
+        for ic in inv_caps:
+            print(f"    {ic['cap_id']}（{ic['kind']}，{len(ic['steps'])} 步）{ic['desc'][:60]}")
+        if args.apply_invariants:
+            from core import blueprint as _bp2
+            added = 0
+            for ic in inv_caps:
+                if bp.by_id(ic["cap_id"]):
+                    continue
+                bp.add(_bp2.Cap(id=ic["cap_id"], desc=ic["desc"], funcs_est=3,
+                                probe={"kind": "http", "steps": ic["steps"]}))
+                added += 1
+            if added:
+                _bp2.save(bp, ws)
+                print(f"    已写入蓝图 {added} 条（下一轮切片会带上）")
+        else:
+            print("    （加 --apply-invariants 写进蓝图）")
+    if m.notes:
+        print("\n  说明：")
+        for n in m.notes[:6]:
+            print(f"    - {n}")
+
+    if args.write:
+        p = _md.save(m, ws)
+        print(f"\n已写 {p}")
+        d = ws / ".sixcoder" / "diagrams"
+        d.mkdir(parents=True, exist_ok=True)
+        for name, txt in _md.to_mermaid(m).items():
+            (d / f"{name}.mmd").write_text(txt, encoding="utf-8")
+            print(f"已写 {d / (name + '.mmd')}")
+    else:
+        print("\n（只读模式；加 --write 写入 .sixcoder/model.json 与 diagrams/*.mmd）")
 
 
 def cmd_contract(args) -> None:
@@ -1030,9 +1350,9 @@ def build() -> argparse.ArgumentParser:
     sp.add_argument("--goal-file", default="",
                     help="目标文本文件路径（长需求用这个，内容整份作为 goal；与 --goal 二选一）")
     sp.add_argument("--max-slices", type=int, default=0,
-                    help="全自主模式：最多做几个切片（0 = 不限，直到覆盖完成/钱用完）")
-    sp.add_argument("--slice-hours", type=float, default=0.0,
-                    help="全自主模式：单个切片的时间预算（默认 0.5h）")
+                    help="全自主模式：最多做几个切片（0 = 不限，直到覆盖完成）")
+    sp.add_argument("--estimate", action="store_true",
+                    help="两步法第一步：只构建蓝图 + 估算花费（不跑夜班），供充值参考")
     sp.add_argument("--fresh", action="store_true",
                     help="全自主模式：忽略已有蓝图重新推导（默认续跑，已通过的能力不重做）")
     sp.add_argument("--spec-sample", default="",
@@ -1052,24 +1372,69 @@ def build() -> argparse.ArgumentParser:
     sp.add_argument("--no-selfcheck", action="store_true",
                     help="关掉片内自验（作者不能自己跑验收命令，只能事后判红整片重来；"
                          "只在做对照实验时用，平时别关）")
+    sp.add_argument("--refresh-contract", action="store_true",
+                    help="重新生成全量契约并覆盖锁定文件（**缓存全部失效**，只在需求变了时用）")
     sp.add_argument("--plan", default="", help="实现方案（开发者模式下是权威，不许系统改架构）")
     sp.add_argument("--plan-file", default="", help="实现方案文件路径")
     sp.add_argument("--allow-no-plan", action="store_true",
                     help="开发者模式下没有方案也允许跑（默认不允许：架构决策归人）")
-    sp.add_argument("--hours", type=float, default=0.0,
-                    help="预算小时数（默认按代码规模：S 0.5 / M 2 / L 6 / XL 12）")
     sp.add_argument("--max-rounds", type=int, default=40)
     sp.add_argument("--model", default="")
     sp.add_argument("--scale", default="", choices=["", "S", "M", "L", "XL", "s", "m", "l", "xl"],
                     help="目标代码规模（S/M/L/XL）。不写就在需求里写『代码规模：M』，"
                          "再没有就按仓库实测推断并在报告里注明")
-    sp.add_argument("--max-cny", type=float, default=0.0,
-                    help="花费硬上限（人民币）；超过即收工。0 = 不设上限")
     sp.add_argument("--remote-model", default="",
                     help="只走这个远端模型档案（flash / pro）；不写 = 整条八档阶梯")
     sp.add_argument("--no-remote", action="store_true", help="不用远端（纯本地，质量会明显下降）")
     sp.add_argument("--quiet", action="store_true")
     sp.set_defaults(fn=cmd_night)
+
+    sp = sub.add_parser("full",
+                        help="全量生成+错误报告：本地工具全量检测→出报告→交远端修（开发文档 §13）")
+    sp.add_argument("--repo", required=True)
+    sp.add_argument("--repair", action="store_true",
+                    help="真的让远端按报告修（默认只出报告，不改代码）")
+    sp.add_argument("--e2e", action="store_true",
+                    help="连端到端探针一起跑（D6，很慢；默认跳过）")
+    sp.add_argument("--from-scratch", action="store_true",
+                    help="按三层（models→services→api）从零分批生成")
+    sp.add_argument("--max-rounds", type=int, default=6)
+    sp.add_argument("--per-file", action="store_true",
+                    help="旧口径兜底：按错误文件派单、一轮最多改 --max-files 个。"
+                         "默认**不用**：远端拿整仓快照 + 整仓写权限，"
+                         "先归因再改（跨文件根因只有整仓视角才看得见）")
+    sp.add_argument("--max-files", type=int, default=6,
+                    help="只在 --per-file 下有效：一轮最多改几个文件")
+    sp.add_argument("--gen-contract-only", action="store_true",
+                    help="只生成全项目契约（分域、可续跑），不写代码。"
+                         "空项目第一步：**这一步很慢（单域 1-3 分钟），"
+                         "建议在你自己终端跑，别让 AI 会话把它回收**")
+    sp.add_argument("--ui-base", default="",
+                    help="前端服务地址（如 http://127.0.0.1:5173）。"
+                         "给了才跑 D7 界面检测（Playwright + axe-core）")
+    sp.add_argument("--max-domains", type=int, default=0,
+                    help="本次最多生成几个域（0=全部）；跑不完下次接着跑剩下的")
+    sp.add_argument("--mode", dest="gen_mode", default="auto",
+                    choices=["auto", "scratch", "repair"],
+                    help="生成口径：auto=自动判定（模块<3 当空项目从零写，否则已有仓库分析优化）；"
+                         "scratch=强制从零写；repair=强制只改有错的地方。"
+                         "**注意**：这个 --mode 是「生成口径」，与全局 --mode（权限模式 "
+                         "client/developer/readonly）不是一回事；以前两者共用 dest=mode，"
+                         "跑 `full` 会把权限模式静默改成 client（2026-11-15 修）")
+    sp.add_argument("--refresh-contract", action="store_true",
+                    help="重新生成全量契约并覆盖锁定文件（**会导致缓存全部失效**，只在需求变了时用）")
+    sp.set_defaults(fn=cmd_full)
+
+    sp = sub.add_parser("ui-watch",
+                        help="界面监督：按轮跑 D7 并记台账，连续失败才告警（开发文档 §13.10）")
+    sp.add_argument("--repo", required=True)
+    sp.add_argument("--ui-base", default="", help="前端服务地址，如 http://127.0.0.1:5173")
+    sp.add_argument("--rounds", type=int, default=1, help="跑几轮（默认 1）")
+    sp.add_argument("--interval", type=int, default=0, help="轮间隔秒数（默认 0）")
+    sp.add_argument("--only", default="", help="只跑这些能力 id，逗号分隔")
+    sp.add_argument("--history", action="store_true", help="只读台账历史（不跑浏览器）")
+    sp.add_argument("--limit", type=int, default=20, help="--history 时显示最近几条")
+    sp.set_defaults(fn=cmd_ui_watch)
 
     sp = sub.add_parser("plan", help="自主规划：看蓝图/切片/覆盖/单条能力溯源（只读，不花 token）")
     sp.add_argument("what", nargs="?", default="show",
@@ -1081,6 +1446,16 @@ def build() -> argparse.ArgumentParser:
     sp.add_argument("--goal", default="", help="ask 用：一句话目标（提问的依据）")
     sp.add_argument("--answers", default="", help="ask 用：答案文件；给了就直接把安排定下来")
     sp.set_defaults(fn=cmd_plan)
+
+    sp = sub.add_parser("model", help="领域模型：实体/状态/主干流/组件 + 四张图（只读，不花 token）")
+    sp.add_argument("--repo", required=True, help="仓库目录")
+    sp.add_argument("--write", action="store_true",
+                    help="写入 .sixcoder/model.json 与 .sixcoder/diagrams/*.mmd")
+    sp.add_argument("--enrich", action="store_true",
+                    help="让远端补状态转换与业务不变式（会花钱；事实部分由引擎校验拦截）")
+    sp.add_argument("--apply-invariants", action="store_true",
+                    help="把可机械执行的不变式写成负向探针，加进蓝图")
+    sp.set_defaults(fn=cmd_model)
 
     sp = sub.add_parser("contract", help="契约反推：从现有代码反推结构化契约（只读，不花 token）")
     sp.add_argument("--repo", required=True, help="存量仓库目录")

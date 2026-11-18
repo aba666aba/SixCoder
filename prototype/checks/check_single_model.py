@@ -21,6 +21,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# 隔离：自检不许碰用户真配置（开发文档铁律：自检必须走独立 SIXCODER_SETTINGS）。
+import os as _os
+import tempfile as _tf
+_os.environ["SIXCODER_SETTINGS"] = str(Path(_tf.mkdtemp(prefix="sixcoder_sm_")) / "settings.json")
 from core import company, contractgen, dosing, effort, policy, settings_store  # noqa: E402
 
 FAILS: list[str] = []
@@ -88,14 +92,19 @@ def main() -> int:
           f"{settings_store.get_remote().get('model')!r}")
 
     # ---------------------------------------------------------------- 3 自动路由
-    print("[3] 思考强度自动路由（按需求/难度）")
-    check("规格/方案 → 最深（max）", effort.route("spec") == "max")
-    check("机械活（样板/校验/日志/适配）→ 不思考（none）",
-          effort.route("mechanical") == "none" and effort.route("delegate") == "none")
-    lvl = {0: "none", 1: "low", 3: "high", 5: "max", 99: "max"}
+    # 2026-11-10 口径：route() 只表达"封顶心愿档"（全 kind=max）；
+    # 写码起点 = proven_floor（模块实测档案）优先 + route_start（难度先验）兜底。
+    print("[3] 思考强度路由（封顶恒 max；起点按模块档案/难度先验）")
+    check("封顶语义：spec → max", effort.route("spec") == "max")
+    check("封顶语义：mechanical/delegate/code → max（模型物理上限）",
+          effort.route("mechanical") == "max" and effort.route("delegate") == "max"
+          and effort.route("code") == "max")
+    lvl = {0: "none", 2: "none", 3: "low", 5: "low", 6: "high", 99: "high"}
     for score, want in lvl.items():
-        check(f"代码难度分 {score} → {want}", effort.route("code", score) == want,
-              effort.route("code", score))
+        check(f"起点先验 route_start({score}) = {want}",
+              effort.route_start(score) == want, effort.route_start(score))
+    check("起点先验永不给 max（max 留给 spec/升档救场）",
+          all(effort.route_start(s) != "max" for s in range(10)))
     d0 = effort.difficulty()
     d_hard = effort.difficulty(deps=3, funcs=7, examples=4, fails=2, stub=True, lines=400)
     check("难度分：空模块 = 0", d0 == 0, str(d0))
@@ -205,11 +214,12 @@ def main() -> int:
     app_vue = (root / "web" / "src" / "App.vue").read_text(encoding="utf-8", errors="replace")
     check("界面有『设为当前』= 切换当前模型",
           "useProfile" in app_vue and "设为当前" in app_vue)
-    # 2026-11-07 界面重构：旧的「当前模型」三合一填写区已改成"卡片列表 → 点开详情"。
-    # 等价能力仍要钉住：点开后能改请求网址 / API key / 请求参数，并保存这个模型。
-    check("界面点开模型可改连接参数并保存（网址 / key / 请求参数）",
-          "请求网址" in app_vue and "API key" in app_vue and "请求参数" in app_vue
-          and "saveProfile" in app_vue and "保存这个模型" in app_vue)
+    # 2026-11-09 厂商一等公民重构：连接参数（请求网址 / API key）的编辑移到了
+    # 厂商弹窗的「连接」区，保存动作是 saveProviderDraft / 「保存这个厂商」
+    # （App.vue:2022-2023、:256、:2094）。等价能力仍在，只是位置/措辞变了。
+    check("界面点开厂商可改连接参数并保存（网址 / key）",
+          "请求网址" in app_vue and "API key" in app_vue
+          and "saveProviderDraft" in app_vue and "保存这个厂商" in app_vue)
     check("界面不再出现旧的美元价目表编辑器", "价目表（可编辑" not in app_vue
           and "美元 / 每百万 token" not in app_vue)
 

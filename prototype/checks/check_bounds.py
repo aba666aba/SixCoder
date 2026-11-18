@@ -214,6 +214,48 @@ def main() -> int:
                 len(state["store.py"]["verified_names"]) == 3,
                 f"{state['clean.py']['verified_names']} / {state['store.py']['verified_names']}")
 
+    # 5b) 假绿洞二（2026-11-10 修）：**判据引擎自己没跑起来**的函数，
+    #     不许被 e2e 业务流洗成"已验收"。
+    #     以前这类函数和"契约太薄造不出判据"的函数一起塞进 untested，
+    #     e2e 一跑通就被算成已验收 → 模块判绿、标 done、再也不碰，
+    #     而它从头到尾**没有任何机械判据验证过**（机制问题被记成产物合格）。
+    #     这跟 [5] 是两个洞：[5] 是"判红被洗绿"，这里是"根本没判过也被洗绿"。
+    d2 = Path(tempfile.mkdtemp())
+    (d2 / "clean.py").write_text(CLEAN, encoding="utf-8")
+    (d2 / "store.py").write_text(STORE, encoding="utf-8")
+    (d2 / "report.py").write_text(REPORT_CRASH, encoding="utf-8")
+    _real_run = props.run
+
+    def _run_break_summarize(ws, rel, checks, *a, **k):
+        """只让 summarize 的判据起不来（模拟探针路径 bug），其余照常跑。"""
+        if any("summarize" in str((c or {}).get("expr") or "") for c in (checks or [])):
+            return {"ok": False, "engine_error": True, "passed": 0, "total": 1,
+                    "fails": [{"kind": "no-output", "detail": "模拟探针起不来"}]}
+        return _real_run(ws, rel, checks, *a, **k)
+
+    try:
+        props.run = _run_break_summarize
+        st_e = iterate.inspect(d2, contracts)
+    finally:
+        props.run = _real_run
+    rep = st_e["report.py"]
+    _cov = (iterate.last_e2e(d2) or {}).get("covers") or []
+    ok &= check("前提：e2e 业务流确实覆盖 summarize（否则下面几条是空断言）",
+                "summarize" in _cov, str(_cov))
+    ok &= check("判据引擎故障 → 记成 engine_errors（不是产物错）",
+                bool(rep.get("engine_errors")), str(rep.get("engine_errors")))
+    ok &= check("且点名到具体函数 engine_failed（可精准归因，不搞模块级一刀切）",
+                "summarize" in (rep.get("engine_failed") or []), str(rep.get("engine_failed")))
+    ok &= check("它没被 e2e 洗成已验收（假绿洞已堵）",
+                "summarize" not in (rep.get("verified_names") or []),
+                str(rep.get("verified_names")))
+    ok &= check("它仍留在 untested（没证据就不许算通过）",
+                "summarize" in (rep.get("untested") or []), str(rep.get("untested")))
+    ok &= check("同一工地里 clean/store 没被误伤（精准归因，不连坐）",
+                len(st_e["clean.py"]["verified_names"]) == 4 and
+                len(st_e["store.py"]["verified_names"]) == 3,
+                f"{st_e['clean.py']['verified_names']} / {st_e['store.py']['verified_names']}")
+
     # 6) 可维护性硬指标：圈复杂度超标必红、正常实现不误杀
     d = Path(tempfile.mkdtemp())
     (d / "messy.py").write_text(COMPLEX, encoding="utf-8")

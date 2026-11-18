@@ -77,17 +77,26 @@ def suggest_max_funcs(*, capacity: int = 6000, per_func: int = 0, examples: int 
         shrink = min(0.4, 0.08 * min(int(deps), 5))
         n = int(n * (1.0 - shrink))
         reasons.append(f"依赖 {deps} 个 → 上下文变大，缩小 {int(shrink * 100)}%")
+    # 一次通过率**只记录，不用来缩小**（2026-11-09 用户铁律：完全相信远端）。
+    #
+    # 为什么不能用它缩小：那个"一次通过率"的分母里混着**引擎自己的缺陷造成的失败**
+    # （写坏数据被回滚、契约函数缺失其实是新函数被丢掉、404 其实是路由接线判错）。
+    # 那些今天都修了，但历史失败已经计入分母 → 一次通过率被系统性低估 →
+    # 于是引擎用"远端不行"的证据去缩小给远端的活 → 远端拿到的任务更小 →
+    # 更做不出有难度的东西 → 通过率更低。**又一个自我强化的错误闭环。**
+    #
+    # 现在：切片大小只由**输出配额 ÷ 每函数 token**决定（物理约束，可信）；
+    # 一次通过率高时仍然放大（那是纯增益，不涉及裁剪）。
     if first_pass is not None:
-        if first_pass < 0.6:
-            n = int(n * 0.6)
-            reasons.append(f"近期一次通过率 {first_pass:.0%} 偏低 → 缩小到 60%")
-        elif first_pass >= 0.85:
+        if first_pass >= 0.85:
             n = int(n * 1.25)
             reasons.append(f"近期一次通过率 {first_pass:.0%} 高 → 放大到 125%")
         else:
-            reasons.append(f"近期一次通过率 {first_pass:.0%} 中等 → 不调整")
+            reasons.append(f"近期一次通过率 {first_pass:.0%}（仅记录，不缩小："
+                           f"历史失败含引擎自身缺陷，不作为裁剪远端的依据）")
     else:
-        reasons.append("还没有一次通过率的实测数据 → 按配额保守取")
+        reasons.append("还没有一次通过率的实测数据 → 按配额取")
+    # 上限按**物理约束**（单次输出能装多少函数），不按成本或历史成功率压低。
     n = max(MIN_FUNCS, min(int(hard_cap), MAX_FUNCS, n))
     reasons.append(f"最终夹到 [{MIN_FUNCS}, {min(hard_cap, MAX_FUNCS)}] 区间 → {n}")
     return n, reasons

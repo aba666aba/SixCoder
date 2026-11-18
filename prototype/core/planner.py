@@ -51,7 +51,24 @@ class ModuleSpec:
 
 HEADER_RE = re.compile(
     r"^\s*(?:\d+[.)、]|[-*])\s+([\w./-]+\.(?:py|java|c|h|cpp|cc|hpp|js|mjs|cjs|ts|go|cs|rs|"
-    r"kt|swift|php|rb))\s*[：:]?(.*)$")
+    # \b（2026-11-11）：没有它，"- app/templates/index.html" 会被当成模块
+    # "app/templates/index.h"（h 后面跟着 tml 也能匹配，余文被当成正文）——
+    # 产物文件段（contract.parse_artifacts）的每一行都成了假模块，还把真模块的块截断。
+    r"kt|swift|php|rb))\b\s*[：:]?(.*)$")
+
+# 产物文件段条目（contract.ArtifactFile）形如 "- app/static/dashboard.js  要点: …"：
+# 长得像模块标题（路径 + 合法扩展名），但**不是**模块。不排除的话每个条目都会被
+# _module_blocks 造成一个假模块（引擎会去"写"它），还把真模块的块截断（实测 2026-11-11）。
+_ART_ENTRY = re.compile(
+    r"^\s*[-*]\s+`?[\w][\w./\\ -]*?\.[A-Za-z0-9]{1,6}`?\s*(?:[,，;；]?\s*(?:要点|contains)\s*[:：])",
+    re.I)
+
+
+def is_module_header(raw: str) -> bool:
+    """这一行是不是模块标题（HEADER_RE + 产物条目排除）。"""
+    if not HEADER_RE.match(raw or ""):
+        return False
+    return not _ART_ENTRY.match(raw or "")
 
 
 def _module_blocks(text: str) -> dict[str, str]:
@@ -67,8 +84,8 @@ def _module_blocks(text: str) -> dict[str, str]:
     out: dict[str, list[str]] = {}
     cur: str | None = None
     for raw in (text or "").splitlines():
-        m = HEADER_RE.match(raw)
-        if m:
+        if is_module_header(raw):
+            m = HEADER_RE.match(raw)
             path = m.group(1).lstrip("./")
             cur = path
             out.setdefault(cur, [])

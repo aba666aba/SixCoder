@@ -42,7 +42,7 @@ def _protected(bp) -> list:
     return [c for c in _http_caps(bp) if "${token" in json.dumps(c.probe or {}, ensure_ascii=False)]
 
 
-def inject_caps(bp, goal: str = "") -> list[str]:
+def inject_caps(bp, goal: str = "", ws=None) -> list[str]:
     """按蓝图事实注入三类"上线必过"的能力。返回新增的 id 列表（幂等）。"""
     have = {c.id for c in bp.caps}
     http = _http_caps(bp)
@@ -270,6 +270,26 @@ def inject_caps(bp, goal: str = "") -> list[str]:
                               "steps": steps},
                        deps=[d for d in deps if d], funcs_est=2, modules=[]))
         created.append("cap.data.concurrent")
+
+    # ⑧ 业务不变式 → 负向探针（模型层给语义，引擎按模板执行）
+    # 为什么放注入里而不是手工写蓝图（实测 2026-11-09 00:27）：夜班 `replan` 会重建
+    # 能力表，手工塞进 blueprint.json 的 `cap.inv.*` 被整表覆盖冲掉了（v38→v39，
+    # total 81→76）。注入是幂等的、每轮 replan 后都会补回来 —— 机制该待在这里。
+    # 模型层不可用就跳过，绝不让它挡住整条注入（模型是可选的增强，不是依赖）。
+    if ws is not None:
+        try:
+            from . import model as _md
+            _m = _md.load(ws)
+            if _m is not None:
+                have2 = {c.id for c in bp.caps}
+                for ic in _md.invariant_probes(_m, bp):
+                    if ic["cap_id"] in have2:
+                        continue
+                    bp.add(_bp.Cap(id=ic["cap_id"], desc=ic["desc"], funcs_est=3,
+                                   probe={"kind": "http", "steps": ic["steps"]}))
+                    created.append(ic["cap_id"])
+        except Exception:                                 # noqa: BLE001
+            pass
 
     return created
 

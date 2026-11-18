@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,13 +31,127 @@ from . import probe as _probe
 COVERAGE_FILE = ".sixcoder/coverage.jsonl"
 HISTORY_KEEP = 400          # 历史只留最近这么多次观测（够判停滞，不至于无限长）
 
+# 失败步骤的请求体带进证据的长度上限（防整条链 16 步把报告撑爆）。
+# 只带**断言失败的那一步** + 期望，够远端看出"发的是 items 不是 volunteers"。
+# 单行必须 < 300：openhouse.red_modules 和 report_from_state 都用 [:300] 截，
+# 行内超 300 会把"期望字段"这类后半段信息静默切掉（实测 items 这行 294 已贴边）。
+_MAX_BODY_CHARS = 200
+_MAX_REQ_CHARS = 900
+
+
+def failed_step_request(probe: dict | None, detail: str, *, evidence: dict | None = None) -> str:
+    """从探针定义 + 执行证据里，把**断言失败那几步真实发出的请求**拼成可读文本。
+
+    为什么必须有（2026-11-18 实测血泪）：
+      失败证据原本只有「第16步 JSON 字段不符：total 实际 0 期望 3」，**没有请求体**。
+      远端只能盯着产物源码瞎猜键名（topicIds / preferenceList / … 猜了 5 轮，
+      探针真正发的是 `{"items":[...]}`），因为它根本看不到请求发了什么。
+      这是判据证据层的洞，不是模型写得差 —— 把证据补全，远端一轮就能改对。
+
+    只取 detail 里点名的步骤号（"第N步"），不铺全链；每步给 method / path /
+    请求 json / 期望；查不到请求体时如实标注，不编造。纯函数、幂等、不改入参。
+    """
+    text = str(detail or "")
+    nums = sorted({int(x) for x in re.findall(r"第\s*(\d+)\s*步", text)})
+    if not nums:
+        return ""
+    pr = probe or {}
+    steps = pr.get("steps") or []
+    ev_steps = ((evidence or {}).get("steps") or [])
+    ev_by_no = {int(s.get("step") or 0): s for s in ev_steps if isinstance(s, dict)}
+    out: list[str] = []
+    used = 0
+    for n in nums:
+        st = steps[n - 1] if 1 <= n <= len(steps) else None
+        if not isinstance(st, dict):
+            continue
+        method = str(st.get("method") or "GET").upper()
+        path = str(st.get("path") or "")
+        body = st.get("json") if isinstance(st.get("json"), dict) else st.get("data")
+        parts = [f"第{n}步 {method} {path}"]
+        if isinstance(body, dict):
+            try:
+                _bj = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+            except Exception:                                     # noqa: BLE001
+                _bj = str(body)
+            if len(_bj) > _MAX_BODY_CHARS:
+                _bj = _bj[:_MAX_BODY_CHARS] + "…(截断)"
+            parts.append("请求体=" + _bj)
+        ev = ev_by_no.get(n)
+        if isinstance(ev, dict) and ev.get("status") is not None:
+            parts.append("实际状态=%s" % ev.get("status"))
+        # 实际响应体（2026-11-18 关键）：远端必须看到"产物返回了哪些字段"才能对准
+        # 契约。实测 trace: 判据要 unacceptable_count，产物只给 unacceptable 列表 +
+        # count，字段名错位 —— 但报告原来只说"字段不符 实际0 期望1"，远端看不见全貌，
+        # 于是把 teacher_username 误当 topic ID 改了 5 轮。响应字段一列出就能自己对齐。
+        resp_line = ""
+        if isinstance(ev, dict) and ev.get("body"):
+            _resp = ev.get("body")
+            if isinstance(_resp, str):
+                try:
+                    _resp = json.loads(_resp)
+                except Exception:                             # noqa: BLE001
+                    _resp = _resp[:_MAX_BODY_CHARS]
+            if isinstance(_resp, dict):
+                _pairs = []
+                for _k, _v in _resp.items():
+                    _vs = json.dumps(_v, ensure_ascii=False, separators=(",", ":"))
+                    if len(_vs) > 60:
+                        _vs = _vs[:60] + "…"
+                    _pairs.append("%s=%s" % (_k, _vs))
+                _rb = "实际响应={" + ", ".join(_pairs) + "}"
+            else:
+                _rb = "实际响应=" + str(_resp)
+            # 行总长必须 < 300（下游 report_from_state / red_modules 都 [:300] 截）
+            if len(_rb) > 294:
+                _rb = _rb[:293] + "…"
+            # 单独一行（不放请求行里），避免和请求体/期望挤在一行被 [:300] 切掉
+            resp_line = "  ↳ " + _rb
+        for key, label in (("expect_status", "期望状态"), ("expect_json", "期望字段")):
+            if st.get(key) is not None:
+                try:
+                    v = json.dumps(st[key], ensure_ascii=False, separators=(",", ":"))
+                except Exception:                                 # noqa: BLE001
+                    v = str(st[key])
+                parts.append("%s=%s" % (label, v))
+        line = "  ".join(parts)
+        if not isinstance(body, dict):
+            line += "  (该步无 json 请求体)"
+        if used + len(line) > _MAX_REQ_CHARS:
+            line = line[:max(0, _MAX_REQ_CHARS - used)]
+            out.append(line)
+            break
+        out.append(line)
+        used += len(line) + 1
+        if resp_line and used + len(resp_line) <= _MAX_REQ_CHARS + 200:
+            out.append(resp_line)          # 紧跟在它的请求行后
+            used += len(resp_line) + 1
+    return "\n".join(out)
+
 
 def run(bp, ws, *, timeout: int = _probe.PROBE_TIMEOUT, only=None, emit=None) -> dict:
     """按蓝图观测整个项目。返回 cov（含每条能力的真实状态）。
 
     `only` 只测指定能力（增量用）；默认全量重测 —— 全量才有回归网。
+
+    **观测前先把判据自洽化**（确定性、零 token、幂等）。
+    为什么必须在这一层而不是只挂在甲方模式的 `openhouse.observe`：
+    实测 2026-11-11 —— 全自主模式（`auto.night_auto`）直接调 `covmod.run`，
+    **绕过** openhouse → 挂在 openhouse 上的自洽化在全自主模式下**根本不生效**，
+    而看门狗固定用 `--goal-file`（= 全自主模式）→ 修了个寂寞。
+    放在这一层，两个模式一次覆盖。
+
+    自洽化改的是 bp 里探针的断言值（内存）；调用方随后 `mark` + `save` 就会落盘。
     """
     ws = Path(ws).resolve()
+    try:
+        _n = _bp.align_probe_expectations(bp)
+        if _n and emit:
+            emit("probe_aligned", {"fields": _n,
+                                   "note": "探针期望值自洽化（判据自相矛盾会让覆盖永远红）"})
+    except Exception as exc:                             # noqa: BLE001
+        if emit:
+            emit("notice", {"message": f"判据自洽化跳过：{type(exc).__name__}"})
     order, _missing = _bp.topo(bp)
     want = set(only) if only is not None else None
     done: set[str] = set()
@@ -74,6 +189,17 @@ def run(bp, ws, *, timeout: int = _probe.PROBE_TIMEOUT, only=None, emit=None) ->
                 detail += "（依赖未完成：" + ", ".join(dep_missing) + "）"
             if r.get("engine_error"):
                 detail = "（探针引擎出错，不是产物的问题）" + detail
+            # 把"失败那几步真实发了什么请求"补进证据（2026-11-18）：
+            # 只有 actual/expected 没有请求体，远端只能瞎猜键名 —— 实测猜了 5 轮。
+            # 详情从这一层进 cov → 整仓报告 + 工作单两条路都拿到，不在下游各自拼。
+            try:
+                _req = failed_step_request(c.probe, detail,
+                                           evidence=r.get("evidence"))
+                if _req:
+                    detail += "\n【失败步骤的请求（判据实际发的，别猜键名）】\n" + _req
+            except Exception as exc:                              # noqa: BLE001
+                # 证据补全失败不许吞：留痕，但绝不让它把观测本身搞崩。
+                detail += f"\n（请求体补全失败：{type(exc).__name__}）"
         caps[cid] = {"status": status, "detail": detail,
                      "took_s": r.get("took_s"), "evidence": r.get("evidence")}
         if emit:
@@ -151,8 +277,16 @@ def mark(bp, cov: dict):
     """把观测结果写回蓝图（返回副本，不动调用方那份）。
 
     降级状态**保留**：探针通过不算"撤销降级"，那要人来说。
+    **status 必须忠实于观测**（2026-11-08 二次修正）：曾试过"done 不被探针洗掉"，
+    但那会切断自愈链路——派单逻辑消费 bp.pending()（非 done），回归能力保持 done
+    就没人修它（run15"零订单空转"的变体）。正确的分工：
+      · 蓝图 status = 观测真相（探针挂 = absent，引擎据此派单修复）；
+      · 回归留痕在 why（"[探针回归待复核]"标记，人/巡检可见）；
+      · 中间态噪声由巡检的覆盖回退确认窗口滤掉（连续 3 轮仍低才报警），
+        不靠让蓝图说谎。
     """
     out = _bp.Blueprint.from_dict(bp.to_dict())
+    regressed: list[str] = []
     for cid, row in (cov.get("caps") or {}).items():
         c = out.by_id(cid)
         if c is None:
@@ -160,11 +294,18 @@ def mark(bp, cov: dict):
         st = row.get("status") or "absent"
         if c.status == "descoped" and st != "descoped":
             continue
+        if c.status == "done" and st != "done":
+            regressed.append(cid)
         c.status = st if st in _bp.STATUSES else "absent"
         if st != "done":
-            c.why = str(row.get("detail") or "")[:200]
+            _mark = ("[探针回归待复核 %s] " % time.strftime("%m-%d %H:%M")
+                     if cid in regressed else "")
+            c.why = (_mark + str(row.get("detail") or ""))[:200]
         elif c.status == "done":
             c.why = ""
+    if regressed:
+        # 报告可见的回归痕迹（运行期属性，不进 to_dict）
+        out.regressed_now = regressed
     return out
 
 

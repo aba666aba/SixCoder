@@ -40,8 +40,7 @@ def main() -> int:
     e = project.estimate(cs)
     check("算出模块/函数/行数", e["modules"] == 2 and e["funcs"] == 2, str(e))
     check("算出调用数与花费", e["est_calls"] >= 2 and e["est_cny"] > 0, str(e))
-    fit = project.budget_fits(cs, 0.01)
-    check("预算不够时如实说并给分批建议", (not fit["ok"]) and "分批" in fit["note"], fit["note"])
+    check("预算封顶/缩范围机制已移除（无 budget_fits）", not hasattr(project, "budget_fits"))
 
     print("[2] 分批调度（按依赖序）")
     order = project.order_modules(cs)

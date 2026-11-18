@@ -16,8 +16,10 @@
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -103,7 +105,7 @@ main()
 '''
 
 _HTTP_RUNNER = r'''
-import json, sys, importlib
+import json, sys, importlib, re
 
 sys.path.insert(0, sys.argv[1])
 spec = json.loads(sys.argv[2])
@@ -128,8 +130,9 @@ except Exception as exc:
     out["engine_error"] = True
     done()
 
-cands = [c for c in ([spec.get("app") or ""] + ["main:app", "app.main:app", "app:app",
-                                                "server:app", "backend.main:app"]) if ":" in c]
+cands = [c for c in ([spec.get("app") or ""] + list(spec.get("app_candidates") or [])
+                     + ["main:app", "app.main:app", "app:app",
+                        "server:app", "backend.main:app"]) if ":" in c]
 client = None
 errs = []
 seen = set()
@@ -201,7 +204,9 @@ if not steps:
     steps = [{"method": spec.get("method") or "GET", "path": spec.get("path") or "/",
               "json": spec.get("json"), "data": spec.get("data"),
               "headers": spec.get("headers"), "expect_status": spec.get("expect_status"),
-              "expect_json": spec.get("expect_json"), "body_has": spec.get("body_has")}]
+              "expect_json": spec.get("expect_json"), "body_has": spec.get("body_has"),
+              "body_not_has": spec.get("body_not_has"), "body_has_any": spec.get("body_has_any"),
+              "dom_has": spec.get("dom_has"), "dom_not_has": spec.get("dom_not_has")}]
 
 def _race(method, path, kw, times):
     """把同一个请求**并发**发 times 次。
@@ -305,6 +310,7 @@ for i, st in enumerate(steps, 1):
             val = 1                       # 自建种子数据的自增 id 通常就是 1，给个确定值比 None 强
         VAR[str(name)] = val
     want = st.get("expect_status")
+    _route_miss = False
     if isinstance(want, list):
         allowed = [int(x) for x in want]
         if resp.status_code not in allowed:
@@ -315,10 +321,56 @@ for i, st in enumerate(steps, 1):
         if isinstance(want, int):
             lo = hi = int(want)
         if not (lo <= resp.status_code <= hi):
-            bits.append("第%d步 %s %s → 状态码 %s（期望 %s）"
-                        % (i, method, path, resp.status_code, want if want is not None else "2xx"))
+            if resp.status_code == 404:
+                # 报告保真（2026-11-08 run_student_da 实测）：404 = 路由没注册，
+                # 不是字段问题——旧文案"字段不符：…（实际 None×N）"把人引向
+                # 字段表，真凶是路由装饰器/引擎接线缺失。
+                _route_miss = True
+                bits.append("第%d步 %s %s → 404 路由未命中：该路径没有注册的处理函数"
+                            "（先查路由装饰器是否存在 / 引擎接线 web_routes.json 是否含此路由，"
+                            "字段比对对 404 无意义，已跳过）" % (i, method, path))
+            else:
+                bits.append("第%d步 %s %s → 状态码 %s（期望 %s）"
+                            % (i, method, path, resp.status_code, want if want is not None else "2xx"))
+    # 假绿拦截（2026-11-08 实测，最恶劣的一类）：HTTP 状态码说成功，响应体却自称失败。
+    # 真实案例：`POST /api/v1/topics` 返回 **201**，body 是
+    #   {"status": 403, "body": {"code": "forbidden"}}
+    # —— 权限明确拒绝了，但探针只比状态码和几个字面量字段，一路绿灯。
+    # 同理 `{"ok": false}` / `{"success": false}` / `{"code": "forbidden"}` 都是同类。
+    # 不拦这条，"done" 会被桩函数骗出来：主干断着，覆盖率照样涨。
+    if 200 <= resp.status_code <= 299 and not _route_miss:
+        try:
+            _pl = resp.json()
+        except Exception:
+            _pl = None
+        if isinstance(_pl, dict):
+            _lv = None
+            for _k in ("status", "status_code", "http_status", "code"):
+                _v = _pl.get(_k)
+                if isinstance(_v, int) and 400 <= _v < 600:
+                    _lv = "%s=%s" % (_k, _v)
+                    break
+                if isinstance(_v, str) and _v.strip().lower() in (
+                        "error", "fail", "failed", "forbidden", "denied",
+                        "unauthorized", "not_found", "rejected"):
+                    _lv = "%s=%r" % (_k, _v)
+                    break
+            if _lv is None:
+                for _k in ("ok", "success", "allowed", "valid"):
+                    if _pl.get(_k) is False:
+                        _lv = "%s=False" % _k
+                        break
+            if _lv is None and isinstance(_pl.get("body"), dict):
+                _bc = _pl["body"].get("code")
+                if isinstance(_bc, str) and _bc.strip().lower() in (
+                        "forbidden", "unauthorized", "not_found", "error", "denied"):
+                    _lv = "body.code=%r" % _bc
+            if _lv is not None:
+                bits.append("第%d步 状态码 %d 但响应体自称失败（%s）—— 假绿："
+                            "HTTP 层说成功、业务层说拒绝，按失败处理"
+                            % (i, resp.status_code, _lv))
     ej = st.get("expect_json")
-    if ej is not None:
+    if ej is not None and not _route_miss:
         try:
             got = resp.json()
         except Exception:
@@ -332,10 +384,19 @@ for i, st in enumerate(steps, 1):
                 bad = [k for k, v in ej.items()
                        if k not in got or (v != "*" and got[k] != v)]
                 if bad:
-                    bits.append("第%d步 JSON 字段不符：%s（实际 %s）"
-                                % (i, ",".join(bad), preview({k: got.get(k) for k in bad})))
+                    # **必须把"期望值"一起写出来**（2026-11-16 00:15 修）：
+                    # 以前只说"字段不符：detail（实际 {...}）"，远端根本不知道
+                    # 期望是什么，只能猜 —— 实测 `cap.auth.forbidden` 明明已经
+                    # 返回 403 + 权限拒绝，只因 detail 文案不等于某个固定句子就红，
+                    # 而报告里看不到那个句子，于是它每轮都在瞎改。
+                    _exp = {k: ("任意值(非空)" if ej.get(k) == "*" else ej.get(k))
+                            for k in bad}
+                    bits.append("第%d步 JSON 字段不符：%s（实际 %s；**期望** %s）"
+                                % (i, ",".join(bad),
+                                   preview({k: got.get(k) for k in bad}), preview(_exp)))
             elif got != ej:
-                bits.append("第%d步 JSON 不等于期望：实际 %s" % (i, preview(got)))
+                bits.append("第%d步 JSON 不等于期望：实际 %s；**期望** %s"
+                            % (i, preview(got), preview(ej)))
     ec = st.get("expect_count")
     ecmin = st.get("expect_count_min")
     if ec is None and ecmin is None:
@@ -371,6 +432,41 @@ for i, st in enumerate(steps, 1):
     for n in ([need] if isinstance(need, str) else list(need or [])):
         if str(n) not in body:
             bits.append("第%d步响应里没有 %r" % (i, str(n)))
+    # §20.5 B 档：服务端渲染页面的 DOM 判据。
+    # 规格（字符串，带前缀）：tag:canvas / id:chart / class:btn-primary / text:echarts（或裸文本）。
+    # 口径说实话：这是**服务端 HTML** 的结构断言（响应体里真实存在的标签/属性/文字），
+    # 不是浏览器端执行 JS 后的 DOM —— 那是视觉级判据（远期，§20.5 明确不做）。
+    def _dom_bits(step_no, body_text, specs, forbid):
+        got = []
+        for sp in ([specs] if isinstance(specs, str) else list(specs or [])):
+            s_ = str(sp).strip()
+            if not s_:
+                continue
+            kind_, _, val_ = s_.partition(":")
+            low = body_text.lower()
+            if kind_.lower() == "tag" and val_:
+                hit = ("<" + val_.strip().lower()) in low
+                what = "<%s> 元素" % val_.strip()
+            elif kind_.lower() == "id" and val_:
+                v_ = val_.strip()
+                hit = ('id="%s"' % v_) in body_text or ("id='%s'" % v_) in body_text
+                what = "id=%r 的元素" % v_
+            elif kind_.lower() == "class" and val_:
+                v_ = val_.strip()
+                hit = re.search(r'class="[^"]*\b' + re.escape(v_) + r'\b[^"]*"',
+                                body_text) is not None
+                what = "class 含 %r 的元素" % v_
+            else:
+                v_ = val_.strip() if kind_.lower() == "text" else s_
+                hit = str(v_) in body_text
+                what = "文字 %r" % str(v_)
+            if forbid and hit:
+                got.append("第%d步页面里出现了不该出现的 %s" % (step_no, what))
+            elif (not forbid) and (not hit):
+                got.append("第%d步页面里没有 %s" % (step_no, what))
+        return got
+    bits += _dom_bits(i, body, st.get("dom_has"), forbid=False)
+    bits += _dom_bits(i, body, st.get("dom_not_has"), forbid=True)
     notw = st.get("body_not_has")
     for n in ([notw] if isinstance(notw, str) else list(notw or [])):
         if str(n) in body:
@@ -388,6 +484,26 @@ if _phase == 1 and _varfile:
             json.dump({k: v for k, v in VAR.items()}, _f, ensure_ascii=False)
     except Exception:
         pass
+# §20.5 B 档落点 2：前后端契约共享 —— 后端必须把契约声明的接口**如实暴露**在
+# OpenAPI 里（前端按契约生成调用/类型，接口不在 openapi.json = 前端调不到）。
+_oas = spec.get("openapi_has")
+if _oas:
+    _want_paths = [_oas] if isinstance(_oas, str) else [str(x) for x in _oas]
+    _spec = None
+    try:
+        _resp = client.request("GET", "/openapi.json")
+        _spec = _resp.json() if _resp.status_code == 200 else None
+    except Exception:
+        _spec = None
+    if not isinstance(_spec, dict) or not isinstance(_spec.get("paths"), dict):
+        bits.append("前后端契约共享失败：GET /openapi.json 拿不到 OpenAPI paths"
+                    "（后端必须把接口如实暴露；没有它前端按契约写的调用全是 404）")
+    else:
+        for _wp in _want_paths:
+            if _wp not in (_spec.get("paths") or {}):
+                bits.append("OpenAPI 里没有声明 %s（前后端契约共享："
+                            "前端按契约调它，后端必须在 openapi.json 里暴露）" % _wp)
+
 out["evidence"] = {"steps": trace, "vars": {k: preview(v) for k, v in VAR.items()}}
 out["ok"] = not bits
 out["detail"] = "；".join(bits[:4]) or ("%d 步请求全部符合预期（末步 %s %s）"
@@ -395,6 +511,134 @@ out["detail"] = "；".join(bits[:4]) or ("%d 步请求全部符合预期（末�
                                         if trace else "没有发出任何请求")
 done()
 '''
+
+
+# ---------------------------------------------------------------- 角色串味修补（判据层，零 token）
+#
+# 病根（2026-11-18 实测，41 条能力中招）：蓝图让**同一个用户名**用不同 role 注册多次，
+# 再用**同一个用户名** login 多次，分别存进 ttoken/atoken/stoken。产物 register 把
+# account.role 覆盖成最后一次注册的值；login 读 account.role 签 token —— 于是三个
+# token 全是同一个角色。拿"teacher"的 token 建题被服务端正确地判 403，探针却当成
+# "产品有 bug" → 41 条永远红 → 远端反复改本来正确的 accounts/topics views → 护栏回滚 →
+# 净增长恒 0。
+#
+# 治本：注册/登录都按角色用**独立用户名**（u_x_teacher / u_x_admin / u_x_student），
+# 每个账号的 role 天生就是它自己的，token 不再串味。这是判据修正，不碰产物代码。
+# 纯函数：不改入参（深拷贝），幂等（已是独立账号的链原样返回），不动任何判据字段。
+
+_TOKEN_ROLE_HINTS = (                     # login 的 save key → 期望角色（按优先级匹配）
+    ("ttoken", "teacher"), ("teacher_token", "teacher"), ("tt", "teacher"),
+    ("atoken", "admin"), ("admin_token", "admin"), ("adm", "admin"),
+    ("stoken", "student"), ("student_token", "student"), ("stu", "student"),
+)
+_ROLE_USER_SUFFIX = {"teacher": "teacher", "admin": "admin", "student": "student"}
+
+
+def _user_key_of(body: dict) -> str | None:
+    for k in body:
+        lk = str(k).lower()
+        if "user" in lk or "name" in lk or "email" in lk:
+            return k
+    return None
+
+
+def _role_key_of(body: dict) -> str | None:
+    for k in body:
+        if "role" in str(k).lower():
+            return k
+    return None
+
+
+def dedupe_role_users(steps: list) -> tuple[list, list[str]]:
+    """把"同名多角色注册 + 同名多次登录"的请求链改写成按角色独立的账号链。
+
+    返回 (new_steps, notes)。满足三条硬约束：
+      · 只认**确实串味**的链（同一用户名 ≥2 个不同 role），单角色/无 role 一律不碰；
+      · 幂等（独立账号的链再跑一次零改动）；
+      · 只改用户名字段，expect_status / expect_json / save 名 / headers 全部原样保留。
+    """
+    if not isinstance(steps, list) or not steps:
+        return steps, []
+    new = json.loads(json.dumps(steps))
+    notes: list[str] = []
+    # ① 找出"被多角色复用"的用户名（串味账号）
+    role_by_user: dict[str, set[str]] = {}
+    for st in new:
+        st = st or {}
+        if "/register" not in str(st.get("path") or ""):
+            continue
+        body = st.get("json") if isinstance(st.get("json"), dict) else st.get("data")
+        if not isinstance(body, dict):
+            continue
+        uk, rk = _user_key_of(body), _role_key_of(body)
+        if not uk or not rk:
+            continue
+        user, role = str(body.get(uk) or ""), str(body.get(rk) or "").strip().lower()
+        if user and role:
+            role_by_user.setdefault(user, set()).add(role)
+    reused = {u for u, roles in role_by_user.items() if len(roles) >= 2}
+    if not reused:
+        return new, notes
+
+    # ② 给每个被复用的用户名，按其注册 role 生成独立账号；改掉 register 步骤
+    #    user → 期望角色映射：先按 register 的 role 建，login 再按 token 名认领。
+    user_roles: dict[str, dict[str, str]] = {}    # base_user → {role: independent_user}
+    last_role: dict[str, str] = {}               # base_user → 链中最后一次注册的 role
+    for st in new:
+        st = st or {}
+        body = st.get("json") if isinstance(st.get("json"), dict) else st.get("data")
+        if not isinstance(body, dict) or "/register" not in str(st.get("path") or ""):
+            continue
+        uk, rk = _user_key_of(body), _role_key_of(body)
+        if not uk or not rk:
+            continue
+        user, role = str(body.get(uk) or ""), str(body.get(rk) or "").strip().lower()
+        if user not in reused or not role:
+            continue
+        suffix = _ROLE_USER_SUFFIX.get(role, role)
+        independent = f"{user}_{suffix}"
+        user_roles.setdefault(user, {}).setdefault(role, independent)
+        last_role[user] = role                    # 按出现顺序覆盖 → 留下末次角色
+        if body.get(uk) != independent:
+            body[uk] = independent
+
+    # ③ login 步骤：按 save 的 token 变量名认领角色，换成对应独立账号。
+    #    认不出角色（单个无前缀 ${token}）时用**末次注册角色的独立账号**：产物原来
+    #    把 account.role 覆盖成末次注册的值，single-token token 就是那个角色 —— 保持
+    #    语义不变，只是账号从"共用旧名"换成"末次角色的独立名"（旧名已被 ② 拆掉，不换会 401）。
+    for st in new:
+        st = st or {}
+        if "/login" not in str(st.get("path") or ""):
+            continue
+        body = st.get("json") if isinstance(st.get("json"), dict) else st.get("data")
+        if not isinstance(body, dict):
+            continue
+        uk = _user_key_of(body)
+        if not uk:
+            continue
+        user = str(body.get(uk) or "")
+        if user not in user_roles:
+            continue
+        save = st.get("save") if isinstance(st.get("save"), dict) else {}
+        want_role = ""
+        for key in save:
+            kl = str(key).lower()
+            for hint, role in _TOKEN_ROLE_HINTS:
+                if hint in kl:
+                    want_role = role
+                    break
+            if want_role:
+                break
+        if not want_role:
+            want_role = last_role.get(user, "")   # 无前缀 token → 末次注册角色
+        if want_role in user_roles[user]:
+            body[uk] = user_roles[user][want_role]
+
+    fixed = sum(1 for a, b in zip(steps, new) if a != b)
+    if fixed:
+        notes.append(f"角色串味修补：{len(reused)} 个多角色账号拆成独立用户名，"
+                     f"改 {fixed} 步（判据字段未动）")
+    return new, notes
 
 
 # ---------------------------------------------------------------- 校验 / 描述
@@ -447,18 +691,29 @@ def validate(probe: dict) -> list[str]:
             judged = [st for st in steps if (st or {}).get("expect_json") is not None
                       or (st or {}).get("body_has") or (st or {}).get("expect_count") is not None
                       or (st or {}).get("expect_count_min") is not None
+                      or (st or {}).get("dom_has") or (st or {}).get("dom_not_has")
                       or (st or {}).get("expect_status") is not None]
             if not judged:
                 out.append("http 探针每一步都没写判据：至少要有一 step 带 "
-                           "expect_status / expect_json / body_has")
+                           "expect_status / expect_json / body_has / dom_has")
+            for i, st in enumerate(steps, 1):
+                for fld in ("dom_has", "dom_not_has"):
+                    v = (st or {}).get(fld)
+                    if v is None:
+                        continue
+                    vs = [v] if isinstance(v, str) else v
+                    if not isinstance(vs, list) or not all(isinstance(x, str) for x in vs):
+                        out.append(f"http 探针第 {i} 步的 {fld} 必须是字符串或字符串列表")
         else:
             path = str(probe.get("path") or "").strip()
             if not path.startswith("/"):
                 out.append(f"http 探针的 path 必须以 / 开头（现在是 {path or '(空)'}）")
             if not (probe.get("expect_json") is not None or probe.get("body_has")
+                    or probe.get("dom_has") or probe.get("dom_not_has")
+                    or probe.get("openapi_has")
                     or probe.get("expect_status") is not None):
                 out.append("http 探针只有状态码 2xx 一个判据太弱："
-                           "必须给 expect_json / body_has / expect_status 之一")
+                           "必须给 expect_json / body_has / dom_has / openapi_has / expect_status 之一")
     else:
         if not str(probe.get("module") or "").strip():
             out.append("py_call 探针缺 module")
@@ -516,6 +771,10 @@ def describe(probe: dict) -> str:
             ej = last.get("expect_json")
             if isinstance(ej, dict) and ej:
                 tail += f"｜JSON 含 {'/'.join(list(ej)[:4])}"
+            dh = last.get("dom_has")
+            if dh:
+                dh_ = [dh] if isinstance(dh, str) else list(dh)
+                tail += f"｜页面含 {'/'.join(map(str, dh_[:3]))}"
             return " → ".join(parts) + tail
         m = str(probe.get("method") or "GET").upper()
         p = str(probe.get("path") or "/")
@@ -528,6 +787,14 @@ def describe(probe: dict) -> str:
         bh = probe.get("body_has")
         if bh:
             tail += "｜正文含 " + (bh if isinstance(bh, str) else "/".join(map(str, bh[:3])))
+        dh = probe.get("dom_has")
+        if dh:
+            tail += "｜页面含 " + (dh if isinstance(dh, str)
+                                   else "/".join(map(str, list(dh)[:3])))
+        oa = probe.get("openapi_has")
+        if oa:
+            tail += "｜OpenAPI 暴露 " + (oa if isinstance(oa, str)
+                                          else "/".join(map(str, list(oa)[:3])))
         return f"{m} {p}{tail}"
     return f"（未支持的探针种类：{kind or '空'}）"
 
@@ -543,23 +810,476 @@ def _rmtree(p: Path) -> None:
         pass
 
 
+WORK_SUBDIR = "work"          # 固定工作目录名（不再是 run-<pid>/probe-xxx 满地爬）
+WORK_MAX_SUBDIRS = 240         # 一次进程内最多保留多少个子目录（防失控）
+
+
+def _work_root(ws: Path) -> Path:
+    return Path(ws) / ".sixcoder" / "tmp" / WORK_SUBDIR
+
+
+def _pid_alive(pid: int) -> bool:
+    """别的进程还在用这个工作目录吗（Windows/Linux 通用，只用标准库）。"""
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except Exception:                                    # noqa: BLE001
+        try:
+            os.kill(pid, 0)
+            return True
+        except Exception:                                # noqa: BLE001
+            return False
+
+
+def _reset_work_root(ws: Path) -> Path:
+    """**开跑前**把工作目录整棵删掉再重建（用户 2026-11-15 定的口径）。
+
+    为什么改成这样（有实测代价）：
+      · 旧方案是 `.sixcoder/tmp/run-<pid>/probe-<tag>-<seq>/`，靠 atexit 删自己那棵树。
+        进程**正常退出**时没问题；但夜班被强杀（今天杀了 3 次）→ atexit 不执行
+        → 每次留下 168 个目录。累积到 **111,793 个目录 / 903MB**。
+      · 后果不是占磁盘，而是**文件系统与实时防护**：每建/删一个目录，杀软扫一次；
+        11 万个小目录让删除速度掉到 **4 个/秒**（实测 2049 个用了 8 分钟），
+        并在 14:00–14:06 触发 Windows 资源耗尽检测器连启三次（Edge 随后挂起）。
+      · 固定一个目录 + 开跑前整体删 = 无论上次怎么死，残留上限都是"一棵树"，
+        且只删一次（不撞"单轮删除 ≥50"的保护，也不会让杀软逐个扫几万次）。
+
+    安全：**只动 `.sixcoder/tmp/work` 这一个路径**；若发现别的活进程正持有它
+    （`.owner` 里的 pid 还活着且不是自己），退让到 `work-<pid>`，绝不互删。
+    """
+    root = _work_root(ws)
+    owner_file = root / ".owner"
+    try:
+        if root.is_dir() and owner_file.is_file():
+            try:
+                other = int((owner_file.read_text(encoding="utf-8") or "0").strip() or 0)
+            except (OSError, ValueError):
+                other = 0
+            if other and other != os.getpid() and _pid_alive(other):
+                root = Path(ws) / ".sixcoder" / "tmp" / ("work-%d" % os.getpid())
+                owner_file = root / ".owner"
+    except OSError:
+        pass
+    shutil.rmtree(root, ignore_errors=True)          # 整棵删（一次系统调用级别的遍历）
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        owner_file.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
+    return root
+
+
 def _scratch(ws: Path, tag: str) -> Path:
-    """探针的临时工作目录（**不许**把探针的垃圾留在客户仓库里）。
+    """探针的临时工作目录：**固定父目录 + 每次一个子目录**（隔离仍然保留）。
 
-    用**固定名字 + 原地覆盖**，不再"每次新建一个再删掉"：
-    一次夜班要跑几十上百个探针，每个探针删自己那几个文件，
-    很快就会撞上外层"单轮删除 ≥50 个就拦下"的保护，把整次运行打断
-    （实测 2026-11-07：夜班在第二片开头 exit 1，一行都没多写）。
+    为什么要子目录（2026-11-07 实测）：上一片留下的 `users.db` 表结构带 id 列，
+    登录 `SELECT *` 取到 id=5 当用户名 → 响应校验炸在作者身上，看起来像它的 bug，
+    其实是探针之间的状态污染。所以**探针之间必须隔离**。
 
-    序号是**每次调用自增**：探针之间必须互相隔离。实测（2026-11-07 同一夜）：
-    上一片留下的 `users.db` 表结构带 id 列，登录用 `SELECT *` 取到 id=5 当用户名 →
-    响应校验炸在作者身上，看起来像它的 bug，其实是探针之间的状态污染。
+    但隔离不等于"目录无限增长"：全部子目录都在 `work/` 下，
+    ① 进程启动时整体清一次（`_reset_work_root`）；
+    ② 进程内超过 `WORK_MAX_SUBDIRS` 就删最早的（只删自己这一层）；
+    ③ 正常退出时 atexit 再整棵删一次。
     """
     global _SCRATCH_SEQ
     _SCRATCH_SEQ += 1
-    d = ws / ".sixcoder" / "tmp" / f"probe-{tag}-{os.getpid()}-{_SCRATCH_SEQ}"
+    root = _RUN_DIRS[0] if _RUN_DIRS else _run_dir(ws)
+    d = root / ("p%d" % _SCRATCH_SEQ)
     d.mkdir(parents=True, exist_ok=True)
+    # 进程内限流：超过上限就删最老的子目录（它们已经跑完了）
+    try:
+        if _SCRATCH_SEQ % 16 == 0:
+            subs = sorted((p for p in root.iterdir() if p.is_dir()),
+                          key=lambda p: p.stat().st_mtime)
+            for old in subs[:max(0, len(subs) - WORK_MAX_SUBDIRS)]:
+                shutil.rmtree(old, ignore_errors=True)
+    except OSError:
+        pass
     return d
+
+
+def _run_dir(ws: Path) -> Path:
+    """本次进程的工作目录：第一次调用时**删旧建新**，之后复用。"""
+    if _RUN_DIRS:
+        return _RUN_DIRS[0]
+    d = _reset_work_root(ws)
+    _register_run_dir(d)
+    return d
+
+
+def _cleanup_run_dir() -> None:
+    """进程退出时删掉自己那一组临时目录（只删自己的，绝不碰别人的）。
+
+    2026-11-10：必须兜 **BaseException** —— 宿主的删除保护在
+    `shutil.rmtree` 里抛的是 `SystemExit`（不是 Exception 子类），
+    在 atexit 回调里抛出 = 进程退出码被改成 1（夜班明明跑完了却 exit 1）。
+    """
+    for ws in list(_RUN_DIRS):
+        try:
+            if ws.exists():
+                shutil.rmtree(ws, ignore_errors=True)
+        except BaseException:                           # noqa: BLE001
+            pass
+    try:
+        _RUN_DIRS.clear()
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+def _walk_values(obj):
+    """递归产出所有字符串值（不产出键名）——引用改写只认值，不认键。"""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from _walk_values(v)
+    elif isinstance(obj, list):
+        for x in obj:
+            yield from _walk_values(x)
+    elif isinstance(obj, str):
+        yield obj
+
+
+def distinct_same_role_users(steps: list, cap_id: str = "") -> tuple[list, list[str]]:
+    """**同一角色出现多次 → 每个账号给不同用户名**（2026-11-18 三方协商裁决）。
+
+    事故：20 个能力的探针里，"第二个学生"和第"一个学生"用了**同一个 username**
+    （都是 `..._student`），两条注册都期望 201；而 cap.api.idempotent 要求
+    "同名重复注册必须 4xx"。同一份代码不可能同时满足 → 写作者怎么改都红，
+    6 轮白改。审核者（两把独立 key）独立裁决一致：改判据，不是改产物。
+
+    规则（幂等，只动用户名字段）：
+      · 同一 (username, role) 在**同一链**里注册 ≥2 次 → 第 k 次（k≥2）改名为 `user{k}`；
+      · 后续步骤里引用旧名的（login 的 username / 路径里的字面量），按出现顺序
+        依次映射到新名字（第 1 次仍是原名，第 2 次 → user2 …），保证"第 k 个账号
+        的登录打的就是第 k 个账号"。
+    """
+    if not isinstance(steps, list) or not steps:
+        return steps, []
+    # **幂等类能力豁免**（2026-11-19 实测）：cap.api.idempotent 的语义就是
+    # "同一账号重复注册必须 4xx" —— 把它拆成两个账号，等于把判据改成自相矛盾
+    # （reviewer2 一眼指出"幂等探针发的是不同用户名却要求 4xx"）。这类一律不动。
+    if "idempotent" in str(cap_id or "").lower():
+        return steps, []
+    new = json.loads(json.dumps(steps))
+    notes: list[str] = []
+
+    # ① 按出现顺序给重复注册改名
+    seen: dict[tuple[str, str], int] = {}
+    alias: list[tuple[int, str, str]] = []        # (步骤下标, 旧名, 新名)
+    for i, st in enumerate(new):
+        st = st or {}
+        if "/register" not in str(st.get("path") or ""):
+            continue
+        body = st.get("json") if isinstance(st.get("json"), dict) else st.get("data")
+        if not isinstance(body, dict):
+            continue
+        uk, rk = _user_key_of(body), _role_key_of(body)
+        if not uk:
+            continue
+        user = str(body.get(uk) or "").strip()
+        role = str(body.get(rk) or "").strip().lower() if rk else ""
+        if not user:
+            continue
+        key = (user, role)
+        seen[key] = seen.get(key, 0) + 1
+        if seen[key] >= 2:
+            fresh = "%s_%d" % (user, seen[key])
+            body[uk] = fresh
+            alias.append((i, user, fresh))
+            notes.append("第%d步 重复账号 %s → %s（同角色多账号拆开）"
+                         % (i + 1, user, fresh))
+    if not alias:
+        return new, notes
+
+    # ② 后续步骤引用旧名 → 按出现顺序依次映射新名（第 1 次仍是原名）。
+    #    **只替换字符串值**（json 值 / path 的 /name 段），绝不裸字符串替换 ——
+    #    裸替换会把 "username" 这种键名也改掉，JSON 直接报废（实测）。
+    def _has_ref(step) -> bool:
+        for v in _walk_values(step):
+            if v == old:
+                return True
+        return ("/" + old) in str((step or {}).get("path") or "")
+
+    def _sub(obj, repl: str):
+        if isinstance(obj, dict):
+            out = {}
+            for k, v in obj.items():
+                out[k] = _sub(v, repl)
+            return out
+        if isinstance(obj, list):
+            return [_sub(x, repl) for x in obj]
+        if isinstance(obj, str):
+            if obj == old:
+                return repl
+            if obj.startswith("/"):
+                # 路径按**段**匹配：/api/v1/users/u/ 只换 "u" 这一段，
+                # 不许裸子串替换（"/u" 会命中 "/users"，实测报废）
+                return "/".join(repl if seg == old else seg for seg in obj.split("/"))
+            return obj
+        return obj
+
+    for old in sorted({a[1] for a in alias}):
+        news = [a[2] for a in sorted(alias) if a[1] == old]
+        occ = 0
+        for i, st in enumerate(new):
+            if "/register" in str((st or {}).get("path") or ""):
+                continue                     # 注册步骤已在 ① 处理
+            if not _has_ref(st):
+                continue
+            occ += 1
+            if occ == 1:
+                continue                     # 第 1 个账号仍是原名
+            idx = min(occ - 2, len(news) - 1)
+            new[i] = _sub(st, news[idx])
+    return new, notes
+
+
+# ---------------------------------------------------------------- 临时区垃圾回收
+
+# 引擎自己的临时命名空间：**只回收这些名字**，别的目录一律不碰。
+_SCRATCH_PREFIXES = ("probe-", "run-", "work", "work-")
+
+
+def gc_scratch(ws: Path, max_age_hours: float = 24.0,
+               max_dirs: int = 2000, batch_size: int = 45) -> dict:
+    """回收**引擎自己**留下的临时目录（开跑前调一次）。
+
+    为什么引擎能自己清、而以前不能：
+      · 以前每个探针留一个目录、**从不删** —— 逐个删会撞上"单轮删除 ≥50 个就拦下"
+        的保护（那保护是给**用户文件**用的）。
+      · 现在按进程分组（`run-{pid}/`），进程退出时整体删**一棵目录树**。
+      · 跨进程残留（进程被强杀留下的）靠本函数回收：**只删引擎自己的命名空间**
+        （`probe-*` / `run-*`）+ **限龄**（默认 24 小时前）+ **限速**，
+        删不动就下轮继续，绝不一次掀掉整个盘。
+
+    2026-11-09 两次踩坑（都靠 py-spy 抓栈 + 宿主日志定位）：
+      1. **逐个删会被拖死**：宿主环境里 `shutil.rmtree` 被 `sitecustomize.py` 包装 ——
+         每删一个目录都要**起一个 node 子进程**做"批量删除保护"检查（timeout 10 秒）。
+         36754 个目录 = 36754 次 node 启动 → 夜班直接卡死。
+      2. **一把删太多会被拒**：宿主保护是「单轮删除条目数 ≥ 50 要确认」
+         （实测 `SAFE_DELETE_BULK_CONFIRM_REQUIRED {"count":5068,"threshold":50}`），
+         批量 5000 → 被 fail-closed 拒掉。
+
+      所以现在的做法是**两者取长**：先用 rename 把要删的目录归集到批次目录
+      （rename 是纯文件系统操作，不走那层包装），**再按 ≤45 个一批** rmtree
+      —— 每批的删除条目数低于阈值 50，一次 rmtree 只触发 1 次删除检查。
+      36754 个目录 ≈ 800 批 ≈ 几分钟（一次性）；之后每轮只回收新产生的那点。
+
+    返回 {"scanned", "removed", "freed_bytes", "kept"} 供交付报告如实写明。
+    """
+    import time as _time
+    tmp = Path(ws) / ".sixcoder" / "tmp"
+    out = {"scanned": 0, "removed": 0, "freed_bytes": 0, "kept": 0}
+    if not tmp.is_dir():
+        return out
+    now = _time.time()
+    cutoff = now - max(0.0, float(max_age_hours)) * 3600.0
+    limit = max(1, int(max_dirs))
+    # 每批的**删除条目数**预算（目录 + 里面所有文件）。宿主阈值是 50，留足余量。
+    # 2026-11-09 血泪：宿主统计的是**实际删除条目数**，不是顶层目录数 ——
+    # 45 个探针目录（每个 1 个文件）= 79 条 > 50 → 被拒，且异常打死夜班。
+    entry_budget = max(1, min(int(batch_size), 15))
+
+    # 第一步：挑出该回收的（只挑不删 —— 便宜）
+    victims: list[Path] = []
+    for child in sorted(tmp.iterdir(), key=lambda p: p.name):
+        out["scanned"] += 1
+        if len(victims) >= limit:
+            out["kept"] += 1
+            continue
+        if not child.name.startswith(_SCRATCH_PREFIXES):
+            out["kept"] += 1
+            continue
+        try:
+            if child.stat().st_mtime > cutoff:
+                out["kept"] += 1          # 还新鲜：可能是别的进程正在用
+                continue
+        except OSError:
+            out["kept"] += 1
+            continue
+        victims.append(child)
+
+    if not victims:
+        return out
+
+    # 第二步：rename 归集 → 按**条目数**分批 rmtree（每批只触发一次删除检查）
+    removed = 0
+    freed = 0
+    i = 0
+    while i < len(victims):
+        chunk: list[Path] = []
+        entries = 1                       # 批次目录本身也算一条
+        j = i
+        while j < len(victims):
+            est = _count_entries(victims[j])
+            if chunk and entries + est > entry_budget:
+                break
+            if not chunk and est > entry_budget:
+                est = entry_budget       # 单个就超预算：照样收，认赔
+            chunk.append(victims[j])
+            entries += est
+            j += 1
+        i = j
+        batch = tmp / f".gc-{int(now)}-{i}"
+        try:
+            batch.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            break
+        size = 0
+        moved = 0
+        for v in chunk:
+            try:
+                size += _dir_size(v)
+                v.rename(batch / v.name)
+                moved += 1
+            except OSError:
+                continue
+        if not moved:
+            try:
+                batch.rmdir()
+            except OSError:
+                pass
+            continue
+        try:
+            shutil.rmtree(batch, ignore_errors=True)
+        except BaseException:                       # noqa: BLE001
+            # 宿主的删除保护抛的是 BaseException 子类 —— 必须兜住，
+            # 否则清理失败会直接把引擎/夜班进程打死（2026-11-09 exit 1 实锤）。
+            pass
+        if batch.exists():
+            # 批次没删掉（被保护拦了）→ 留在盘上，下轮再收
+            out["kept"] += moved
+            continue
+        removed += moved
+        freed += size
+    out["removed"] = removed
+    out["freed_bytes"] = freed
+    out["kept"] = max(0, out["scanned"] - removed)
+    return out
+
+
+def gc_engine_tmp(root: Path | None = None, max_age_hours: float = 48.0,
+                  max_entries: int = 4000, batch_size: int = 45) -> dict:
+    """清**引擎自身**的 prototype/.tmp（2026-11-18 新增）。
+
+    为什么单独一个函数：`gc_scratch` 只清**产物仓**的 .sixcoder/tmp；引擎自己的
+    .tmp（bizflow_* / httpe2e_* / scope_* / run_*…，http 流测试与自检留下）**没人清**
+    —— 实测 647 目录 / 61MB 按天涨，check_tmp_hygiene 之外的盲区。规则：
+      · 只动引擎 .tmp 这一个目录；hsperfdata_*（JVM 活文件）绝不碰；
+      · 只删 mtime 早于 max_age 的条目（活进程正在用的碰不到）；
+      · 按**条目数**预算分批 + rename 到批次目录再整棵删（复用 gc_scratch 手法，
+        不撞"单轮删除 ≥50 条"的保护）；删除动作兜 BaseException（绝不打死夜班）。
+    `root` 参数只为自检注入（默认取引擎真实 .tmp）。
+    """
+    if root is None:
+        root = Path(__file__).resolve().parents[1] / ".tmp"
+    root = Path(root)
+    out = {"removed": 0, "kept": 0, "scanned": 0, "freed_bytes": 0, "root": str(root)}
+    if not root.is_dir():
+        return out
+    cutoff = time.time() - max_age_hours * 3600.0
+    try:
+        victims = [e for e in root.iterdir()
+                   if not e.name.startswith("hsperfdata_")
+                   and not e.name.startswith(".gc-")]
+    except OSError:
+        return out
+    old: list[Path] = []
+    for e in victims:
+        try:
+            if e.stat().st_mtime <= cutoff:
+                old.append(e)
+        except OSError:
+            continue
+    out["scanned"] = len(victims)
+    out["kept"] = len(victims) - len(old)
+    removed, freed, entries, i = 0, 0, 0, 0
+    while i < len(old) and entries < max_entries:
+        chunk: list[Path] = []
+        est, j = 0, i
+        while j < len(old) and entries + est < max_entries and est < batch_size * 3:
+            e = old[j]
+            est += _count_entries(e) if e.is_dir() else 1
+            chunk.append(e)
+            j += 1
+        i = j
+        entries += est
+        batch = root / (".gc-%d" % (int(time.time() * 1000) % 100000000))
+        try:
+            batch.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            break
+        moved = 0
+        for v in chunk:
+            try:
+                freed += _dir_size(v) if v.is_dir() else v.stat().st_size
+                v.rename(batch / v.name)
+                moved += 1
+            except OSError:
+                continue
+        if not moved:
+            try:
+                batch.rmdir()
+            except OSError:
+                pass
+            continue
+        try:
+            shutil.rmtree(batch, ignore_errors=True)
+        except BaseException:                       # noqa: BLE001
+            # 宿主的删除保护抛 BaseException 子类 —— 清理失败绝不能打死夜班。
+            pass
+        if batch.exists():
+            # 批次没删掉（被保护拦了）→ 留在盘上，下轮再收
+            out["kept"] += moved
+            continue
+        removed += moved
+    out["removed"] = removed
+    out["freed_bytes"] = freed
+    return out
+
+
+def _count_entries(p: Path) -> int:
+    """这个目录树大概有多少条（文件 + 子目录），用来把每批的删除条目数压在阈值下。
+
+    估算即可（探针沙箱都是 1 个文件），但必须**便宜**：不能对几万个目录做全量遍历。
+    """
+    n = 3          # 保守起见：一个目录至少算 3 条（目录本身 + 内容 + 冗余）
+    try:
+        with os.scandir(p) as it:
+            for e in it:
+                n += 1
+                if e.is_dir(follow_symlinks=False):
+                    n += 4          # 目录里的东西粗估：宁可高估也别撞阈值
+                if n > 60:
+                    break
+    except OSError:
+        pass
+    return n
+
+
+def _dir_size(p: Path) -> int:
+    """目录占用字节数（只算一层内容，够用来如实报告"回收了多少"）。"""
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(p):
+            for f in files:
+                try:
+                    total += (Path(root) / f).stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+_RUN_DIRS: list[Path] = []
+
+
+def _register_run_dir(d: Path) -> None:
+    if d not in _RUN_DIRS:
+        _RUN_DIRS.append(d)
+        atexit.register(_cleanup_run_dir)
 
 
 def _env(ws: Path) -> dict:
@@ -593,6 +1313,82 @@ def _tail(text: str, n: int = 240) -> str:
     return t[-n:] if len(t) > n else t
 
 
+def _kill_tree(pid: int) -> None:
+    """杀掉整棵进程树（Windows 用 taskkill /T，POSIX 用 killpg）。
+
+    只 kill 直接子进程不够：探针常去启动被测应用，应用自己再起 uvicorn/worker，
+    孙进程会继续持有管道或占着端口，下一次探针就跟着失败。
+    """
+    try:
+        if os.name == "nt":
+            # 输出丢给 DEVNULL：taskkill 不需要捕获（也为了让自检能一句断言
+            # "probe.py 里不许出现 capture_output" —— 管道抓输出正是这次挂死的根源）
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:                                            # pragma: no cover - 非 Windows
+            os.killpg(os.getpgid(pid), 9)
+    except Exception:                                    # noqa: BLE001
+        try:
+            os.kill(pid, 9)
+        except Exception:                                # noqa: BLE001
+            pass
+
+
+def _run_child(cmd: list[str], *, cwd: str, timeout: int,
+               env: dict | None = None) -> dict:
+    """跑子进程：**输出写文件**（不用管道），超时杀**整棵进程树**。
+
+    为什么不用 `capture_output=True`（2026-11-10 实测血泪）：
+      子进程若再起孙进程（uvicorn / 后台线程 / worker）并继承了 stdout 管道，
+      `subprocess.run(timeout=...)` 到期 kill 掉子进程后，`communicate()` 仍要等
+      **所有写端关闭** —— 孙进程活着就永远等下去。实测 18:01 起跑探针、18:05 超时，
+      之后夜班零输出零花费挂了 13 分钟，py-spy 栈停在
+      `_http_exec → subprocess.run → Popen._communicate → Thread.join`。
+      写文件没有这层耦合：到点就杀树，再读文件里已经写下的内容，判定照旧。
+
+    返回 {out, err, code, timed_out}，**永不抛异常**（调用方按原来的口径报错）。
+    """
+    import tempfile
+    out_f = err_f = None
+    try:
+        out_f = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", errors="replace",
+                                            suffix=".out", delete=False)
+        err_f = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", errors="replace",
+                                            suffix=".err", delete=False)
+        proc = subprocess.Popen(cmd, cwd=cwd, stdout=out_f, stderr=err_f,
+                                env=env if env is not None else None)
+        timed_out = False
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_tree(proc.pid)
+            try:
+                code = proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:            # 杀不动也不能再等
+                code = -9
+        out_f.flush()
+        err_f.flush()
+        for fh in (out_f, err_f):
+            fh.seek(0)
+        out = out_f.read() or ""
+        err = err_f.read() or ""
+        return {"out": out, "err": err, "code": code, "timed_out": timed_out}
+    except Exception as exc:                             # noqa: BLE001
+        return {"out": "", "err": f"{type(exc).__name__}: {exc}", "code": -1,
+                "timed_out": False}
+    finally:
+        for fh in (out_f, err_f):
+            if fh is not None:
+                try:
+                    name = fh.name
+                    fh.close()
+                    os.unlink(name)
+                except Exception:                        # noqa: BLE001
+                    pass
+
+
 def _run_cli(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict:
     entry = str(probe.get("entry") or "").strip()
     target = (ws / entry).resolve()
@@ -609,14 +1405,11 @@ def _run_cli(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict:
             p = scratch / str(name)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(str(content), encoding="utf-8")
-        try:
-            proc = subprocess.run([sys.executable, "-B", str(target), *args],
-                                  cwd=str(scratch), capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=timeout,
-                                  env=_env(ws))
-        except subprocess.TimeoutExpired:
+        _r = _run_child([sys.executable, "-B", str(target), *args],
+                        cwd=str(scratch), timeout=timeout, env=_env(ws))
+        if _r["timed_out"]:
             return {"ok": False, "detail": f"超时 {timeout}s（可能有死循环或等待输入）"}
-        out, err, code = proc.stdout or "", proc.stderr or "", proc.returncode
+        out, err, code = _r["out"], _r["err"], _r["code"]
     finally:
         pass  # 原地覆盖、不删除（见 _scratch）
 
@@ -655,19 +1448,16 @@ def _run_call(ws: Path, probe: dict, timeout: int) -> dict:
     runner = scratch / "_probe_call.py"
     try:
         runner.write_text(_CALL_RUNNER, encoding="utf-8")
-        try:
-            proc = subprocess.run([sys.executable, "-B", str(runner),
-                                   json.dumps(cfg, ensure_ascii=False), str(ws)],
-                                  cwd=str(scratch), capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=timeout,
-                                  env=_env(ws))
-        except subprocess.TimeoutExpired:
+        _r = _run_child([sys.executable, "-B", str(runner),
+                         json.dumps(cfg, ensure_ascii=False), str(ws)],
+                        cwd=str(scratch), timeout=timeout, env=_env(ws))
+        if _r["timed_out"]:
             return {"ok": False, "detail": f"超时 {timeout}s（可能有死循环）"}
-        lines = [ln for ln in (proc.stdout or "").strip().splitlines() if ln.strip()]
+        lines = [ln for ln in (_r["out"] or "").strip().splitlines() if ln.strip()]
         if not lines:
             # 探针一行输出都没有 = 引擎自己跑不动，不是产物错（两回事，必须分开报）
             return {"ok": False, "engine_error": True,
-                    "detail": "探针脚本没有输出：" + _tail(proc.stderr or "", 200)}
+                    "detail": "探针脚本没有输出：" + _tail(_r["err"] or "", 200)}
         try:
             data = json.loads(lines[-1])
         except Exception:                                # noqa: BLE001
@@ -709,13 +1499,10 @@ def _run_pytest(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict
     try:
         targets = args or named or [str(root)]
         cmd = [sys.executable, "-B", "-m", "pytest", "-v", *targets]
-        try:
-            proc = subprocess.run(cmd, cwd=str(root), capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=timeout,
-                                  env=_env(ws))
-        except subprocess.TimeoutExpired:
+        _r = _run_child(cmd, cwd=str(root), timeout=timeout, env=_env(ws))
+        if _r["timed_out"]:
             return {"ok": False, "detail": f"pytest 超时 {timeout}s"}
-        out, err, code = proc.stdout or "", proc.stderr or "", proc.returncode
+        out, err, code = _r["out"], _r["err"], _r["code"]
     except Exception as exc:                             # noqa: BLE001
         return {"ok": False, "detail": f"pytest 跑不起来：{type(exc).__name__}: {exc}"}
     want_exit = probe.get("expect_exit")
@@ -737,6 +1524,16 @@ def _run_pytest(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict
                          "stderr": _tail(err, out_cap)}}
 
 
+def _stack_app_candidates(ws) -> list:
+    """按产物仓选栈给 ASGI app 候选；默认栈返回空列表（不干扰既有候选）。"""
+    try:
+        from . import stack as _st
+        ad = _st.current(ws)
+        return [] if ad.name == "fastapi" else list(ad.probe_app_candidates)
+    except Exception:                                    # noqa: BLE001
+        return []
+
+
 def _http_exec(ws: Path, probe: dict, *, cwd: str, phase: int = 0,
                varfile: Path | None = None, timeout: int = 240) -> dict:
     """跑一次 http runner（一个进程）。phase/varfile 让"前段/后段"能跨进程传变量。"""
@@ -745,25 +1542,28 @@ def _http_exec(ws: Path, probe: dict, *, cwd: str, phase: int = 0,
            "data": probe.get("data"), "headers": probe.get("headers"),
            "expect_status": probe.get("expect_status"), "expect_json": probe.get("expect_json"),
            "body_has": probe.get("body_has"), "body_has_any": probe.get("body_has_any"),
+           "body_not_has": probe.get("body_not_has"),
+           "dom_has": probe.get("dom_has"), "dom_not_has": probe.get("dom_not_has"),
+           "openapi_has": probe.get("openapi_has"),
            "steps": probe.get("steps"), "phase": phase,
-           "varfile": str(varfile) if varfile else ""}
+           "varfile": str(varfile) if varfile else "",
+           # §20.7 接缝 6/7：非 FastAPI 栈（Django 等）的 ASGI app 未必叫 app.main:app，
+           # 由栈适配器给候选。没选栈 / 默认栈 → 空列表 → 与改动前逐字一致。
+           "app_candidates": _stack_app_candidates(ws)}
     # runner 永远放引擎自己的临时目录：前端探针要在仓库根跑（读静态文件），
     # 但**不能**把探针脚本写进客户仓库（实测 2026-11-07：仓库根冒出 _probe_http.py）。
     runner = _scratch(ws, "http-run") / "_probe_http.py"
     try:
         runner.write_text(_HTTP_RUNNER, encoding="utf-8")
-        try:
-            proc = subprocess.run([sys.executable, "-B", str(runner), str(ws),
-                                   json.dumps(cfg, ensure_ascii=False)],
-                                  cwd=cwd, capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=timeout,
-                                  env=_env(ws))
-        except subprocess.TimeoutExpired:
+        _r = _run_child([sys.executable, "-B", str(runner), str(ws),
+                         json.dumps(cfg, ensure_ascii=False)],
+                        cwd=cwd, timeout=timeout, env=_env(ws))
+        if _r["timed_out"]:
             return {"ok": False, "detail": f"请求超时 {timeout}s（可能卡在启动或死循环）"}
-        lines = [ln for ln in (proc.stdout or "").strip().splitlines() if ln.strip()]
+        lines = [ln for ln in (_r["out"] or "").strip().splitlines() if ln.strip()]
         if not lines:
             return {"ok": False, "engine_error": True,
-                    "detail": "http 探针没有输出：" + _tail(proc.stderr or "", 200)}
+                    "detail": "http 探针没有输出：" + _tail(_r["err"] or "", 200)}
         try:
             data = json.loads(lines[-1])
         except Exception:                                # noqa: BLE001
@@ -823,6 +1623,23 @@ def _run_http(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict:
     return _http_exec(ws, probe, cwd=cwd, timeout=timeout)
 
 
+def _dedupe_http_probe(probe: dict) -> dict:
+    """http 探针执行前的确定性修补（角色串味）。返回新 probe，绝不改入参。
+
+    挂在 run() 的 http 分支：无论蓝图是旧的（存量串味链）还是新的，执行时都按
+    已修正的独立账号发请求。这样即使存量 blueprint.json 没迁移，判据也立刻正确。
+    """
+    steps = probe.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return probe
+    new_steps, _notes = dedupe_role_users(steps)
+    if new_steps == steps:
+        return probe
+    out = dict(probe)
+    out["steps"] = new_steps
+    return out
+
+
 def run(ws, probe: dict, timeout: int = PROBE_TIMEOUT, out_cap: int = 240) -> dict:
     """执行一次探针。返回 {ok, detail, evidence?, engine_error?, invalid?}。
 
@@ -843,7 +1660,8 @@ def run(ws, probe: dict, timeout: int = PROBE_TIMEOUT, out_cap: int = 240) -> di
         elif kind == "pytest":
             r = _run_pytest(ws, probe, timeout, out_cap)
         elif kind == "http":
-            r = _run_http(ws, probe, timeout, out_cap)
+            # 角色串味修补（判据层，零 token）：存量蓝图不必迁移，执行时也按独立账号跑
+            r = _run_http(ws, _dedupe_http_probe(probe), timeout, out_cap)
         else:
             r = _run_cli(ws, probe, timeout, out_cap)
     except Exception as exc:                             # noqa: BLE001

@@ -34,7 +34,7 @@ def on(kind, payload):
 
 print(f"复现：{ws}")
 try:
-    res = company.night(ws, "生成一个计算器", "qwen2.5-coder:7b", hours=0.02,
+    res = company.night(ws, "生成一个计算器", "qwen2.5-coder:7b",
                         use_remote=False, emit=on)
     print(f"\n结果：{res.verified}/{res.total}｜{res.reason[:120]}")
 except Exception:

@@ -83,7 +83,7 @@ def main() -> int:
         print("[3] 只读模式 = 不写文件")
         check("不升级代码", pol.code_escalation == policy.OFF)
         ws = Path(tempfile.mkdtemp())
-        res = company.night(ws, "给 calc.py 加 divide", "qwen2.5:7b", hours=0.01)
+        res = company.night(ws, "给 calc.py 加 divide", "qwen2.5:7b")
         check("夜班被直接拒绝且说明原因", not res.ok and "只读" in (res.reason or ""), res.reason)
         check("拒绝时不写交付物", not (ws / "DELIVERY.md").exists())
 

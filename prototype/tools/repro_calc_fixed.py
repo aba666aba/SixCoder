@@ -53,7 +53,7 @@ if orig_avail is not None:
 
 print(f"复现：{ws}（需求=生成一个计算器，假远端给契约）")
 try:
-    res = company.night(ws, "生成一个计算器", "qwen2.5-coder:7b", hours=0.02,
+    res = company.night(ws, "生成一个计算器", "qwen2.5-coder:7b",
                         use_remote=True, emit=lambda k, p: None)
     print(f"结果：{res.verified}/{res.total}｜{res.reason[:100]}")
     ok_no_crash = "NameError" not in res.reason

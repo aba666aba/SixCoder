@@ -74,7 +74,8 @@ try:
     remote.available = lambda: (True, "")
     remote.ladder = _fake_ladder
     remote._post = _fake_post
-    remote._payload_for = lambda step, r, messages, json_mode=False: (
+    # **kwargs：complete() 现在还会传 tools / tool_choice（原生 function calling）
+    remote._payload_for = lambda step, r, messages, json_mode=False, **kw: (
         {"reasoning_effort": "none", "max_tokens": 8000}, "http://fake", "k")
     remote.cost_cny = lambda *a, **k: 0.0
     settings_store.get_remote = lambda: {"max_prompt_tokens": 950000,

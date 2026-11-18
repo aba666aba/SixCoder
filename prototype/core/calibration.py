@@ -122,8 +122,16 @@ def read_attempts(ws: Path | None = None) -> list[dict]:
 
 
 def record_attempt(ws: Path | None, *, path: str, effort: str, ok: bool,
-                   cost_cny: float = 0.0, funcs: int = 0) -> None:
-    """记一条写作尝试（给"按成功率校准封顶"和"按模块大小校准预算"提供证据）。"""
+                   cost_cny: float = 0.0, funcs: int = 0, kind: str = "module") -> None:
+    """记一条写作尝试（给"按成功率校准封顶"和"按模块大小校准预算"提供证据）。
+
+    `kind`（2026-11-10 补，"已知缺口只记录不降权"那条线）：
+      · "module" —— **模块级**写码尝试（函数体主路 / 整文件路）。
+        这是 `effort.proven_floor` 唯一认的证据类型：远端在 X 档把**整个模块**写对过。
+      · "order"  —— **工作单级**尝试（单个函数）。它只说明"这个函数在 X 档能写对"，
+        推不出"整个模块在 X 档能写对" → **不许进 proven_floor**。
+    旧记录没有这个字段 → 按 "module" 处理（向后兼容，老台账不用重写）。
+    """
     if ws is None:
         return
     try:
@@ -133,6 +141,7 @@ def record_attempt(ws: Path | None, *, path: str, effort: str, ok: bool,
             f.write(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"), "path": path,
                                 "effort": str(effort or "none").lower(),
                                 "ok": bool(ok), "funcs": int(funcs or 0),
+                                "kind": str(kind or "module"),
                                 "cost_cny": round(float(cost_cny or 0.0), 5)},
                                ensure_ascii=False) + "\n")
     except Exception:                                    # noqa: BLE001
@@ -224,16 +233,27 @@ def suggest(ws: Path | None = None, days: int = 14, min_samples: int = 20) -> di
             rate.setdefault(str(a.get("effort") or "none"), []).append(bool(a.get("ok")))
         good = [(CEILINGS.index(e), e) for e, xs in rate.items()
                 if e in CEILINGS and len(xs) >= 3 and sum(xs) / len(xs) >= 0.5]
-        if good:
-            want = max(good)[1]
-            old = str(out["code_effort_ceiling"])
-            if want != old:
-                out["code_effort_ceiling"] = want
-                out["changed"].append("code_effort_ceiling")
-            out["basis"]["code_effort_ceiling"] = "各档成功率 " + ", ".join(
-                f"{e}={sum(xs)}/{len(xs)}" for e, xs in sorted(rate.items())) + f" → {want}"
-        else:
-            out["basis"]["code_effort_ceiling"] = "各档样本不足或成功率都 <50%，沿用现值"
+        # **不再按成功率下调写代码的思考封顶**（2026-11-09 用户铁律：完全相信远端）。
+        #
+        # 为什么必须停掉：成功率在这里**不是模型能力的证据**。
+        #   · 拿到 none 的样本是机械小任务（quota.py / auth.py），本来就容易；
+        #   · 拿 low/high 的样本失败时，失败原因大量是**引擎自己造坏数据**
+        #     （多行签名被截断、新函数被静默丢掉、路由接线把 batches 判成"没有匹配函数"），
+        #     那些 bug 今天已经逐个修掉了，但它们的失败已经记进了台账。
+        # 于是校准器把"引擎的 bug"读成"深思考没用" → 把封顶压到 none →
+        # 远端写码失败后**永远升不了档**（`escalate_capped` 恒真）→ 只能原地重写 →
+        # 失败更多 → 更证明"不该思考"。这是一个**自我强化的错误闭环**。
+        #
+        # 现在：封顶恒为 max（模型物理上限），升档节奏交给 escalate_after 门槛。
+        # 成功率只**记录**，不参与决策。
+        out["basis"]["code_effort_ceiling"] = (
+            "恒为 max（2026-11-09 用户铁律：完全相信远端）；"
+            "成功率仅记录不参与决策 —— 各档 " + ", ".join(
+                f"{e}={sum(xs)}/{len(xs)}" for e, xs in sorted(rate.items()))
+            + "（其中含引擎自身缺陷造成的失败，已修）")
+        if str(out.get("code_effort_ceiling")) != "max":
+            out["code_effort_ceiling"] = "max"
+            out["changed"].append("code_effort_ceiling")
         # 每函数花费：cost ÷ funcs（只算记了函数数的样本）
         per = [float(a["cost_cny"]) / int(a["funcs"]) for a in att
                if int(a.get("funcs") or 0) > 0 and float(a.get("cost_cny") or 0) > 0]

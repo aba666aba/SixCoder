@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -152,26 +153,35 @@ def count_lines(ws: Path, tests: bool = True) -> dict:
     """
     prod_lines = test_lines = files = 0
     modules: set[str] = set()
-    for p in Path(ws).rglob("*.py"):
-        rel = p.relative_to(ws)
-        if any(part in _SKIP_DIRS for part in rel.parts):
-            continue
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        n = sum(1 for ln in text.splitlines() if ln.strip())
-        name = p.name
-        is_test = name.startswith("test_") or name.endswith("_test.py") or "tests" in rel.parts
-        if is_test:
-            test_lines += n
-            if not tests:
+    # 2026-11-09 修：**在目录层面就跳过**，不要"遍历进去再事后过滤"。
+    # 原来用 `Path.rglob("*.py")` + 事后判 `_SKIP_DIRS` —— 但 rglob 会**先进去**：
+    # 毕设产物仓库的 .sixcoder/tmp 里堆了 36754 个探针沙箱目录（210MB），
+    # rglob 全扫一遍要 19 秒，而 count_lines 在夜班里被反复调用（每轮 inspect 都调），
+    # 实测夜班卡在这里 1.5 小时、CPU 零产出。
+    # 改成 os.walk + 顶层剪枝：命中的目录**根本不进去**，遍历量从 15553 降到 ~105。
+    for root, dirs, files_in in os.walk(ws):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        for fname in files_in:
+            if not fname.endswith(".py"):
                 continue
-        else:
-            prod_lines += n
-            if name != "__init__.py":          # 包的定义文件不是一个"模块"
-                modules.add(str(rel.with_suffix("")).replace("\\", "/"))
-        files += 1
+            p = Path(root) / fname
+            rel = p.relative_to(ws)
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            n = sum(1 for ln in text.splitlines() if ln.strip())
+            name = fname
+            is_test = name.startswith("test_") or name.endswith("_test.py") or "tests" in rel.parts
+            if is_test:
+                test_lines += n
+                if not tests:
+                    continue
+            else:
+                prod_lines += n
+                if name != "__init__.py":          # 包的定义文件不是一个"模块"
+                    modules.add(str(rel.with_suffix("")).replace("\\", "/"))
+            files += 1
     return {"prod_lines": prod_lines, "test_lines": test_lines, "files": files,
             "modules": len(modules)}
 
@@ -193,15 +203,34 @@ _DECL = re.compile(
     re.I)
 _DECL_LOOSE = re.compile(r"^\s*(?:@scale)\s*[:：]?\s*(?P<s>S|M|L|XL)\s*$", re.I | re.M)
 
+# 2026-11-09 修（用户真实需求暴露）：甲方常用**行数**声明规模，例如
+#   「目标代码规模：**30000 行**（10000–50000 行级别）」
+# 原来只认字母档位 → declared 读不到 → 回落到"按仓库实测推断"，
+# 而仓库实测是**当前进度**（5710 行），不是**目标规模** → 依据错了、报告也会写错。
+# 现在也认行数声明：按行数落到对应档位（与 from_lines 同一套边界）。
+_DECL_LINES = re.compile(
+    r"(?:代码规模|目标规模|目标代码规模|规模)\s*[:：]?\s*[*_\s]*(?P<n>\d{3,7})\s*[*_\s]*行"
+    r"|(?P<n2>\d{3,7})\s*行\s*(?:规模|代码)", re.I)
+
 
 def declared_from_requirement(requirement: str) -> str:
-    """从需求原文里读"甲方声明的目标规模"（S/M/L/XL）；没写返回空串。"""
+    """从需求原文里读"甲方声明的目标规模"（S/M/L/XL）；没写返回空串。
+
+    认两种写法：
+      · 字母档位：『代码规模：M』『@scale L』
+      · 行数声明：『目标代码规模：30000 行』『30000 行级别』→ 按行数落档
+    """
     text = requirement or ""
     m = _DECL_LOOSE.search(text) or _DECL.search(text)
-    if not m:
-        return ""
-    s = m.group("s").upper()
-    return s if s in TIERS else ""
+    if m:
+        s = m.group("s").upper()
+        return s if s in TIERS else ""
+    lm = _DECL_LINES.search(text)
+    if lm:
+        n = int(lm.group("n") or lm.group("n2"))
+        if n > 0:
+            return from_lines(n)
+    return ""
 
 
 def resolve(requirement: str, ws: Path | None = None) -> dict:
@@ -216,14 +245,25 @@ def resolve(requirement: str, ws: Path | None = None) -> dict:
                                                        "files": 0, "modules": 0}
     total = measured["prod_lines"] + measured["test_lines"]
     inferred = from_lines(total)
+    declared_lines = _declared_lines(requirement)
     if declared:
         return {"level": declared, "source": "requirement", "declared": declared,
+                "declared_lines": declared_lines,
                 "inferred": inferred, "measured": measured, "total_lines": total,
                 "warning": ""}
     warn = ("需求里没写目标代码规模，按仓库实测（%d 行）推断为 %s 级。"
             "不同规模的约束差别很大，建议在需求里加一行『代码规模：S/M/L/XL』" % (total, inferred))
-    return {"level": inferred, "source": "measured", "declared": "", "inferred": inferred,
-            "measured": measured, "total_lines": total, "warning": warn}
+    return {"level": inferred, "source": "measured", "declared": "", "declared_lines": 0,
+            "inferred": inferred, "measured": measured, "total_lines": total,
+            "warning": warn}
+
+
+def _declared_lines(requirement: str) -> int:
+    """甲方声明的**目标行数**（0 = 没声明）。用于交付报告写明依据。"""
+    m = _DECL_LINES.search(requirement or "")
+    if not m:
+        return 0
+    return int(m.group("n") or m.group("n2") or 0)
 
 
 # ------------------------------------------------------------------ 给门禁/报告用

@@ -48,9 +48,21 @@ CONTENT_CEIL = 384000          # 官方单次输出上限（正文部分）
 # OpenAI 兼容端点的输出配额上限（智谱官方示例 65536，接口硬上限 131072）。
 # DS 校准出的 33 万配额直接发给这类端点会 HTTP 400「max_tokens 参数非法」。
 OPENAI_OUTPUT_CEIL = 65536
+# **总 max_tokens 硬上限**（思考 + 正文之和），按厂商协议族区分。
+# 2026-11-09 实锤：断开输出限制后 content=384000 + reserve=40000 = 424000，
+# 超过 DeepSeek 的 393216 → HTTP 400「Invalid max_tokens value」，
+# 远端**一个字节都没写**（所有 author 调用全废）。
+# 所以"不断开限制"≠"不管厂商物理上限"：上限按厂商给，不按任务量给。
+MODEL_MAX_TOKENS = {
+    "deepseek": 393216,     # DeepSeek 官方报错里给的 valid range 上界
+    "glm": 131072,          # GLM-5.x 官方最大输出
+    "openai": 65536,        # OpenAI 兼容端点官方示例
+}
 # 按协议族区分的官方端点：DeepSeek 档案不继承全局（可能是别家 OpenAI 兼容服务）的地址
 DEEPSEEK_BASE = "https://api.deepseek.com"
+GLM_BASE = "https://open.bigmodel.cn/api/paas/v4"      # 智谱官方（2026-11-09 核对）
 OPENAI_COMPAT_BASE = "https://api.openai.com/v1"
+GLM_OUTPUT_CEIL = 131072        # 官方 GLM-5.x 最大输出（2026-11-09 核对）
 
 
 def reasoning_reserve(effort: str | None) -> int:
@@ -96,12 +108,17 @@ def content_floor() -> int:
     return CONTENT_FLOOR
 
 
-def max_tokens_for(content_budget: int, effort: str | None) -> int:
+def max_tokens_for(content_budget: int, effort: str | None,
+                   ceiling: int = 0) -> int:
     """正文配额 + 思考预留 —— **唯一算法**，`_payload_for` 与 `complete` 都必须用它。
 
     为什么必须只有一个入口：实测踩过两次。第一次把思考算进正文配额里（正文 0 token），
     第二次在 `_payload_for` 里加了预留、却被 `complete` 里的 `max_out` 覆盖回 8 000
     （思考 6 631 + 正文 1 369，JSON 又被截断）。两条路各写一遍 = 必漏一处。
+
+    `ceiling` = 厂商的**总 max_tokens 硬上限**（思考+正文）。
+    2026-11-09 实锤：不夹就会算出 424000 > DeepSeek 的 393216 →
+    HTTP 400「Invalid max_tokens value」→ 远端一个字节都没写。
     """
     e = str(effort or "none").lower()
     reserve = reasoning_reserve(e)
@@ -115,7 +132,24 @@ def max_tokens_for(content_budget: int, effort: str | None) -> int:
     # **一步到位**：正常调用永远不该被上限掐住（实测峰值 26 788 << 128K），
     # 所以直接把 max_tokens 顶到安全上限，而不是按需算一个小值再往上抬。
     # 这不是浪费：max_tokens 只是上限，按实际生成计费。
-    return max(desired, safety_cap())
+    out = max(desired, safety_cap())
+    cap = int(ceiling or 0)
+    if cap > 0 and out > cap:
+        # 超厂商硬上限 → 压回去。**思考预留优先保住**（内容少了可以少写，
+        # 思考没了写得更差），所以先削正文，再削总上限。
+        out = max(1, cap)
+    return out
+
+
+def _ceiling_for(step: dict | None = None, r: dict | None = None) -> int:
+    """这个厂商协议的**总 max_tokens 硬上限**（思考 + 正文）。
+
+    2026-11-09 实锤：不按厂商夹 → 算出 424000 > DeepSeek 的 393216 →
+    HTTP 400「Invalid max_tokens value」→ **远端一个字节都没写**，
+    看起来像"模型不会写"，其实是请求参数非法。
+    """
+    c = str(compat_of(step, r) or "deepseek").lower()
+    return int(MODEL_MAX_TOKENS.get(c, MODEL_MAX_TOKENS["deepseek"]))
 
 
 def content_truncated(usage: dict | None, content_budget: int) -> bool:
@@ -144,26 +178,62 @@ def compat_of(step: dict | None = None, r: dict | None = None) -> str:
     for src in (step, r):
         v = str((src or {}).get("compat") or "").strip().lower()
         if v:
+            # 厂商名即协议族（2026-11-09）：deepseek / glm / openai。
+            # glm 走 OpenAI 的请求格式，但**要单独发 thinking 参数**（官方只认
+            # thinking.type + reasoning_effort），所以不能和 openai 混为一族。
+            if v in ("glm", "zhipu", "bigmodel"):
+                return "glm"
             return v
-    return str((r or {}).get("provider") or "deepseek").strip().lower() or "deepseek"
+    v = str((r or {}).get("provider") or "deepseek").strip().lower() or "deepseek"
+    return "glm" if v in ("glm", "zhipu", "bigmodel") else v
 
 
-def _key() -> str:
-    """全局 key（含环境变量回落）。保持无参：自检会 monkeypatch 它。"""
+# 各厂商的环境变量名（厂商是一等公民，key 各自独立）
+ENV_KEYS = {
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "glm": ("ZHIPUAI_API_KEY", "GLM_API_KEY", "BIGMODEL_API_KEY"),
+    "openai": ("OPENAI_API_KEY",),
+}
+
+
+def _key(compat: str = "") -> str:
+    """某个协议族的 key：设置里的显式值 > 该厂商的环境变量。
+
+    保持**可无参调用**（自检会 monkeypatch 它）——所以兼容参数必须可选。
+    厂商的环境变量各自独立（`ZHIPUAI_API_KEY` / `OPENAI_API_KEY`），
+    不跨厂商兜底：把 DS 的 key 发到智谱端点必然 401（实测 2026-11-07）。
+    """
     r = settings_store.get_remote()
-    return (str(r.get("api_key") or "").strip()
-            or os.environ.get("DEEPSEEK_API_KEY", "").strip())
+    fam = str(compat or "").strip().lower()
+    if not fam:
+        fam = str(r.get("compat") or r.get("provider") or "deepseek").strip().lower()
+    if fam in ("glm", "zhipu", "bigmodel"):
+        fam = "glm"
+    explicit = str(r.get("api_key") or "").strip()
+    if explicit and fam in (str(r.get("compat") or r.get("provider") or "deepseek")
+                             .strip().lower(), ""):
+        return explicit
+    for env in ENV_KEYS.get(fam, ()):
+        v = os.environ.get(env, "").strip()
+        if v:
+            return v
+    return explicit
 
 
 def available() -> tuple[bool, str]:
     r = settings_store.get_remote()
     if not r.get("enabled", True):
         return False, "远端协助已在设置里关闭"
+    compat0 = compat_of(r=r)
+    # 用**无参**调用：`_key` 的公开契约就是"可无参"（自检会 monkeypatch 成 0 参 lambda）。
+    # 2026-11-10 实测：这里传了 compat0 → 自检 dispatch 时 `TypeError: <lambda>() takes 0
+    # positional arguments but 1 was given`，整条远端可用性判定直接崩。
     if not _key():
-        return False, "未配置 API key（设置 → 远端模型，或环境变量 DEEPSEEK_API_KEY）"
+        return False, (f"未配置 API key（设置 → 远端模型 → 厂商卡片填 apikey，"
+                       f"或环境变量 {'/'.join(ENV_KEYS.get(compat0, ('DEEPSEEK_API_KEY',)))}）")
     compat = compat_of(r=r)
-    if compat not in ("deepseek", "openai"):
-        return False, f"不支持的远端协议 compat={compat}（可选 deepseek / openai）"
+    if compat not in ("deepseek", "glm", "openai"):
+        return False, f"不支持的远端协议 compat={compat}（可选 deepseek / glm / openai）"
     return True, ""
 
 
@@ -176,7 +246,15 @@ def _ensure_table() -> None:
         " reasoning_tokens INTEGER DEFAULT 0, offpeak INTEGER DEFAULT 0)")
     # 老库补列（NULL 允许），便于升级不丢历史
     for col, ddl in (("reasoning_tokens", "INTEGER DEFAULT 0"), ("offpeak", "INTEGER DEFAULT 0"),
-                     ("effort", "TEXT"), ("cost_cny", "REAL DEFAULT 0")):
+                     ("effort", "TEXT"), ("cost_cny", "REAL DEFAULT 0"),
+                     # 2026-11-10：项目账本要靠这一列归属花费。缺了它，
+                     # 任何走 INSERT 的路径都会炸 `no column named project_id`
+                     # （自检 check_reuse 就是拿旧 schema 起的库，直接抓到）。
+                     ("project_id", "TEXT DEFAULT ''"),
+                     # 2026-11-15 成本归因：没有它就算不出"每条能力花了多少"，
+                     # 也就无法区分"这钱是不是废单"。值来自 core/attribution 的上下文
+                     # （模块 → 能力，按蓝图 cap.modules 机械映射），取不到就留空，绝不猜。
+                     ("cap_id", "TEXT DEFAULT ''")):
         try:
             db.execute(f"ALTER TABLE remote_usage ADD COLUMN {col} {ddl}")
         except Exception:                              # noqa: BLE001
@@ -303,27 +381,71 @@ def _reuse_key(scope: str, wire: list[dict], model: str = "") -> str:
         f"{PROMPT_VERSION}|{scope}|{model}|{body}".encode("utf-8")).hexdigest()
 
 
-def _record(**kw) -> None:
+def _purpose_of() -> str:
+    """这次调用花在哪一步：归因上下文的 phase（写码/契约/修复…），取不到才用 handoff。"""
+    try:
+        from . import attribution as _at
+        return str((_at.snapshot() or {}).get("phase") or "handoff")
+    except Exception:                                    # noqa: BLE001
+        return "handoff"
+
+
+def _cap_id_of(kw: dict) -> str:
+    """这笔调用归到哪些能力上：**显式传的优先**，否则读 attribution 上下文。
+
+    没有上下文就写空串 —— 报表里会单列"未归因"，逼着把钩子补全，
+    而不是让一笔钱悄悄消失在平均值里。
+    """
+    if kw.get("cap_id"):
+        return str(kw["cap_id"])[:400]
+    try:
+        from . import attribution as _at
+        return str((_at.snapshot() or {}).get("cap_id") or "")[:400]
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def _record(**kw) -> float:
     with _REC_LOCK:
-        _record_locked(**kw)
+        return _record_locked(**kw)
 
 
-def _record_locked(**kw) -> None:
+def _record_locked(**kw) -> float:
     _ensure_table()
     step = {"model": kw.get("model", ""), "pricing": kw.get("pricing")}
     cost = cost_cny(step if kw.get("pricing") else None,
                     int(kw.get("prompt_tokens") or 0), int(kw.get("cache_hit_tokens") or 0),
                     int(kw.get("completion_tokens") or 0)) if kw.get("model") else 0.0
+    # 明细行带上**项目指纹**：一个项目一本账，明细才是可归因的证据。
+    # 拿不到 workspace（引擎自检/无仓库上下文）就留空 —— 绝不瞎归账。
+    _pid = ""
+    _ws = ""
+    try:
+        from . import project_ledger as _plid
+        _ws = str(kw.get("workspace") or _plid.current() or "")
+        _pid = _plid.project_id_of(_ws) if _ws else ""
+    except Exception:                                    # noqa: BLE001
+        _pid = ""
     db.execute(
         "INSERT INTO remote_usage(task_id, node_id, purpose, model, prompt_tokens,"
         " completion_tokens, cache_hit_tokens, cached_reply, ms, created_at,"
-        " reasoning_tokens, offpeak, effort, cost_cny) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (kw.get("task_id", ""), kw.get("node_id", ""), kw.get("purpose", "handoff"),
+        " reasoning_tokens, offpeak, effort, cost_cny, project_id, cap_id)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (kw.get("task_id", ""), kw.get("node_id", ""),
+         # purpose 缺省不再写死 "handoff"（2026-11-15 实测：1749 次调用全是 handoff，
+         # "按用途"这栏完全没用）→ 取归因上下文里的 phase，才看得出钱花在
+         # 写码 / 契约 / 修复 / 诊断 哪一步。
+         str(kw.get("purpose") or _purpose_of()),
          kw.get("model", ""), kw.get("prompt_tokens", 0), kw.get("completion_tokens", 0),
          kw.get("cache_hit_tokens", 0), 1 if kw.get("cached_reply") else 0,
          kw.get("ms", 0), db.now(),
          int(kw.get("reasoning_tokens") or 0), 1 if is_offpeak() else 0,
-         str(kw.get("effort") or ""), round(cost, 6)))
+         str(kw.get("effort") or ""), round(cost, 6), _pid, _cap_id_of(kw)))
+    # 记账就在这一行：**明细行带 project_id 就是记账**。
+    # 项目账本不累加，而是从明细派生（`project_ledger.total`）——
+    # 增量累加 + 定期对账会重复计数（2026-11-10 20:45 实测多算 ¥0.0745），已改纯派生。
+    # 返回本次花费：调用方仍可用它做本轮的临时统计。
+    return round(cost, 6)
 
 
 def usage_summary(task_id: str = "") -> dict:
@@ -425,7 +547,9 @@ def _trim(text: str, limit: int) -> str:
             f"{len(text) - head - tail} 字符，控制远端 token）…\n\n" + text[-tail:])
 
 
-def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool) -> tuple[dict, str, str]:
+def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool,
+                  tools: list[dict] | None = None,
+                  tool_choice: str = 'auto') -> tuple[dict, str, str]:
     """按"阶梯档位"拼请求体，返回 (payload, base_url, key)。
 
     思考强度走官方参数：none → `thinking:{type:disabled}`；low/high/max →
@@ -447,26 +571,60 @@ def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool) -> 
     # 实测踩过（2026-11-05 甲方模式第一夜）：flash:max 档 8000 配额被 reasoning 吃满，
     # 正文 0 token → 契约合成返回空 → 整夜白跑（两次调用各 ¥0.03）。
     # 所以开思考时必须把 reasoning 的额度**加在正文配额之上**，否则"越想越写不出来"。
-    _mt = max_tokens_for(cap, effort)
+    _mt = max_tokens_for(cap, effort, _ceiling_for(step, r))
     if _mt:
         payload["max_tokens"] = _mt
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    # 原生函数调用（DeepSeek 官方 OpenAI 兼容格式，官方文档
+    # https://api-docs.deepseek.com/guides/tool_calls）：
+    #   请求 {"tools":[{"type":"function","function":{name,description,parameters}}]}
+    #   响应 choices[0].message.tool_calls[]（function.arguments 是 **JSON 字符串**）
+    #   结果回传 {"role":"tool","tool_call_id":<id>,"content":<结果>}
+    if tools:
+        payload["tools"] = tools
+        if tool_choice and tool_choice != "auto":
+            payload["tool_choice"] = tool_choice
     compat = compat_of(step, r)
     if compat == "openai":
-        # 按智谱等 OpenAI 兼容端点的**官方格式**发：thinking 开关 + 受限的输出配额。
-        # 它们不认 reasoning_effort，也不需要 response_format（JSON 由提示词约束 +
-        # _json_of 从围栏里兜底解析）。实测发 DS 的 336136 会 400，官方示例是 65536。
-        payload["thinking"] = {"type": "disabled" if effort == "none" else "enabled"}
+        # 通用 OpenAI 兼容：不认 thinking / reasoning_effort，也不需要
+        # response_format（JSON 由提示词约束 + _json_of 从围栏里兜底解析）。
+        # 实测发 DS 的 336136 会 400，官方示例是 65536 → 输出配额按兼容端点封顶。
+        payload.pop("thinking", None)
         payload.pop("reasoning_effort", None)
         payload.pop("response_format", None)
         payload["max_tokens"] = max(1, min(int(payload.get("max_tokens") or
                                               OPENAI_OUTPUT_CEIL), OPENAI_OUTPUT_CEIL))
+    elif compat == "glm":
+        # GLM 官方格式（2026-11-09 核对官方文档）：
+        #   thinking.type = enabled / disabled  （GLM-4.5+）
+        #   reasoning_effort = max / high / low （GLM-5.2+；**没有 none**）
+        # "none"（不思考）= thinking.type=disabled；但 GLM-5.3 起**不再支持禁用**，
+        # 官方明确说传 disabled 会请求失败 → 所以 none 档在 GLM 上退化为 enabled + low
+        # （官方迁移提示也是这么建议的：thinking 改 enabled，reasoning_effort 设 low）。
+        _eff = str(effort or "none").strip().lower()
+        if _eff == "none":
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = "low"
+        else:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = _eff if _eff in ("max", "high", "low") else "max"
+        payload.pop("response_format", None)
+        # GLM 输出上限：官方 GLM-5.3/5.2/5.1/5 最大 131072（默认 65536），
+        # GLM-4.6/4.5 最大 98304 —— 发超了会 400。DS 的 336136 在这里绝对不能发。
+        payload["max_tokens"] = max(1, min(int(payload.get("max_tokens") or
+                                              GLM_OUTPUT_CEIL), GLM_OUTPUT_CEIL))
     elif effort == "none":
         payload["thinking"] = {"type": "disabled"}
     else:
         payload["thinking"] = {"type": "enabled"}
         payload["reasoning_effort"] = effort
+    # DeepSeek 官方：**思考模式 + `tool_choice="required"` 会 400**
+    # （官方原话：switch thinking off for those requests）。
+    # 所以这类请求把思考关掉 —— 反正模型只是"必须调一个工具"，不需要长思考。
+    if (payload.get("thinking") or {}).get("type") == "enabled" and tool_choice == "required":
+        payload["thinking"] = {"type": "disabled"}
+        payload.pop("reasoning_effort", None)
     # 端点与 key **按协议族隔离**，不许跨厂商兜底。
     # 旧链是 `档案 → 全局 → 官方默认`：用户把全局配成智谱（openai 兼容）后，
     # DeepSeek 档案只要自己没填 base_url，就会继承智谱地址；key 同理。
@@ -478,10 +636,21 @@ def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool) -> 
     if compat == "deepseek":
         # DeepSeek 家族：只用官方端点（或档案显式填的），绝不继承 openai 兼容全局地址
         base = explicit_base or DEEPSEEK_BASE
+    elif compat == "glm":
+        # GLM 家族：只用智谱端点（或档案显式填的），**绝不继承 openai 全局地址**
+        # （那是 OpenAI 的地址/key，发过去必然 401）。
+        base = explicit_base or GLM_BASE
     else:
         base = explicit_base or global_base or OPENAI_COMPAT_BASE
     # key 同理：只有"全局服务与本协议一致"时才允许继承全局 key
     key = str(step.get("api_key") or "").strip()
+    if not key:
+        # 厂商级 key 兜底（厂商是一等公民：key 填在厂商上，模型档案留空即继承）
+        try:
+            from . import settings_store as _ss
+            key = _ss.provider_key(compat)
+        except Exception:                                # noqa: BLE001
+            key = ""
     if not key and (global_compat == compat or not global_compat):
         # 优先用调用方传入的 r（离线自检可注入，不读本机配置）；
         # 没有才回落到 _key()（含环境变量）。_key 保持无参，自检会 monkeypatch 它。
@@ -490,15 +659,33 @@ def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool) -> 
 
 
 def _post(payload: dict, base: str, key: str, timeout: int = 300) -> tuple[dict | None, str, int]:
-    """发请求，**瞬时错误自动退避重试**（429/5xx/超时）。
+    """发请求，**瞬时错误自动退避重试**（网络不可达 / 429 / 5xx）。
 
     为什么必须有（实测 2026-11-07）：`_is_transient` 早就写好了，却**从来没人调用**。
     限流一次就被上层当成"作者这一版没写出来"，白白消耗一轮自愈 —— 模型被冤枉成"能力不够"。
+
+    2026-11-09 修（用户反馈：「突然断网然后网络恢复的情况下远端调用没用恢复」）：
+    原来重试只有 **3 次**、退避 2s/4s/8s（总窗口 ~14 秒）。断网只要超过 14 秒
+    （真实断网通常几十秒到几分钟），这一轮就彻底失败 → 引擎把"网络断了"
+    记成"远端写不出来" → **网络恢复后也不会自动回到正轨**。
+    现在：
+      · 重试次数 3 → 8；
+      · **网络类错误用更长的退避**（5/10/20/30/30/30/30 ≈ 175 秒），
+        限流/5xx 用原来的短退避（2/4/8/16/20…）—— 网络不通要多等，限流要快点退；
+      · 总等待有上限（`SIXCODER_REMOTE_RETRY_WAIT`，默认 240 秒），到点才放弃，
+        避免真的没网时无限挂着；
+      · 退避带 **±20% 抖动**，多进程/多档位不会同步重试撞上去。
     """
     import os as _os
     import time as _time
-    tries = max(1, int(_os.environ.get("SIXCODER_REMOTE_RETRY", "3")))
+    import random as _rand
+    tries = max(1, int(_os.environ.get("SIXCODER_REMOTE_RETRY", "8")))
+    try:
+        wait_budget = float(_os.environ.get("SIXCODER_REMOTE_RETRY_WAIT", "240"))
+    except ValueError:
+        wait_budget = 240.0
     last = ""
+    waited = 0.0
     for attempt in range(1, tries + 1):
         data, err, ms = _post_once(payload, base, key, timeout)
         if data is not None:
@@ -506,8 +693,62 @@ def _post(payload: dict, base: str, key: str, timeout: int = 300) -> tuple[dict 
         last = err
         if attempt >= tries or not _is_transient(err):
             return None, err, ms
-        _time.sleep(min(20, 2 ** attempt))           # 2s / 4s / 8s …
+        if waited >= wait_budget:
+            return None, (last + f"（瞬时错误持续，等待 {wait_budget:.0f}s 后仍不通）")[:200], ms
+        delay = _backoff_delay(attempt, err)
+        # 抖动：避免多进程/多阶梯同步重试
+        delay = delay * (0.8 + 0.4 * _rand.random())
+        waited += delay
+        _time.sleep(delay)
     return None, last, 0
+
+
+# 网络不可达的特征（与"限流/服务错误"分开处理：前者要多等，后者要快点退）
+_NET_MARKERS = ("请求失败", "URLError", "WinError", "gaierror", "ConnectionRefused",
+                 "ConnectionReset", "ConnectionAborted", "网络", "无法连接", "NameResolution",
+                 "Network unreachable", "SSLError", "RemoteDisconnected", "IncompleteRead")
+
+
+def is_fatal_remote_error(err: str) -> bool:
+    """这次远端失败是不是"**配置问题**"（不是模型能力问题，也不是网络抖动）。
+
+    2026-11-09 实测：DeepSeek key 失效 → 每一次 author 调用都 401。
+    401/402/403 是**换 key / 充值 / 改端点**才能解决的事：
+      · 重试没有意义（同一个坏 key 再试八次还是 401）；
+      · 继续跑夜班没有意义（每一张单都会立刻失败，纯白烧本地时间）；
+      · 更不能记成"模型不会写"（那是把配置问题记成能力问题）。
+    所以上层看到 `remote_fatal=True` 就该**立刻停机并如实报出原因**。
+
+    判据：错误串里带 HTTP 401 / 402 / 403，或"鉴权失败"/"余额不足"字样。
+    """
+    e = err or ""
+    return any(m in e for m in ("HTTP 401", "HTTP 402", "HTTP 403",
+                                "鉴权失败", "余额不足", "key 失效", "API key"))
+
+
+def is_network_error(err: str) -> bool:
+    """公开版：这次失败是不是"网络不可达"（断网 / DNS / 连接被拒）。
+
+    上层要靠它把"断网"和"远端答错了"分开记 —— 断网不是模型能力问题。
+    """
+    return _is_network_err(err)
+
+
+def _is_network_err(err: str) -> bool:
+    """这次失败是不是"网络不通"（断网 / DNS / 连接被拒）而不是"服务说不行"。"""
+    e = err or ""
+    return any(m in e for m in _NET_MARKERS)
+
+
+def _backoff_delay(attempt: int, err: str) -> float:
+    """这一轮该等多久再重试。
+
+    网络不通 → 等更久（5/10/20/30/30…，一次断网恢复窗口能到 ~3 分钟）；
+    限流/5xx → 等短一点（2/4/8/16/20…），早点重试早点抢到额度。
+    """
+    if _is_network_err(err):
+        return float(min(30, 5 * (2 ** (attempt - 1))))
+    return float(min(20, 2 ** attempt))
 
 
 def _post_once(payload: dict, base: str, key: str, timeout: int = 300) -> tuple[dict | None, str, int]:
@@ -524,7 +765,12 @@ def _post_once(payload: dict, base: str, key: str, timeout: int = 300) -> tuple[
     except urllib.error.HTTPError as exc:
         return None, http_error_hint(exc), int((time.time() - t0) * 1000)
     except Exception as exc:                            # noqa: BLE001
-        return None, f"请求失败：{type(exc).__name__}: {exc}", int((time.time() - t0) * 1000)
+        # 网络类错误加一个明确标记（[网络不可达]）：上层要能把"断网"和
+        # "远端答错了"分开记 —— 断网不是模型能力问题，不能记成"模型不会写"。
+        msg = f"请求失败：{type(exc).__name__}: {exc}"
+        if _is_network_err(msg):
+            msg = "[网络不可达] " + msg
+        return None, msg, int((time.time() - t0) * 1000)
 
 
 _TRANSIENT = ("限流", "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "请求失败", "timed out",
@@ -581,8 +827,13 @@ def ask(packet_md: str, task_id: str = "", node_id: str = "",
         data, err, ms = _post(payload, base, key)
         if data is None:
             tried.append(f"{tag}失败({err[:40]})")
-            if not single and _is_transient(err) and idx + 1 < len(steps):
-                continue                                  # 限流/网络抖动 → 升一档再试
+            # 2026-11-09（断网恢复）：**网络不通时升档没有意义** ——
+            # 换档位还是同一个不通的网络，只会把重试次数乘以档位数
+            # （8 档 × 8 次 = 64 次无效重试）。网络类失败就停在这一档，
+            # 让 `_post` 的长退避窗口去等网络恢复；恢复后下一轮自然就通了。
+            if not single and _is_transient(err) and not _is_network_err(err) \
+                    and idx + 1 < len(steps):
+                continue                                  # 限流/服务抖动 → 升一档再试
             return {"ok": False, "error": err, "answer": "", "tried": tried}
         usage = data.get("usage") or {}
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
@@ -591,7 +842,8 @@ def ask(packet_md: str, task_id: str = "", node_id: str = "",
         completion = int(usage.get("completion_tokens") or 0)
         reasoning = int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
         answer = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-        _record(task_id=task_id, node_id=node_id, purpose=cache_key, model=step["model"],
+        _record(task_id=task_id, node_id=node_id, purpose=cache_key,
+                model=step["model"],
                 prompt_tokens=prompt_tokens, completion_tokens=completion,
                 cache_hit_tokens=cache_hit, ms=ms, reasoning_tokens=reasoning,
                 effort=step["effort"], pricing=step.get("pricing"))
@@ -652,12 +904,62 @@ def _fit_messages(msgs: list[dict], limit_chars: int) -> list[dict]:
     return [head, *tail]
 
 
+def normalize_messages(msgs: list[dict] | None) -> list[dict] | None:
+    """把内部消息形状归一成远端要的形状（官方 function calling 口径）。
+
+    **为什么单独抽成函数**（2026-11-10）：以前这段逻辑只存在于 `complete()` 里面，
+    自检只能**照抄一遍**来测 —— 于是"归一化漏了某个字段"这类错，自检永远看不见
+    （照抄的当然也没漏检查）。抽出来之后，自检调的是**真代码**。
+
+    三个必须原样带过去的字段：
+      · `tool_calls`      —— 助手那轮带工具调用（content 为空）必须原样送回，
+                              否则 API 找不到对应的 tool_call_id → 400 或丢结果；
+      · `tool_call_id`   —— 工具结果与调用配对；
+      · `reasoning_content` —— DeepSeek 官方（2026-11 核对 docs）：
+                              **请求带 tools 时，必须把上一轮的 reasoning_content
+                              原样回传**，否则 API 返回 400；不带 tools 时回传会被忽略。
+                              漏了它 = 思考模式 + 工具循环的**第二轮**会 400，
+                              而且模型会丢掉自己上一轮的思考链（写码质量下降）。
+    """
+    if not msgs:
+        return None
+    out: list[dict] = []
+    for _m in msgs:
+        _item = {'role': str(_m.get('role') or 'user'),
+                 'content': str(_m.get('content') or '')}
+        if _m.get('tool_calls'):
+            _item['tool_calls'] = _m['tool_calls']
+        if _m.get('tool_call_id'):
+            _item['tool_call_id'] = _m['tool_call_id']
+        if _m.get('reasoning_content'):
+            _item['reasoning_content'] = _m['reasoning_content']
+        if _item['content'].strip() or _item.get('tool_calls') or _item.get('tool_call_id'):
+            out.append(_item)
+    return out or None
+
+
+def reasoning_tokens_of(usage: dict | None) -> int:
+    """思考 token 数（**两家字段名不同**，所以要两个都认）。
+
+    DeepSeek：`usage.completion_tokens_details.reasoning_tokens`
+    GLM：官方《对话补全》参考里 usage 未必有 completion_tokens_details，
+         顶层给 `usage.reasoning_tokens` 的也有。
+    读不到 → 0（宁可低估，也不能让解析炸掉）。
+    """
+    usage = usage or {}
+    return int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+               or usage.get("reasoning_tokens") or 0)
+
+
 def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
              workspace: str = '', emit=None, thinking: str | None = None,
              step_index: int | None = None, json_mode: bool = False,
              max_out: int | None = None,
              messages: list[dict] | None = None,
-             reuse_scope: str | None = None) -> dict:
+             reuse_scope: str | None = None,
+             tools: list[dict] | None = None,
+             tool_choice: str = 'auto',
+             profile: dict | None = None) -> dict:
     """发一段自由文本提示，返回 {ok, answer, usage}。
 
     `reuse_scope`：给**确定性步骤**（蓝图/审计/契约/架构问答）用的响应复用开关。
@@ -676,13 +978,7 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
     塞进一个巨型提示词，模型看不到自己上一轮交了什么；多轮能让它带着自己的代码继续改，
     代价是历史会涨 —— 所以配了 `_fit_messages` 的丢中间轮策略，绝不静默截最后一轮。
     """
-    msgs: list[dict] | None = None
-    if messages:
-        msgs = [{'role': str(m.get('role') or 'user'),
-                 'content': str(m.get('content') or '')}
-                for m in messages if str(m.get('content') or '').strip()]
-        if not msgs:
-            msgs = None
+    msgs: list[dict] | None = normalize_messages(messages)
     text = msgs[-1]['content'] if msgs else (prompt or '')
     ok, why = available()
     if not ok:
@@ -699,11 +995,25 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
     except Exception:                                    # noqa: BLE001
         pass
     r = settings_store.get_remote()
-    steps = ladder()
+    if profile:
+        # **指定档案直通**（2026-11-18 多远端协作）：审核者/写作者各自用
+        # 自己的档案（不同 key、不同模型）发调用，不走"当前模型"的阶梯。
+        # 档案缺的字段按阶梯档位的兜底规则补（_payload_for 里统一处理）。
+        _p = dict(profile)
+        _p.setdefault("profile_id", str(_p.get("id") or _p.get("model") or "profile"))
+        _p.setdefault("effort", "none")
+        _p.setdefault("max_output_tokens", 0)
+        _p.setdefault("temperature", 0.2)
+        _p.setdefault("pricing", None)
+        seq = [(0, _p)]
+        single = True
+        steps = [_p]
+    else:
+        steps = ladder()
     if not steps:
         return {'ok': False, 'error': '没有任何启用的远端模型档案（设置 → 远端模型档案）',
                 'answer': ''}
-    single = settings_store.single_effort()
+    single = True if profile else settings_store.single_effort()
     if single:
         # 单档直通分路：只有一个思考强度，忽略 step_index / thinking，
         # 不按难度挑起点，也没有可升可降的档（见 settings_store.single_effort）。
@@ -756,7 +1066,8 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
     for idx, step in seq:
         tag = f"{step['profile_id']}:{step['effort']}"
         _wire = _wire0
-        payload, base, key = _payload_for(step, r, _wire, json_mode=json_mode)
+        payload, base, key = _payload_for(step, r, _wire, json_mode=json_mode,
+                                           tools=tools, tool_choice=tool_choice)
         _eff = str(payload.get("reasoning_effort") or "none").lower()
         if max_out:
             # 整文件/架构设计需要长输出；档位默认 8K 只够一个函数。
@@ -766,7 +1077,8 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
                 # 兼容端点：只夹到官方示例的 65536，别把 DS 校准的 33 万覆盖回去
                 payload['max_tokens'] = max(1, min(int(max_out), OPENAI_OUTPUT_CEIL))
             else:
-                payload['max_tokens'] = max_tokens_for(min(int(max_out), CONTENT_CEIL), _eff)
+                payload['max_tokens'] = max_tokens_for(min(int(max_out), CONTENT_CEIL), _eff,
+                                                        _ceiling_for(step, r))
         # 「配额不够」要归因到配额，不要归因到模型，并且**当场自动放大重试一次**。
         # 实测（2026-11-05）：high 档预留 8000 时出现过「思考 11 000、正文 0」，
         # 白烧 ¥0.048；max 档也出现过「思考 22 452、正文 4 336」把正文挤到写不完。
@@ -790,7 +1102,8 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
                 break
             # 思考吃光 / 顶到上限 → 直接把配额翻倍（再留一档余量），重发一次
             cur = int(payload.get('max_tokens') or 0)
-            payload['max_tokens'] = max(cur * 2, cur + 8000, 16000)
+            _ceil = _ceiling_for(step, r)
+            payload['max_tokens'] = min(max(cur * 2, cur + 8000, 16000), _ceil)
             if emit:
                 emit('budget_grown', {'step': tag, 'from': cur, 'to': payload['max_tokens'],
                                       'why': 'quota_starved',
@@ -799,7 +1112,10 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
         if data is None:
             tried.append(f'{tag}失败({err[:40]})')
             # 单档直通没有「升一档」这条路；瞬态错误直接如实返回，不换档重试
-            if not single and _is_transient(err) and idx + 1 < len(steps):
+            # 2026-11-09（断网恢复）：网络不通时升档无意义（还是同一个不通的网络），
+            # 只把重试次数乘以档位数 —— 停在这一档，让 _post 的长退避等网络恢复。
+            if (not single and _is_transient(err) and not _is_network_err(err)
+                    and idx + 1 < len(steps)):
                 continue
             return {'ok': False, 'error': err, 'answer': '', 'tried': tried}
         usage = data.get('usage') or {}
@@ -807,8 +1123,10 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
         hit = int(usage.get('prompt_cache_hit_tokens')
                   or (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
         ct = int(usage.get('completion_tokens') or 0)
-        rt = int((usage.get('completion_tokens_details') or {}).get('reasoning_tokens') or 0)
+        rt = reasoning_tokens_of(usage)
         answer = ((data.get('choices') or [{}])[0].get('message') or {}).get('content') or ''
+        _message = (data.get('choices') or [{}])[0].get('message') or {}
+        _tool_calls = list(_message.get('tool_calls') or [])
         # 用真实 usage 校准"token/字符"比率（下次估算更准，不依赖 tokenizer）
         _chars = len(text) if not msgs else sum(len(m['content']) for m in msgs)
         _tokens.observe(_chars, pt)
@@ -820,6 +1138,10 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
             db.execute("INSERT OR REPLACE INTO remote_cache(key,answer,created_at) VALUES(?,?,?)",
                        (reuse_key, answer, db.now()))
         return {'ok': True, 'answer': answer, 'ms': ms, 'by': tag, 'step': idx,
+                'tool_calls': _tool_calls, 'message': _message,
+                # 2026-11-09：回传 finish_reason —— 调用方要靠它判"是不是被配额截断"
+                # （硬信号），而不是拿自己设的 max_out 去猜正文 token 数（会误判）。
+                'finish_reason': str((data.get('choices') or [{}])[0].get('finish_reason') or ''),
                 'usage': {'prompt_tokens': pt, 'completion_tokens': ct,
                           'reasoning_tokens': rt, 'cache_hit_tokens': hit,
                           'cost_cny': round(cost_cny(step, pt, hit, ct), 6)}}

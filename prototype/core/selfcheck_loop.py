@@ -364,8 +364,7 @@ def _call(llm, prompt: str, *, messages: list[dict] | None = None, **kw) -> dict
 
 
 def repair(ws, caps, *, modules: list[str] | None = None, llm=None, emit=None,
-           max_steps: int = MAX_STEPS, budget_cny: float = 0.0,
-           cost_used: float = 0.0, multi_turn: bool = True) -> dict:
+           max_steps: int = MAX_STEPS, multi_turn: bool = True) -> dict:
     """片内自验：跑→看→改，最多 max_steps 步。判定权始终在探针手里。
 
     返回 {ok, steps, fixed, still, changed, cost_cny, calls, evidence, stop}
@@ -414,9 +413,6 @@ def repair(ws, caps, *, modules: list[str] | None = None, llm=None, emit=None,
     evidence: list[dict] = []
     last_ev_text = ""
     for step in range(1, max(1, max_steps) + 1):
-        if budget_cny and cost_used > budget_cny:
-            stop = "预算用尽"
-            break
         res = verify_caps(ws, caps)
         still = [c for c in caps if not res.get(c.id, {}).get("ok")]
         if not still:

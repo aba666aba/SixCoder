@@ -2,8 +2,8 @@
 
 钉住的事：
 1. 什么都不配 → 协议仍是 deepseek，payload 逐字保持原样（thinking + reasoning_effort）
-2. compat=openai → 按智谱官方格式：thinking 开关、不发 reasoning_effort /
-   response_format，max_tokens 夹到 65536
+2. compat=openai → 按官方 OpenAI 格式：不塞 thinking / reasoning_effort /
+   response_format（2026-11-09 口径：通用 OpenAI 兼容不认这两字段），max_tokens 夹到 65536
 3. 档案级 compat 优先于全局，非法值收敛为「未设置」而不是乱猜协议
 4. available()：默认 / openai 放行，未知协议明确拒绝（不静默回落）
 5. ladder / public_remote 把 compat 带出来，设置填了才真的生效
@@ -43,7 +43,47 @@ _POSTED: list[dict] = []
 
 
 def set_remote(**kw) -> None:
-    st.SETTINGS.write_text(json.dumps({"remote": kw}, ensure_ascii=False),
+    """写一份隔离配置。
+
+    支持两种写法：
+      · providers=[...]：直接写厂商层（与生产一致）；
+      · 旧写法 models=[...] + compat=：按各模型 compat（缺省用全局 compat）分桶成
+        三家厂商，并把「全局 compat 那家」设为 current —— 这样 active_model 才能
+        指向该厂商的模型（2026-11-09 厂商级单选口径：current 之外厂商的模型不进阶梯）。
+    """
+    if kw.get("providers"):
+        providers = kw["providers"]
+    else:
+        compat = str(kw.get("compat") or "deepseek").strip().lower()
+        models = kw.get("models") or []
+        buckets = {"deepseek": [], "glm": [], "openai": []}
+        for m in models:
+            c = str(m.get("compat") or "").strip().lower()
+            name = str(m.get("model") or "").lower()
+            if c == "deepseek" or name.startswith("deepseek"):
+                pid = "deepseek"
+            elif c == "openai" or "bigmodel" in str(m.get("base_url", "")) or "zhipu" in str(m.get("base_url", "")):
+                pid = "openai"
+            elif c == "glm" or name.startswith("glm"):
+                pid = "glm"
+            else:
+                pid = compat if compat in buckets else "deepseek"
+            buckets[pid].append(m)
+        providers = []
+        for pid in ("deepseek", "glm", "openai"):
+            providers.append({
+                "id": pid, "label": pid, "base_url": "",
+                "api_key": kw.get("api_key", "fake"),
+                "efforts": ["none", "low", "high", "max"],
+                "current": pid == compat,
+                "models": buckets[pid],
+            })
+    remote = {"providers": providers, "compat": compat}
+    if "active_model" in kw:
+        remote["active_model"] = kw["active_model"]
+    if "local_first" in kw:
+        remote["local_first"] = kw["local_first"]
+    st.SETTINGS.write_text(json.dumps({"remote": remote}, ensure_ascii=False),
                            encoding="utf-8")
 
 
@@ -82,13 +122,12 @@ try:
     r = st.get_remote()
     ok(remote.compat_of(r=r) == "openai", "全局 compat 生效")
     po = payload("max", r=r)
-    ok(po.get("thinking") == {"type": "enabled"}, "max 档发 thinking=enabled")
+    ok("thinking" not in po, "兼容端点不塞 thinking（按官方 OpenAI 格式）")
     ok("reasoning_effort" not in po, "兼容端点不认 reasoning_effort，一律不发")
-    ok(payload("low", r=r).get("thinking") == {"type": "enabled"},
-       "low 档同样开思考")
+    ok("thinking" not in payload("low", r=r), "low 档同样不塞 thinking")
     pn = payload("none", r=r)
-    ok(pn.get("thinking") == {"type": "disabled"}
-       and "reasoning_effort" not in pn, "none 档 thinking=disabled")
+    ok("thinking" not in pn and "reasoning_effort" not in pn,
+       "none 档也不塞 thinking / reasoning_effort")
     ok("response_format" not in po, "按官方格式不发 response_format")
     ok(1 <= int(po.get("max_tokens") or 0) <= 65536,
        "max_tokens 夹到 65536（DS 的 33 万会 400）")
@@ -114,10 +153,11 @@ try:
     ok(len(steps) >= 1 and all(s.get("compat") == "openai" for s in steps),
        "全局 compat 传进阶梯每一档")
     ok(st.public_remote().get("compat") == "openai", "对外视图暴露 compat")
-    set_remote(compat="deepseek", api_key="fake", local_first=False,
+    set_remote(compat="openai", api_key="fake", local_first=False,
                models=[{"id": "o", "model": "gpt-4o", "compat": "openai",
                         "efforts": ["none"]},
-                       {"id": "d", "model": "deepseek-flash", "efforts": ["none"]}],
+                       {"id": "d", "model": "deepseek-flash", "compat": "deepseek",
+                        "efforts": ["none"]}],
                active_model="o")
     ok(all(s.get("compat") == "openai" for s in st.ladder()),
        "选中的第三方档案走 openai，其余档案不受影响")
@@ -144,10 +184,10 @@ try:
     res = remote.complete("hello", task_id="check", node_id="compat")
     ok(bool(res.get("ok")) and len(_POSTED) == 1, "假远端收到一次请求")
     sent = _POSTED[0]
-    ok(sent.get("thinking") == {"type": "enabled"}
+    ok("thinking" not in sent
        and "reasoning_effort" not in sent
        and 1 <= int(sent.get("max_tokens") or 0) <= 65536,
-       "实际请求体符合官方格式（thinking / 65536 / 无 reasoning_effort）")
+       "实际请求体符合官方格式（不塞 thinking / reasoning_effort；max_tokens 夹到 65536）")
     ok(sent.get("model") == "gpt-4o", "实际请求用档案里的模型名")
 
     print("[7] 短回复不触发「配额被吃光」放大重试")

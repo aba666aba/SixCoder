@@ -69,7 +69,7 @@ def run(arm: str, hours: float) -> dict:
         if kind in ("decision", "escalate", "order_done", "order_failed", "author_start"):
             events.append((kind, json.dumps(payload, ensure_ascii=False)[:150]))
 
-    res = company.night(ws, req, "qwen2.5-coder:7b", hours=hours, use_remote=True,
+    res = company.night(ws, req, "qwen2.5-coder:7b", use_remote=True,
                         contract_file=str(CONTRACT), emit=on)
     ms = int((time.time() - t0) * 1000)
     after = usage()

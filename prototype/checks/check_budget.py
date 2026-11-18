@@ -40,15 +40,20 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 def main() -> int:
     print("输出配额自检")
 
-    print("[1] 基准：按规模算，不是固定值")
+    print("[1] 基准：配额取模型物理上限（不按任务量掐）")
     small = "def f():\n    return 1\n"                    # ~20 token
     mid = "x = 1\n" * 500                                 # ~2,500 token
     big = "x = 1\n" * 4000                                # ~20,000 token
     b_small, b_mid, b_big = (tokens.output_budget(t) for t in (small, mid, big))
     print(f"     小={b_small}  中={b_mid}  大={b_big}")
     check("小模块给到下限（不低于 1200，够写一个函数体）", b_small >= 1200, str(b_small))
-    check("中模块随规模上升", b_mid > b_small, f"{b_mid} vs {b_small}")
-    check("大模块随规模上升", b_big > b_mid, f"{b_big} vs {b_mid}")
+    # 2026-11-10：11-09 的"放大器"原则把 output_budget 改成"只按模型物理上限兜底"
+    # （不再按任务量掐）——旧断言"配额随规模上升"随之作废：现在三种规模**都是**物理上限。
+    # 意图保留并加强：任何规模都**不得低于自己需要的量**（不会被掐断）。
+    check("中模块配额 ≥ 它需要的量（不会被掐断）",
+          b_mid >= tokens.estimate_tokens(mid), f"{b_mid} vs {tokens.estimate_tokens(mid)}")
+    check("大模块配额 ≥ 它需要的量（不会被掐断）",
+          b_big >= tokens.estimate_tokens(big), f"{b_big} vs {tokens.estimate_tokens(big)}")
     check("大文件不会被固定小上限挡住（20,000 token 的文件拿到的配额远超它本身）",
           b_big > tokens.estimate_tokens(big), f"{b_big} vs {tokens.estimate_tokens(big)}")
 
@@ -67,7 +72,9 @@ def main() -> int:
         budget = tokens.output_budget(src)
         print(f"     ab_whole/clean.py：整份 {need} token，配额 {budget}")
         check("配额 ≥ 需要的量（不会把自己掐断）", budget >= need, f"{budget} vs {need}")
-        check("配额 ≤ 需要的 3 倍（不给漫游空间）", budget <= need * 3, f"{budget} vs {need}")
+        # 2026-11-10：旧断言"配额 ≤ 需要的 3 倍"与 11-09 原则直接冲突（配额=物理上限
+        # 必然远大于 need×3）。意图是"别掐断"，新语义下更强的表述是"恒为物理上限"。
+        check("配额恒为模型物理上限（不按任务量掐）", budget == 384000, f"{budget}")
     else:
         print("     （跳过：样本不存在）")
 
@@ -77,7 +84,7 @@ def main() -> int:
     orig = remote.complete
 
     def fake_complete(prompt, **kw):                       # noqa: ANN001
-        captured.append(int(kw.get("max_out") or 0))
+        captured.append((int(kw.get("max_out") or 0), str(kw.get("node_id") or "")))
         return {"ok": False, "error": "stub", "answer": ""}
 
     remote.complete = fake_complete                         # type: ignore[assignment]
@@ -98,12 +105,24 @@ def main() -> int:
     finally:
         remote.complete = orig                             # type: ignore[assignment]
     print(f"     捕获到的配额：{captured}")
-    check("四个调用点都拿到了配额（没有 0 = 没有漏传）", all(x > 0 for x in captured[:4]),
+    # 按**角色**认配额，不靠下标：函数体路径现在会多打一次（工具循环 + 兜底），
+    # "第几个调用点 = 哪个角色"早就不成立了。
+    _by_role: dict[str, list[int]] = {}
+    for _cap, _nid in captured:
+        _role = ("patch" if _nid.startswith("patch:")
+                 else "bodies" if _nid.startswith("bodies:") else "module")
+        _by_role.setdefault(_role, []).append(_cap)
+    _mod = _by_role.get("module") or []
+    check("四个调用点都拿到了配额（没有 0 = 没有漏传）",
+          all(x > 0 for v in _by_role.values() for x in v), str(captured))
+    # 2026-11-10：旧断言"大文件配额 > 小文件"依赖"配额按规模算"的旧语义；新语义下
+    # 所有 module 调用点的配额都是模型物理上限（恒等）。意图（配额不因规模小而被掐）
+    # 由上一条"没有 0 = 没有漏传" + "配额恒为物理上限"共同保证。
+    check("module 调用点的配额恒为物理上限（不因规模小而被掐）",
+          len(_mod) >= 2 and all(x == 384000 for x in _mod), str(_mod))
+    check("行级补丁的配额最小（本来就只改几行）",
+          bool(_by_role.get("patch")) and _by_role["patch"][0] <= (_mod[0] if _mod else 10 ** 9),
           str(captured))
-    check("大文件的配额确实大于小文件", len(captured) >= 2 and captured[1] > captured[0],
-          str(captured[:2]))
-    check("行级补丁的配额最小（本来就只改几行）", captured and captured[3] <= captured[0],
-          str(captured[3] if len(captured) > 3 else captured))
 
     print()
     if FAILS:

@@ -65,8 +65,6 @@ def reset(ws: Path) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
-    ap.add_argument("--max-cny", type=float, default=0.6)
-    ap.add_argument("--hours", type=float, default=0.05)
     a = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     keys = [a.only] if a.only else list(TASKS)
@@ -86,8 +84,8 @@ def main() -> int:
                 fh.write(json.dumps({"kind": kind, "payload": payload},
                                     ensure_ascii=False, default=str) + "\n")
 
-        res = company.night(WS, req, "qwen2.5-coder:7b", hours=a.hours, use_remote=True,
-                            max_cny=a.max_cny, emit=emit)
+        res = company.night(WS, req, "qwen2.5-coder:7b", use_remote=True,
+                            emit=emit)
         after = remote.usage_summary("")
         cost = round(float(after["cost_cny"]) - float(before["cost_cny"]), 4)
         total += cost

@@ -23,8 +23,9 @@ from starlette.staticfiles import StaticFiles
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from core import agent, approval, db, gitops, model_policy, ollama, permissions, probe, review as review_mod, tools  # noqa: E402
+from core import agent, approval, db, gitops, model_policy, ollama, permissions, probe, recon, review as review_mod, tools  # noqa: E402
 from core import company, policy  # noqa: E402
+from core import budget_estimate as _be  # noqa: E402
 from core.demo import DEMO, ensure_demo  # noqa: E402
 
 WEB_DIST = ROOT / "web" / "dist"
@@ -155,6 +156,46 @@ def resolve_repo(repo: str = "", task_id: str = "") -> Path:
         "或先跑一个任务再用 task_id（Git 会作用于该任务的工作区副本）。")
 
 
+@app.get("/v1/repo/tree")
+def repo_tree(repo: str, path: str = ""):
+    """仓库目录树（VSCode 式文件管理器用）。
+
+    只读：列出 repo 下某个子目录的直接子项，交给前端做懒加载展开。
+    路径必须落在 repo 内（防目录穿越），二进制文件不返回内容。
+    """
+    root = Path(repo)
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(400, f"仓库路径不存在或不是目录：{repo}")
+    root_r = root.resolve()
+    target = (root_r / path).resolve() if path else root_r
+    try:
+        target.relative_to(root_r)
+    except ValueError:
+        raise HTTPException(400, "路径越界：只能浏览仓库内的文件")
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(404, f"目录不存在：{path or '.'}")
+    items = []
+    try:
+        for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if p.name in _TREE_SKIP_DIRS:
+                continue
+            rel = p.relative_to(root_r).as_posix()
+            entry = {"name": p.name, "path": rel, "is_dir": p.is_dir()}
+            if p.is_file():
+                try:
+                    entry["size"] = p.stat().st_size
+                except OSError:
+                    entry["size"] = 0
+            items.append(entry)
+    except PermissionError:
+        raise HTTPException(403, f"无权读取目录：{path or '.'}")
+    return {"repo": str(root_r), "path": path, "items": items}
+
+
+_TREE_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", ".venv",
+                   ".sixcoder", ".mypy_cache", ".ruff_cache", "dist", "build", ".idea"}
+
+
 @app.get("/v1/git/status")
 def git_read_status(repo: str = "", task_id: str = ""):
     _guard("git.read")
@@ -272,7 +313,7 @@ def models():
 
 @app.get("/v1/toolchains")
 def toolchains():
-    return {"items": probe.toolchains(_load_tc_overrides()), "overrides": _load_tc_overrides()}
+    return {"items": recon.toolchains(_load_tc_overrides()), "overrides": _load_tc_overrides()}
 
 
 # ---------------------------------------------------------------- 远端模型设置
@@ -284,7 +325,16 @@ def get_remote_settings(reveal: bool = False):
     """
     from core import remote as remote_mod, settings_store
     ok, why = remote_mod.available()
-    return {"remote": settings_store.public_remote(reveal=reveal), "available": ok, "reason": why,
+    _rem = settings_store.public_remote(reveal=reveal)
+    # **key 类层必须在这条链上也带上**（2026-11-18 实测坑）：界面「厂商卡片 → key 列表」
+    # 读的是这个 GET 的 remote.providers，而 public_remote 不带 keys —— 导致
+    # 保存了多少把 key 界面上都显示 0 把。用 _public_model_view 的厂商视图覆盖合并，
+    # 保证两条读取路径（这个 GET 与 /remote/models）口径完全一致。
+    try:
+        _rem["providers"] = _public_model_view(settings_store)["providers"]
+    except Exception:                                    # noqa: BLE001
+        pass
+    return {"remote": _rem, "available": ok, "reason": why,
             "usage": remote_mod.usage_summary()}
 
 
@@ -352,7 +402,31 @@ def _public_model_view(settings_store) -> dict:
     """
     return {"models": [settings_store.sanitize_profile(p) for p in settings_store.models()],
             "ladder": [{"profile_id": s.get("profile_id"), "model": s.get("model"),
-                        "effort": s.get("effort")} for s in settings_store.ladder()]}
+                        "effort": s.get("effort")} for s in settings_store.ladder()],
+            # 厂商层：界面渲染"下拉 + 三个长方矩形 + 每家的模型列表"用这份。
+            # api_key 只给掩码 + 是否已配置（绝不回明文）。
+            "providers": [{
+                "id": p["id"], "label": p["label"], "base_url": p["base_url"],
+                "efforts": list(p.get("efforts") or []),
+                "current": bool(p.get("current")),
+                "key_configured": bool(p.get("api_key")),
+                "key_masked": settings_store.mask(p.get("api_key") or ""),
+                "models": [settings_store.sanitize_profile(m)
+                           for m in (p.get("models") or [])],
+                # key 类层（2026-11-18 多远端协作）：写作者用「当前」类，
+                # 审核者优先用**其它 key 类**的模型（独立限流池）。
+                # models 随类返回（UI 改版：每个 key 独立配自己的模型）。
+                "keys": [{
+                    "id": k["id"], "label": k.get("label") or k["id"],
+                    "role": str(k.get("role") or ""),
+                    "current": bool(k.get("current")),
+                    "key_configured": bool(str(k.get("api_key") or "").strip()),
+                    "key_masked": settings_store.mask(k.get("api_key") or ""),
+                    "model_count": len(k.get("models") or []),
+                    "models": [settings_store.sanitize_profile(m)
+                               for m in (k.get("models") or [])],
+                } for k in (p.get("keys") or [])],
+            } for p in settings_store.providers()]}
 
 
 @app.get("/v1/settings/remote/models")
@@ -412,6 +486,199 @@ def set_primary_model(model_id: str):
         if p["id"] == model_id:
             p["priority"] = top
     settings_store.save_models(profs)
+    return {"ok": True, **_public_model_view(settings_store)}
+
+
+@app.post("/v1/settings/remote/providers")
+def upsert_provider(req: dict):
+    """保存一个**厂商**的配置（2026-11-09 用户口径：厂商是一等公民）。
+
+    界面上的动作全部收敛到这里：
+      · 切换「正在使用」→ 改 current；
+      · 填 apikey → 改 api_key（留空 = 不修改已有）；
+      · 勾选思考强度等级 → 改 efforts；
+      · 增删该厂商的模型 → 改 models。
+
+    **按 id 合并**（不整表覆盖）：界面上改一个字段就提交一次，整表覆盖会在
+    并发编辑时把别人的改动冲掉。
+    """
+    from core import settings_store
+    pid = str((req or {}).get("id") or "").strip().lower()
+    if pid not in settings_store.PROVIDER_IDS:
+        raise HTTPException(400, f"未知厂商：{pid}（可选 "
+                                 f"{'/'.join(settings_store.PROVIDER_IDS)}）")
+    provs = settings_store.providers()
+    hit = next((p for p in provs if p["id"] == pid), None)
+    if hit is None:
+        hit = settings_store._norm_provider(dict(settings_store.PROVIDER_PRESETS[pid]), pid)
+        provs.append(hit)
+    raw = dict(req or {})
+    for k in ("label", "base_url", "efforts", "current"):
+        if k in raw and raw[k] is not None:
+            hit[k] = raw[k]
+    if str(raw.get("api_key") or "").strip():      # 留空 = 不修改已有 key
+        hit["api_key"] = str(raw["api_key"]).strip()
+    # **key 类整体合并**（2026-11-18 UI 改版：每个 key 独立配自己的模型）。
+    # 带了 keys 就按 id 合并：label/api_key（留空不清）/current/models 各自落位；
+    # 合并完派生厂商级 models = 各 key 类模型的展平（兼容旧读取路径）。
+    # raw["models"]（旧平铺口径）在带 keys 时被忽略——两套口径不能同时生效。
+    if isinstance(raw.get("keys"), list):
+        keys = hit.setdefault("keys", [])
+        # **显式指派优先**（2026-11-18 晚）：请求里带了 role 字段，roles 就以请求为准——
+        # 没被提及的 key 角色清零。否则预设 k1 的 current=True 会派生 writer，
+        # 把用户刚指派给新 key 的 writer 顶掉（实测踩过）。
+        _role_auth = any("role" in x for x in raw["keys"] if isinstance(x, dict))
+        _seen_ids: set[str] = set()          # 本请求**实际触碰**的 key（含自动编号的新 key）
+        for rk in raw["keys"]:
+            if not isinstance(rk, dict):
+                continue
+            kid = str(rk.get("id") or "").strip()
+            kt = next((k for k in keys if k["id"] == kid), None)
+            if kt is None:
+                kid = kid or _next_free_kid(keys)      # 复用被删掉腾出的编号
+                kt = {"id": kid, "label": "", "api_key": "", "role": "",
+                      "current": False,
+                      # 新 key **自动继承厂商默认模型**（用户口径：新增时不配模型）
+                      "models": settings_store.default_models_for(pid)}
+                keys.append(kt)
+            if str(rk.get("label") or "").strip():
+                kt["label"] = str(rk["label"]).strip()[:48]
+            if str(rk.get("api_key") or "").strip():
+                kt["api_key"] = str(rk["api_key"]).strip()
+            if "role" in rk:      # 角色指派（writer/reviewer1/reviewer2/空）
+                _r = str(rk.get("role") or "").strip().lower()
+                kt["role"] = _r if _r in settings_store.KEY_ROLES else ""
+            if isinstance(rk.get("models"), list):
+                kt["models"] = settings_store._norm_profiles(rk["models"])
+                for m in kt["models"]:
+                    m["provider"] = pid
+            _seen_ids.add(kt["id"])          # 显式 id 与自动编号都要记
+        if bool(raw.get("replace_keys")):
+            # **整体保存 = 以请求为准**（2026-11-18 实测坑：界面删了一把 key，
+            # 合并语义只增不删 → 保存后又被"复活"，用户看到删除不同步）。
+            hit["keys"] = [k for k in keys if k["id"] in _seen_ids]
+            keys = hit["keys"]
+        if _role_auth:
+            for k in keys:
+                if k["id"] not in _seen_ids:
+                    k["role"] = ""
+        # 角色的唯一性/current 同步交给 _norm_provider（save_providers 内）统一裁决；
+        # 这里只做显式指派：current_key → 那把是 writer（旧口径兼容）。
+        if str(raw.get("current_key") or "").strip() and keys:
+            ck = str(raw.get("current_key") or "")
+            for k in keys:
+                if k["id"] == ck:
+                    k["role"] = "writer"
+                elif k.get("role") == "writer":
+                    k["role"] = ""
+        hit["models"] = [m for k in keys for m in (k.get("models") or [])]
+    elif isinstance(raw.get("models"), list):
+        hit["models"] = raw["models"]
+    # 「正在使用」有且只有一个：设了 current 就把别家的取消
+    if bool(raw.get("current")):
+        for p in provs:
+            p["current"] = (p["id"] == pid)
+    settings_store.save_providers(provs)
+    return {"ok": True, **_public_model_view(settings_store)}
+
+
+def _next_free_kid(keys: list) -> str:
+    """给新 key 类分配一个**空出来的最小编号**（2026-11-18 晚：id 对用户隐藏，
+    只在内部用；删掉的 key 的空位要能被自动复用，不许编号一路涨）。"""
+    used = {str((k or {}).get("id") or "") for k in keys if isinstance(k, dict)}
+    i = 1
+    while f"k{i}" in used:
+        i += 1
+    return f"k{i}"
+
+
+@app.post("/v1/settings/remote/providers/{pid}/keys")
+def upsert_provider_key(pid: str, req: dict):
+    """新增/修改一个 **key 类**（2026-11-18 多远端协作）。
+
+    语义（与厂商级 key 一致）：
+      · 带 id → 修改那个类；不带 id → 新建（自动编号 k2/k3…）；
+      · api_key 留空 = 不修改已有（绝不因空输入悄悄清 key）；
+      · current=true → 切「正在使用」（写作者用的那把），同类只允许一个。
+    """
+    from core import settings_store
+    # 注意：providers() 每次从盘上重读规范化，改完必须把**同一个列表**传给
+    # save_providers —— 实测（2026-11-18）在保存行里再调一次 providers() 会把
+    # 刚才的修改整个丢掉（测试 k2 建不出来）。
+    provs = settings_store.providers()
+    hit = next((p for p in provs if p["id"] == pid), None)
+    if hit is None:
+        raise HTTPException(404, f"没有这个厂商：{pid}")
+    raw = dict(req or {})
+    kid = str(raw.get("id") or "").strip()
+    klabel = str(raw.get("label") or "").strip()[:48]
+    kkey = str(raw.get("api_key") or "").strip()
+    keys = hit.setdefault("keys", [])
+    tgt = next((k for k in keys if k["id"] == kid), None) if kid else None
+    if tgt is None:
+        kid = kid or _next_free_kid(keys)              # 复用被删掉腾出的编号
+        tgt = {"id": kid, "label": klabel or kid, "api_key": "", "role": "",
+               "current": False,
+               "models": settings_store.default_models_for(pid)}
+        keys.append(tgt)
+    if klabel:
+        tgt["label"] = klabel
+    if kkey:                                        # 留空 = 不修改已有
+        tgt["api_key"] = kkey
+    if "role" in raw:                               # 角色指派（空 = 不参与）
+        _r = str(raw.get("role") or "").strip().lower()
+        tgt["role"] = _r if _r in settings_store.KEY_ROLES else ""
+    if bool(raw.get("current")):                    # 旧口径：current = writer
+        for k in keys:
+            k["role"] = "writer" if k["id"] == kid else (""
+                                                        if k.get("role") == "writer" else k.get("role"))
+    settings_store.save_providers(provs)
+    return {"ok": True, **_public_model_view(settings_store)}
+
+
+@app.delete("/v1/settings/remote/providers/{pid}/keys/{kid}")
+def delete_provider_key(pid: str, kid: str):
+    """删一个 key 类。类里的模型**挪到「正在使用」的类**（不丢档案）；
+    只剩一个类时不许删（写作者总得有一把 key）。"""
+    from core import settings_store
+    provs = settings_store.providers()               # 同一列表改完再存（见上）
+    hit = next((p for p in provs if p["id"] == pid), None)
+    if hit is None:
+        raise HTTPException(404, f"没有这个厂商：{pid}")
+    keys = hit.get("keys") or []
+    tgt = next((k for k in keys if k["id"] == kid), None)
+    if tgt is None:
+        raise HTTPException(404, f"没有这个 key 类：{kid}")
+    # 允许删到 0 把（2026-11-18 用户口径：一把也支持删，删除必须真同步到配置）。
+    # 删光了 = 这个厂商暂时没有可用 key，配置层如实为空，界面显示"新增第一把 key"。
+    keep = next((k for k in keys if k.get("current") and k["id"] != kid), None) \
+        or next((k for k in keys if k["id"] != kid), None)
+    # 删的是**最后一把**时没有"接盘"的 key（用户口径：一把也支持删）——
+    # 它名下的模型随它一起消失，不许在这里崩（实测 AttributeError）。
+    if keep is not None:
+        keep["models"] = (keep.get("models") or []) + (tgt.get("models") or [])
+    was_current = bool(tgt.get("current"))
+    hit["keys"] = [k for k in keys if k["id"] != kid]
+    if was_current and keep is not None:
+        for k in hit["keys"]:
+            k["current"] = (k["id"] == keep["id"])
+    settings_store.save_providers(provs)
+    return {"ok": True, **_public_model_view(settings_store)}
+
+
+@app.delete("/v1/settings/remote/providers/{pid}/models/{model_id}")
+def delete_provider_model(pid: str, model_id: str):
+    """从某个厂商下删掉一个模型档案（不影响别的厂商）。"""
+    from core import settings_store
+    provs = settings_store.providers()
+    hit = next((p for p in provs if p["id"] == pid), None)
+    if hit is None:
+        raise HTTPException(404, f"没有这个厂商：{pid}")
+    before = len(hit.get("models") or [])
+    hit["models"] = [m for m in (hit.get("models") or []) if m.get("id") != model_id]
+    if len(hit["models"]) == before:
+        raise HTTPException(404, f"这个厂商下没有模型：{model_id}")
+    settings_store.save_providers(provs)
     return {"ok": True, **_public_model_view(settings_store)}
 
 
@@ -510,7 +777,7 @@ def set_toolchain_override(req: ToolchainOverrideReq):
         data.pop(req.id, None)
     TC_OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
     TC_OVERRIDE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    items = probe.toolchains(data)
+    items = recon.toolchains(data)
     hit = next((i for i in items if i["id"] == req.id), None)
     if req.path.strip() and (not hit or hit.get("source") != "设置"):
         # 目录存在但里面找不到可执行文件：明确报错，不要静默回落到环境变量
@@ -523,7 +790,7 @@ def set_toolchain_override(req: ToolchainOverrideReq):
 
 @app.post("/v1/probe")
 def probe_repo(req: ProbeReq):
-    info = probe.classify(Path(req.repo), deep=req.deep)
+    info = recon.classify(Path(req.repo), deep=req.deep)
     files = []
     p = Path(req.repo)
     if p.exists():
@@ -534,7 +801,7 @@ def probe_repo(req: ProbeReq):
 @app.post("/v1/demo")
 def make_demo():
     p = ensure_demo()
-    return {"repo": str(p), "state": probe.classify(p)["state"]}
+    return {"repo": str(p), "state": recon.classify(p)["state"]}
 
 
 # ---------------------------------------------------------------- 远端工具循环（§13.4 第 3/4 步）
@@ -587,14 +854,12 @@ class NightReq(BaseModel):
     fresh: bool = False            # 全自主模式：忽略已有蓝图重新推导（默认续跑）
     target: str = ""
     model: str = ""
-    hours: float = 0.0   # 0 = 按代码规模默认（S 0.5 / M 2 / L 6 / XL 12）
     plan: str = ""                 # 开发者模式：人给的实现方案（权威）
     use_remote: bool = True
     # 目标代码规模：不同规模的约束完全不同（core/scale.py）。
     # 甲方模式要求提需求时写明；没写就按实测推断，并在交付报告里注明。
     scale: str = ""                # S / M / L / XL
     remote_profile: str = ""       # 右上角「远端模型」：只走这个档案（flash / pro），空 = 整条阶梯
-    max_cny: float = 0.0           # 花费硬上限（人民币）；0 = 不设上限
 
 
 _NIGHT: dict[str, dict] = {}
@@ -634,11 +899,13 @@ def create_night(req: NightReq):
             if (req.goal or "").strip():
                 # 全自主模式：只给一句话目标 → 蓝图 → 切片 → 逐片生成 → 覆盖 → 报告
                 from core import auto as _auto
-                emit("night_start", {"hours": req.hours, "mode": "auto", "goal": req.goal,
-                                     "policy": policy.describe(pol), "max_cny": req.max_cny,
-                                     "model_warning": model_warn, "fresh": req.fresh})
-                res = _auto.night_auto(repo, req.goal, budget_cny=req.max_cny,
-                                       hours=req.hours, model=model, emit=emit,
+                _snap = _be.budget_snapshot(repo)
+                emit("night_start", {"mode": "auto", "goal": req.goal,
+                                     "policy": policy.describe(pol),
+                                     "model_warning": model_warn, "fresh": req.fresh,
+                                     "system_budget_cny": _snap.get("system_budget_cny"),
+                                     "stop_threshold_cny": _snap.get("stop_threshold_cny")})
+                res = _auto.night_auto(repo, req.goal, model=model, emit=emit,
                                        fresh=req.fresh)
                 ratios = res.get("ratios") or {}
                 info.update({"state": "done" if res.get("ok") else "failed",
@@ -664,23 +931,22 @@ def create_night(req: NightReq):
             scope = _scale.resolve(req.requirement, repo)
             if (req.scale or "").strip().upper() in _scale.TIERS:
                 scope = {**scope, "level": req.scale.strip().upper(), "source": "client"}
-            emit("night_start", {"hours": req.hours, "mode": pol.mode,
+            _snap = _be.budget_snapshot(repo)
+            emit("night_start", {"mode": pol.mode,
                                  "policy": policy.describe(pol),
                                  "plan": bool(req.plan.strip()),
                                  "model_warning": model_warn,
                                  "scale": scope["level"], "scale_source": scope["source"],
                                  "remote_profile": req.remote_profile,
-                                 "max_cny": req.max_cny,
+                                 "system_budget_cny": _snap.get("system_budget_cny"),
+                                 "stop_threshold_cny": _snap.get("stop_threshold_cny"),
                                  "scale_warning": scope.get("warning", "")})
             # 没写规模就把"该问的问题"显式抛给前端（甲方模式：需求里要有明确规模）
             if scope.get("warning"):
                 emit("notice", {"message": scope["warning"], "kind": "scale"})
-            eff_hours = req.hours or _scale.default_hours(scope["level"])
-            emit("night_start", {"hours": eff_hours})
-            res = company.night(repo, req.requirement, model, hours=eff_hours,
+            res = company.night(repo, req.requirement, model,
                                 use_remote=req.use_remote, emit=emit, plan=req.plan,
-                                remote_profile=req.remote_profile,
-                                max_cny=req.max_cny)
+                                remote_profile=req.remote_profile)
             info.update({"state": "done" if res.ok else "failed", "delivery": res.delivery_path,
                          "reason": res.reason, "verified": res.verified, "total": res.total,
                          "scale": scope["level"], "scale_source": scope["source"]})
@@ -698,6 +964,39 @@ def create_night(req: NightReq):
     threading.Thread(target=_run, daemon=True).start()
     return {"task_id": task_id, "model": model, "mode": pol.mode,
             "policy": policy.describe(pol), "stream": f"/v1/tasks/{task_id}/stream"}
+
+
+@app.post("/v1/night/estimate")
+def estimate_night(req: NightReq):
+    """两步法第一步：只构建蓝图 + 估算花费（不跑夜班），供用户充值参考。
+
+    单价（谷/峰）与系统预算来自产品仓 .sixcoder/budget.json（用户/运维填写），引擎不编造价格。
+    返回 {ok, estimate, budget, blueprint_caps, report}。
+    """
+    _guard("agent.run")
+    text = (req.goal or req.requirement).strip()
+    if not text:
+        raise HTTPException(400, "estimate 需要 goal 或 requirement")
+    ws = Path(req.repo)
+    if not ws.exists():
+        try:
+            ws.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            raise HTTPException(400, f"仓库不可建：{req.repo}")
+    from core import blueprint as _bp
+    got = _bp.derive(text, llm=_bp._default_llm, ws=ws)
+    if not got.get("ok"):
+        raise HTTPException(422, f"蓝图推导失败：{got.get('problems')}")
+    bp = got["blueprint"]
+    try:
+        _bp.save(bp, ws)
+    except Exception:                                  # noqa: BLE001
+        pass
+    est = _be.estimate_from_blueprint(ws)
+    snap = _be.budget_snapshot(ws)
+    return {"ok": bool(est.get("ok")), "estimate": est,
+            "budget": snap, "blueprint_caps": len(bp.caps),
+            "report": (_be.format_report(est) if est.get("ok") else est.get("reason"))}
 
 
 @app.get("/v1/plan")

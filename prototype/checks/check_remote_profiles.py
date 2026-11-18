@@ -21,6 +21,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# 隔离：自检不许碰用户真配置（开发文档铁律：自检必须走独立 SIXCODER_SETTINGS）。
+import os as _os
+import tempfile as _tf
+_os.environ["SIXCODER_SETTINGS"] = str(Path(_tf.mkdtemp(prefix="sixcoder_rp_")) / "settings.json")
+
 from core import remote, settings_store  # noqa: E402
 from core.settings_store import SETTINGS as SETTINGS_FILE  # noqa: E402
 
@@ -39,6 +44,9 @@ def main() -> int:
     # ---------------------------------------------------------- 备份（必须无条件恢复）
     original = SETTINGS_FILE.read_bytes() if SETTINGS_FILE.exists() else None
     restored = False
+    # 隔离配置里没有 key → 下面「运行期仍能读到明文 key / available()」会假红；
+    # 这里放一个隔离用的假 key（只在本检查自己的临时配置里，不碰用户真配置）。
+    settings_store.update_remote({"api_key": "sk-ISOLATED-TEST-KEY-1234567890"})
     try:
         # [1] 档案接口脱敏：GET 与 POST/DELETE 响应都不带明文 key
         print("[1] 模型档案端点不回显明文 key")
@@ -106,9 +114,11 @@ def main() -> int:
         check("前端提供两类模型分组", "DeepSeek" in app and "OpenAI 兼容" in app)
         check("前端保存时写的是 peak_window（不是死字段 offpeak_window）",
               "peak_window: {" in app and "offpeak_window: { ...windowForm }" not in app)
-        check("前端闲时价与高峰价都能改",
-              "v-model.number=\"p.pricing.peak.in_miss\"" in app
-              and "v-model.number=\"p.pricing.offpeak.in_miss\"" in app)
+        # 2026-11-09 厂商一等公民重构：价格不再有独立内联输入框，而是随模型档案对象
+        # 一起透传到保存（saveProviderDraft:272 / saveProfile:889 都带 pricing）；
+        # 后端六格规范化见 [4]。保留这条是为了防止「保存时把价格静默清空」。
+        check("前端保存模型档案时仍透传 pricing（价格不静默丢失）",
+              "pricing: m.pricing || {}" in app and "pricing: p.pricing" in app)
 
         # [4] 价格两类都可改（闲时 + 高峰六格），且规范化不丢
         print("[4] 价格六格可改且往返无损")

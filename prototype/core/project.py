@@ -235,16 +235,8 @@ def estimate(contracts: dict, cny_per_call: float = 0.02, sec_per_call: float = 
             "est_min": round(calls * sec_per_call / 60.0, 1)}
 
 
-def budget_fits(contracts: dict, max_cny: float) -> dict:
-    """预算够不够：不够就如实说"按这个预算最多能写到多少行"，并给出分批建议。"""
-    e = estimate(contracts)
-    if not max_cny or max_cny <= 0:
-        return {"ok": True, "est": e, "note": "未设预算上限"}
-    ok = e["est_cny"] <= float(max_cny)
-    return {"ok": ok, "est": e,
-            "note": ("预算够" if ok else
-                     f"预算 ¥{max_cny} 只够约 {int(max_cny / max(e['est_cny'], 1e-6) * 100)}% "
-                     f"的工作量（估计需要 ¥{e['est_cny']}）：建议分批跑，每批完成后冻结再跑下一批")}
+# 预算封顶/缩范围逻辑已于 2026-11-10 移除：用户不再可设上限，
+# 唯一停机线是系统总预算（见 core/budget_estimate.py 的 system_budget_stopped）。
 
 
 def batch_plan(modules: list[str], size: int = 4) -> list[list[str]]:
@@ -335,22 +327,32 @@ def regression_guard(ws: Path, state: dict) -> dict:
                        else "无退化")}
 
 
-def resume_plan(ws: Path, contracts: dict, state: dict) -> dict:
+def resume_plan(ws: Path, contracts: dict, state: dict,
+                 red_modules=None) -> dict:
     """断点续跑：进程重启后该从哪儿接着写。
 
     依据 `.sixcoder/progress.json`（每模块写到哪儿）+ 当前判据状态：
       · done     已经满分（不必再写）
       · resume   上次写过但有函数没通过 → 从这里接着写，带上"已验证函数"清单
       · fresh    完全没动过
+
+    **`red_modules` = 端到端红灯的模块**（2026-11-11，§11.4c 的延伸）：
+    契约全过 ≠ 做完了 —— 端到端还红的模块**不算 done**，要算成"可续写"。
+    不加这一条的后果（实测 2026-11-11 16:00）：契约层 2 个模块全过、
+    端到端还有 2 条红 → `resume=0 fresh=0` → 引擎认为"**全部完成**"
+    → **一轮都不写码** → 只做"片内自验"（远端空转，¥0.02–0.05/次）
+    → 重规划 → 再空转 → 覆盖 2 小时零增长、照烧钱。
+    **判定层必须看业务事实（端到端），不能只看契约层。**
     """
     prog = load_progress(ws)
     frozen = load_frozen(ws)
+    red = {str(m) for m in (red_modules or ())}
     done, resume, fresh = [], [], []
     for rel in order_modules(contracts):
         st = (state or {}).get(rel) or {}
         funcs = int(st.get("funcs") or 0)
         ver = int(st.get("verified") or 0)
-        if funcs and ver >= funcs:
+        if funcs and ver >= funcs and rel not in red:
             done.append(rel)
             continue
         rec = prog.get(rel) or {}

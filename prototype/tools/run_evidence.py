@@ -11,8 +11,8 @@
   projects/<name>/                 工作区本身（不删）
 
 用法：
-  python tools/run_evidence.py --name night-v2a --hours 0.3
-  python tools/run_evidence.py --name night-v2b --hours 0.3 --granular bodies
+  python tools/run_evidence.py --name night-v2a
+  python tools/run_evidence.py --name night-v2b --granular bodies
 """
 from __future__ import annotations
 
@@ -42,7 +42,6 @@ def _usage_snapshot() -> dict:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True)
-    ap.add_argument("--hours", type=float, default=0.3)
     ap.add_argument("--granular", default="whole", choices=["whole", "bodies"])
     ap.add_argument("--model", default="qwen2.5-coder:7b")
     ap.add_argument("--write-cap", type=int, default=3)
@@ -79,10 +78,9 @@ def main(argv: list[str]) -> int:
         short = json.dumps(rec["payload"], ensure_ascii=False, default=str)
         print(f"  [{n_ev:03d}] {kind}: {short[:150]}", flush=True)
 
-    print(f"=== 跑 {args.name}（粒度={args.granular}, 写上限={args.write_cap}, "
-          f"{args.hours}h）===", flush=True)
+    print(f"=== 跑 {args.name}（粒度={args.granular}, 写上限={args.write_cap}）===", flush=True)
     t0 = time.time()
-    res = company.night(ws, req, args.model, hours=args.hours, use_remote=True,
+    res = company.night(ws, req, args.model, use_remote=True,
                         contract_file=str(CONTRACT), emit=on)
     ms = int((time.time() - t0) * 1000)
     after = _usage_snapshot()
@@ -115,7 +113,7 @@ def main(argv: list[str]) -> int:
 
     summary = {
         "name": args.name, "ws": str(ws), "granular": args.granular,
-        "write_cap": args.write_cap, "hours": args.hours, "ms": ms,
+        "write_cap": args.write_cap, "ms": ms,
         "events": n_ev,
         "result": {"verified": res.verified, "total": res.total, "reason": res.reason[:300]},
         "judge": judge, "structure": {"ok": struct.ok, "detail": struct.detail},

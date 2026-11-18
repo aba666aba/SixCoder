@@ -170,11 +170,155 @@ def main() -> int:
         print("     编译错误：", exc)
     check("结果可编译", ok7)
 
+    print("[8] 多行签名 + 多行 docstring：合并后必须仍可编译（真实事故）")
+    # 事故现场：app/models.py:303 `create_topic_draft_record(` 的签名跨 7 行，
+    # _merge_skeleton 只留了 `def ...(` 这一行 → 括号永不闭合 →
+    # 日志里连续两轮 `第 303 行语法错误：'(' was never closed`，而 _blame_body
+    # 查不出任何问题函数（函数体本身都是好的）→ 整文件重写 → 同一处再犯。
+    SRC8 = ('"""模块文档。"""\n'
+            'import math\n'
+            '\n'
+            '\n'
+            'def wide(\n'
+            '    a: int,\n'
+            '    b: str = "x",\n'
+            ') -> dict:\n'
+            '    """wide 的说明\n'
+            '    第二行也属于 docstring。\n'
+            '    """\n'
+            '    return {"a": a}\n'
+            '\n'
+            '\n'
+            'def keep(a: int) -> int:\n'
+            '    return a\n')
+    funcs8 = [F("wide"), F("keep")]
+    merged8 = author._merge_skeleton(SRC8, funcs8, ["wide"])
+    check("多行签名的每一行都保留", '    b: str = "x",' in merged8, merged8[:200])
+    check("多行 docstring 完整保留", "第二行也属于 docstring。" in merged8)
+    try:
+        compile(merged8, "<c8>", "exec")
+        ok8 = True
+        err8 = ""
+    except SyntaxError as exc:
+        ok8 = False
+        err8 = str(exc)
+    check("合并后可编译", ok8, err8)
+    code8, _ = author.apply_bodies(merged8, {"wide": "return {'a': a}"}, stub_missing=False)
+    check("填体后签名仍是多行", '    b: str = "x",' in code8, code8[:200])
+    check("填体后函数体是新的", "return {'a': a}" in code8)
+    try:
+        compile(code8, "<c8b>", "exec")
+        ok8b = True
+        err8b = ""
+    except SyntaxError as exc:
+        ok8b = False
+        err8b = str(exc)
+    check("填体后可编译", ok8b, err8b)
+
+    print("[9] 失败后重贴文件：下一轮必须看见刚被判红的那一份")
+    # 事故现象：夜班日志里连续 `decision 跨函数/说不清位置，整文件重写一次`。
+    # 根因：引擎手里的"文件现状"在失败后从不更新 —— file_block（喂远端的全文）、
+    # existing（合并基线）、skeleton（骨架）三样都停在动手前的旧版。
+    # 后果：远端看不到自己刚写坏的那份，只能凭记忆改 → 整文件重写；
+    #       合并基线也是旧的 → 上一轮已经写对的部分被丢掉重来。
+    import tempfile as _tf
+    from core import remote as _remote_mod
+    _ws = Path(_tf.mkdtemp())
+    (_ws / "app" / "api").mkdir(parents=True)
+    _ws.joinpath("app", "api", "auth.py").write_text(
+        "def alpha(x: int) -> int:\n    return 0\n\n"
+        "def beta(y: int) -> int:\n    return 0\n", encoding="utf-8")
+    _prompts: list[str] = []
+
+    def _fake_complete(prompt, **kw):
+        if not kw.get("node_id"):
+            # 诊断角色（只读查证）：写作轮带 node_id=bodies:<path>，诊断轮没有
+            return {"ok": True, "answer": "诊断结论：beta 体不满足契约", "usage": {}}
+        _prompts.append(prompt)
+        if len(_prompts) == 1:
+            body = ("# ===== alpha =====\nreturn 'A_V1'\n"
+                    "# ===== beta =====\nreturn 'B_V1'\n")
+        else:
+            body = "# ===== beta =====\nreturn 'B_V2'\n"
+        return {"ok": True, "answer": "```python\n" + body + "```\n", "usage": {}}
+
+    _orig_complete, _orig_verify = _remote_mod.complete, author._verify
+    _remote_mod.complete = _fake_complete
+    _vcount = {"n": 0}
+
+    def _fake_verify(w, c, scope=None):
+        _vcount["n"] += 1
+        if _vcount["n"] == 1:
+            return {"ok": False, "feedback": "beta 不满足契约"}
+        return {"ok": True, "feedback": ""}
+
+    author._verify = _fake_verify
+    try:
+        _res = author.author_bodies(_ws, "app/api/auth.py",
+                                    type("C", (), {"funcs": [F("alpha"), F("beta")]})(),
+                                    {}, attempts=2, emit=None)
+    finally:
+        _remote_mod.complete, author._verify = _orig_complete, _orig_verify
+    check("两次尝试都走了远端", len(_prompts) == 2, str(len(_prompts)))
+    check("第 2 轮 prompt 里有第 1 轮刚写的那份（MARK: A_V1/B_V1）",
+          len(_prompts) > 1 and "A_V1" in _prompts[1], (_prompts[1][:120] if len(_prompts) > 1 else ""))
+    _final = _ws.joinpath("app", "api", "auth.py").read_text(encoding="utf-8")
+    check("最终文件用上了第 2 轮的新体（B_V2）", "B_V2" in _final, _final[:160])
+    check("第 1 轮已写对的部分没被丢掉（A_V1 仍在）", "A_V1" in _final, _final[:160])
+
+    print("[10] 新目标函数必须被加进骨架（真实事故：引擎静默丢函数）")
+    # 真机实测 2026-11-09：远端交回了**完全正确**的函数体
+    # （parse_fenced_bodies → ['normalize_quota']），但 _merge_skeleton 只保留
+    # **文件里已有**的函数 → 新函数不在骨架里 → apply_bodies 只能替换已有 def
+    # → 新函数被静默丢掉 → 判据报"契约函数缺失：<名>（文件里根本没有这些函数）"。
+    # 夜班日志里 26 次"契约函数缺失"就是这么来的 —— **不是模型不会写**。
+    src_new = ("def existing_helper(x: int) -> int:\n"
+                '    """已经写好的函数，别动它。"""\n'
+                "    return x * 3\n")
+    fns_new = [F("normalize_quota"), F("existing_helper")]
+    code_new, miss_new = author.rebuild_partial(
+        src_new, fns_new, ["normalize_quota"],
+        {"normalize_quota": "if quota <= 0:\n    raise ValueError('x')\nreturn quota"})
+    check("新函数真的进了代码", "def normalize_quota(" in code_new, code_new[-200:])
+    check("新函数的实现被填进去了", "raise ValueError('x')" in code_new, code_new[-200:])
+    check("既有的函数没被改坏", "return x * 3" in code_new, code_new[:200])
+    try:
+        compile(code_new, "<c10>", "exec")
+        ok10 = True
+        err10 = ""
+    except SyntaxError as exc:
+        ok10 = False
+        err10 = str(exc)
+    check("结果可编译", ok10, err10)
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")
         return 1
-    print("全部通过（骨架可编译 / 局部重写不动别人 / 缩进正确 / 坏体点名）")
+    # ── 落盘后立刻补确定性 import（2026-11-10 23:10 实测）───────────────────
+    # 事故：作者整文件重写冲掉了引擎补的 `from fastapi import Header`，
+    # 文件带 `NameError: Header` 落盘 → 整模块判红 → 记成"模型写不出"，白跑几轮。
+    print("[N] 落盘后补 import（缺 Header/HTTPException 这类确定性信息，不该让远端猜）")
+    import tempfile as _tf
+    from core import author as _au
+    with _tf.TemporaryDirectory() as _td:
+        _ws = Path(_td)
+        _p = _ws / "api_mod.py"
+        _p.write_text("from fastapi import APIRouter\n\nrouter = APIRouter()\n\n"
+                      "def get_me(authorization: str = Header(default='')):\n"
+                      "    raise HTTPException(status_code=401)\n", encoding="utf-8")
+        _evs = []
+        _au._fix_imports_after_write(_ws, _p, lambda k, v: _evs.append(v), "chk")
+        _out = _p.read_text(encoding="utf-8")
+        check("补上 from fastapi import Header", "from fastapi import Header" in _out)
+        check("补上 HTTPException", "from fastapi import HTTPException" in _out)
+        _au._fix_imports_after_write(_ws, _p, lambda k, v: _evs.append(v), "chk2")
+        check("幂等（第二次不再改写）", len(_evs) == 1, f"{len(_evs)} 次改写")
+    _asrc = (Path(__file__).resolve().parents[1] / "core" / "author.py").read_text(encoding="utf-8")
+    check("两条写作路径都接了它", _asrc.count("_fix_imports_after_write(") >= 3,
+          str(_asrc.count("_fix_imports_after_write(")))
+
+    print("全部通过（骨架可编译 / 局部重写不动别人 / 缩进正确 / 坏体点名 / 多行签名 / 失败后重贴文件 / 落盘补 import）")
     return 0
 
 

@@ -91,7 +91,7 @@ def main() -> int:
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")
         return 1
-    print("全部通过（3B/1.5B 被拒、7B+ 放行、默认模型不低于门槛）")
+    print("全部通过（3B/1.5B 只提示不建议不拦人、7B+ 放行、默认模型不低于门槛）")
     return 0
 
 

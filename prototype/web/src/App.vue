@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 /* ---------------- 状态 ---------------- */
 const health = ref(null)
@@ -17,7 +17,6 @@ const history = ref([])
 const repos = ref([])
 const fileList = ref([])
 const fileView = ref(null)
-const showTc = ref(false)
 
 /* ---------------- 桌面外壳（Electron）原生能力 ---------------- */
 const shellApi = typeof window !== 'undefined' ? window.electronAPI : undefined
@@ -156,6 +155,7 @@ async function doProbe(deep = false) {
     sandboxInfo.value = await api('/v1/sandbox?repo=' + encodeURIComponent(form.repo))
     busy.value = false
     await syncRepoContext()
+    await loadTree('')      // 探测通过后同步刷新左栏文件树
     return
   } catch (e) { errMsg.value = e.message } finally { busy.value = false }
 }
@@ -178,6 +178,235 @@ async function loadRemote(reveal = false) {
     loadPricing(d)
     loadProfiles()        // 模型档案与"单模型思考强度阶梯"一起刷新（改了立刻能看到新阶梯）
   } catch (e) { errMsg.value = '[FAIL] 读取远端设置失败：' + e.message }
+}
+
+// ---------------------------------------------------------------- 厂商（一等公民）
+// 2026-11-09 用户口径：点开「远端」→ 一个下拉（deepseek / glm / openai）+ 三个长方矩形；
+// 矩形中间是大字厂商名，右侧偏右是「正在使用」的三选一；点矩形弹出该厂商的配置弹窗
+// （apikey + 思考强度等级 + 该厂商的模型列表，可添加/删除）。
+const providers = ref([])
+const providerModal = ref(null)             // 正在配置哪个厂商（null = 没开二级弹窗）
+const providerDraft = ref(null)             // 二级弹窗里的草稿
+const EFFORT_LEVELS = ['none', 'low', 'high', 'max']
+
+function providerById(pid) {
+  return providers.value.find((p) => p.id === pid) || null
+}
+function currentProvider() {
+  return providers.value.find((p) => p.current) || providers.value[0] || null
+}
+function providerKeyText(pid) {
+  const p = providerById(pid)
+  return p ? (p.key_configured ? (p.key_masked || '已配置') : '未设置') : '未设置'
+}
+function providerModelCount(pid) {
+  const p = providerById(pid)
+  return p ? (p.models || []).length : 0
+}
+
+async function loadProviders() {
+  try {
+    const d = await api('/v1/settings/remote')
+    // 厂商在 `d.remote.providers`（外层是 {remote:{...}, available, usage}）
+    providers.value = d.remote?.providers || d.providers || []
+  } catch (e) { errMsg.value = '[FAIL] 读取厂商设置失败：' + e.message }
+}
+
+function openProviderModal(pid) {
+  closeOverlays('provider')
+  const p = providerById(pid)
+  if (!p) return
+  providerModal.value = pid
+  keyViewKey.value = null
+  providerDraft.value = JSON.parse(JSON.stringify({
+    id: p.id, label: p.label, base_url: p.base_url,
+    efforts: [...(p.efforts || [])],
+    api_key: '',                       // 留空 = 不修改已有 key
+    // 2026-11-18 UI 改版：**每个 key 类独立一份配置**（key/备注/自己的模型列表），
+    // 厂商不再有统一的模型表 —— 模型挂在哪把 key 下，审核者/写作者就各用各的。
+    keys: (p.keys || []).map((k) => ({
+      ...k, api_key: '',
+      models: (k.models || []).map((m) => ({ ...m })),
+    })),
+  }))
+}
+
+// ---------------------------------------------------------------- key 类卡片操作
+// 层级（2026-11-18 用户定稿）：厂商 → **key 卡片列表**（和厂商卡一样）→ 点进去才是
+// 这把 key 的模型配置。新增只填 名字/用途/key，模型自动按厂商默认填好。
+const keyViewKey = ref(null)        // 正在看详情的 key（null = 列表视图）
+
+function roleName(r) {
+  return ({ writer: '写作者', reviewer1: '审核者1', reviewer2: '审核者2' })[r] || '备用'
+}
+
+function draftAddKey() {
+  const d = providerDraft.value
+  if (!d) return
+  const used = new Set(d.keys.map((k) => k.role))
+  const free = ['writer', 'reviewer1', 'reviewer2'].find((r) => !used.has(r)) || ''
+  const k = { id: '', label: '', role: free,
+              api_key: '', current: free === 'writer',
+              models: [], _draft: true }
+  d.keys.push(k)
+  keyViewKey.value = k          // 新增后直接进详情（只填三样，模型不在这里配）
+}
+
+// 角色指派（2026-11-18 晚）：三个角色可以是**同一厂商的三把 key**。
+// 每个角色只有一个位置；指派给这把，就把别的同类角色清掉。
+function draftSetRole(k, role) {
+  const d = providerDraft.value
+  if (!d) return
+  k.role = role || ''
+  if (k.role) {
+    d.keys.forEach((x) => { if (x !== k && x.role === k.role) x.role = '' })
+  }
+  d.keys.forEach((x) => { x.current = (x.role === 'writer') })
+}
+
+async function draftRemoveKey(k) {
+  const d = providerDraft.value
+  if (!d) return
+  const wasSaved = !!(k && k.id)
+  d.keys = d.keys.filter((x) => x !== k)
+  if (d.keys.length && !d.keys.some((x) => x.role === 'writer')) {
+    d.keys[0].role = 'writer'
+    d.keys[0].current = true
+  }
+  if (keyViewKey.value === k) keyViewKey.value = null
+  if (!wasSaved) return                    // 草稿：没落过盘，删本地就行
+  // **已保存的 key：删除立即写进配置文件**（用户口径），不依赖"保存厂商"按钮——
+  // 列表页已经没有那个按钮了，靠它兜底会让删除只活在草稿里。
+  try {
+    const r = await api(`/v1/settings/remote/providers/${d.id}/keys/${encodeURIComponent(k.id)}`,
+      { method: 'DELETE' })
+    providers.value = r.providers || providers.value
+    if (providerModal.value === d.id) openProviderModal(d.id)
+    errMsg.value = `已删除 key「${k.label || k.id}」，配置已同步`
+  } catch (e) { errMsg.value = '[FAIL] 删除 key 失败：' + (e && e.message ? e.message : e) }
+}
+
+function draftAddModelTo(k) {
+  const d = providerDraft.value
+  if (!k) return
+  if (!Array.isArray(k.models)) k.models = []
+  k.models.push({
+    id: '', label: '', model: '', efforts: [...(d.efforts || [])],
+    max_output_tokens: 0, temperature: 0.2, priority: 30,
+    enabled: true, pricing: {}, api_key: '',
+  })
+}
+
+function draftRemoveModelOf(k, m) {
+  k.models = (k.models || []).filter((x) => x !== m)
+}
+
+function _normKeyOut(k) {
+  return {
+    id: String(k.id || '').trim(),        // 留空 → 后端自动编号（k2/k3…）
+    label: String(k.label || '').trim().slice(0, 48),
+    api_key: String(k.api_key || '').trim(),   // 留空 = 不修改已有
+    role: String(k.role || ''),           // writer / reviewer1 / reviewer2 / ''
+    current: k.role === 'writer',
+    // 新 key 且没配模型 → 不带 models 字段（后端自动继承厂商默认）；
+    // 老 key 必须带（否则服务端视为"不修改"，删模型就删不掉）
+    ...(k._draft && !(k.models || []).length ? {} : { models: (k.models || [])
+      .filter((m) => String(m.model || '').trim())
+      .map((m) => ({
+        id: String(m.id || m.model || '').trim().slice(0, 32),
+        label: String(m.label || m.model || '').trim().slice(0, 48),
+        model: String(m.model || '').trim().slice(0, 64),
+        efforts: (m.efforts && m.efforts.length) ? m.efforts : (providerDraft.value?.efforts || ['none']),
+        supports_tools: m.supports_tools === true ? 'true'
+          : (m.supports_tools === false ? 'false' : ''),
+        max_output_tokens: Number(m.max_output_tokens) || 0,
+        temperature: Number(m.temperature) || 0.2,
+        priority: Number(m.priority) || 30,
+        enabled: m.enabled !== false,
+        pricing: m.pricing || {},
+        api_key: String(m.api_key || '').trim(),
+      })),
+    }),
+  }
+}
+
+function closeProviderModal() {
+  providerModal.value = null
+  providerDraft.value = null
+  keyViewKey.value = null
+}
+
+function draftToggleEffort(eff) {
+  const d = providerDraft.value
+  if (!d) return
+  const i = d.efforts.indexOf(eff)
+  if (i >= 0) d.efforts.splice(i, 1)
+  else d.efforts.push(eff)
+}
+
+async function saveProviderDraft() {
+  const d = providerDraft.value
+  if (!d) return
+  try {
+    // **按 key 类提交**（2026-11-18 UI 改版）：每把 key 带自己的模型列表。
+    // 角色在每把 key 上显式指派（writer / reviewer1 / reviewer2 / 空）。
+    const keys = (d.keys || []).map(_normKeyOut)
+    for (const k of keys) {
+      // 新 key 没有 models 字段（由后端按厂商默认填）→ 必须兜住 undefined，
+      // 否则这里抛 TypeError 整个保存静默失败（实测：点了没任何反应）。
+      for (const m of (k.models || [])) {
+        if (!m.id) { errMsg.value = '[FAIL] 每个模型都要有 ID（没填就保存不了）'; return }
+      }
+    }
+    if (keys.length && !keys.some((k) => k.role === 'writer')) {
+      // 没指 writer → 第一把顶上（后端也会兜底，这里提前说清楚）
+      keys[0].role = 'writer'
+      keys[0].current = true
+    }
+    const r = await api('/v1/settings/remote/providers', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: d.id, label: d.label, base_url: d.base_url,
+        efforts: d.efforts,
+        keys,
+        replace_keys: true,     // 界面上删掉的 key 要真的从配置里删掉
+      }),
+    })
+    providers.value = r.providers || providers.value
+    // **保存后不关窗、原地刷新列表**（2026-11-18 用户口径）：草稿从服务端回读，
+    // 新 key 的自动编号（k2/k3…）与掩码立即出现在列表里，不用重开窗口。
+    if (providerModal.value === d.id) {
+      openProviderModal(d.id)
+    }
+    errMsg.value = `厂商「${d.label || d.id}」已保存（${keys.length} 把 key / ` +
+      `${keys.reduce((n, k) => n + (k.models || []).length, 0)} 个模型），列表已刷新`
+  } catch (e) {
+    errMsg.value = '[FAIL] 保存厂商失败：' + (e && e.message ? e.message : e)
+  }
+}
+
+async function useProvider(pid) {
+  try {
+    const r = await api('/v1/settings/remote/providers', {
+      method: 'POST',
+      body: JSON.stringify({ id: pid, current: true }),
+    })
+    providers.value = r.providers || providers.value
+    errMsg.value = `已切换到「${(providerById(pid) || {}).label || pid}」`
+  } catch (e) { errMsg.value = '[FAIL] 切换厂商失败：' + e.message }
+}
+
+async function deleteProviderModel(pid, modelId) {
+  if (!window.confirm(`删除模型「${modelId}」？`)) return
+  try {
+    const r = await api(`/v1/settings/remote/providers/${pid}/models/${encodeURIComponent(modelId)}`,
+      { method: 'DELETE' })
+    providers.value = r.providers || providers.value
+    const p = providerById(pid)
+    if (p && providerDraft.value && providerDraft.value.id === pid) {
+      providerDraft.value.models = (p.models || []).map((m) => ({ ...m }))
+    }
+  } catch (e) { errMsg.value = '[FAIL] 删除模型失败：' + e.message }
 }
 
 function revealRemoteKey() {
@@ -340,18 +569,130 @@ const commitFull = computed(() => {
 /* ---------------- 顶栏下拉菜单：帮助 / 登录选项 ---------------- */
 const openMenu = ref('')            // '' | 'settings'
 const loginOpen = ref(false)        // 兼容旧菜单，保留但不再使用
-const showRemoteModal = ref(false)
+const showRemotePanel = ref(false)   // 顶栏「远端」按钮弹出的**下拉面板**
+
+// ---------------------------------------------------------------- 弹层互斥（2026-11-18 用户口径）
+// **任何时刻只允许一个弹层/弹窗打开**：开任何一个，先把其它已开的全部关掉。
+// 各打开入口先调 closeOverlays(自己的名字)，自己的开关逻辑照旧。
+function closeOverlays(except = '') {
+  if (except !== 'settings') showSettings.value = false
+  if (except !== 'provider') providerModal.value = null
+  if (except !== 'remote') showRemotePanel.value = false
+  if (except !== 'login') showLoginModal.value = false
+  if (except !== 'git') showGitPanel.value = false
+  if (except !== 'tc') showTcPanel.value = false
+  if (except !== 'menu') openMenu.value = ''
+}
+
+function openSettingsAt(tab) {
+  closeOverlays('settings')
+  settingsTab.value = tab || 'help'
+  showSettings.value = true
+  if (settingsTab.value === 'remote') loadRemote()
+}
 const showLoginModal = ref(false)
 const buildId = ref('')
 
-function openRemote() { showRemoteModal.value = true; loadRemote(); loadRegressions() }
-function openLogin() { showLoginModal.value = true; loadLoginState() }
+function openRemote(ev) {
+  closeOverlays('remote')
+  showRemotePanel.value = !showRemotePanel.value   // 点一下开、再点一下关
+  if (showRemotePanel.value) {
+    loadRemote(); loadProviders()
+    // 贴着「远端」按钮展开（和 Git / 工具链浮层一致）
+    if (ev && ev.currentTarget) {
+      const r = ev.currentTarget.getBoundingClientRect()
+      dropAnchorLeft.value = Math.max(12, Math.min(r.left, window.innerWidth - 480))
+    }
+  }
+}
+function openLogin() { closeOverlays('login'); showLoginModal.value = true; loadLoginState() }
 const openAtLogin = ref(false)
 const loginSupported = ref(false)   // 只有桌面外壳且主进程支持时才可切换
 
-function toggleMenu(name) { openMenu.value = openMenu.value === name ? '' : name }
+/* ---------------- 仓库行左侧的两个下拉浮层：Git 客户端 / 工具链 ----------------
+   用户口径（2026-11-09）：这两个都放在「仓库」那一行、靠左排列，
+   点击像顶栏「远端」一样弹出下拉浮层，不再各占左栏一整块面板。 */
+const showGitPanel = ref(false)      // Git 客户端浮层
+const showTcPanel = ref(false)       // 工具链浮层
+const dropAnchorLeft = ref(18)       // 浮层左边缘：贴着触发它的那个按钮
+
+/* ---------------- 左右栏折叠（VSCode 逻辑：点侧边栏图标收/展） ---------------- */
+const leftCollapsed = ref(false)
+const rightCollapsed = ref(false)
+function toggleLeft() { leftCollapsed.value = !leftCollapsed.value }
+function toggleRight() { rightCollapsed.value = !rightCollapsed.value }
+
+function toggleRepoDrop(name, ev) {
+  // 两个浮层互斥：只开一个（同时关掉其它所有弹层，2026-11-18 弹层互斥口径）
+  closeOverlays(name === 'git' ? 'git' : 'tc')
+  showGitPanel.value = name === 'git' ? !showGitPanel.value : false
+  showTcPanel.value = name === 'tc' ? !showTcPanel.value : false
+  if (showGitPanel.value) refreshGit()
+  if (showTcPanel.value) loadToolchains()
+  // 贴着按钮展开（像浏览器菜单那样对齐按钮左边缘）
+  if (ev && ev.currentTarget) {
+    const r = ev.currentTarget.getBoundingClientRect()
+    dropAnchorLeft.value = Math.max(12, Math.min(r.left, window.innerWidth - 540))
+  }
+}
+
+
+/* ---------------- VSCode 式文件树（浏览所选仓库目录，左栏常驻面板） ---------------- */
+const treeRoot = ref('')            // 当前树对应的仓库绝对路径
+const treeNodes = ref({})           // { 相对目录路径: [{name,path,is_dir,size}] }
+const treeExpanded = ref({})        // { 相对目录路径: true }
+const treeLoading = ref(false)
+const treeError = ref('')
+
+// 换了仓库就清掉旧的树缓存并重新加载（避免显示上一个仓库的文件）
+watch(() => form.repo, () => {
+  treeNodes.value = {}
+  treeExpanded.value = {}
+  treeRoot.value = ''
+  treeError.value = ''
+  if (form.repo) loadTree('')
+})
+
+async function loadTree(rel) {
+  const repo = form.repo
+  if (!repo) { treeError.value = '先选一个仓库目录'; return }
+  treeError.value = ''
+  treeLoading.value = true
+  try {
+    const q = new URLSearchParams({ repo, path: rel || '' })
+    const d = await api('/v1/repo/tree?' + q.toString())
+    treeRoot.value = d.repo || repo
+    treeNodes.value = { ...treeNodes.value, [rel || '']: d.items || [] }
+  } catch (e) {
+    treeError.value = e.message
+  } finally { treeLoading.value = false }
+}
+
+// 树按「相对路径的父目录」分组渲染，展开的目录渲染子项
+function treeChildrenOf(parentPath) { return treeNodes.value[parentPath || ''] || [] }
+function treeHasChildren(parentPath) { return treeChildrenOf(parentPath).length > 0 }
+
+async function toggleDir(node) {
+  const key = node.path
+  if (treeExpanded.value[key]) { treeExpanded.value = { ...treeExpanded.value, [key]: false }; return }
+  treeExpanded.value = { ...treeExpanded.value, [key]: true }
+  if (!treeNodes.value[key]) await loadTree(key)
+}
+
+async function openInEditor(node) {
+  if (!node || node.is_dir) return
+  const abs = treeRoot.value ? treeRoot.value + '/' + node.path : node.path
+  if (shellApi?.openPath) { shellApi.openPath(abs); return }
+  errMsg.value = '打开系统编辑器需要桌面版外壳（网页版请直接用仓库路径）'
+}
+
+function toggleMenu(name) {
+  closeOverlays('menu')
+  openMenu.value = openMenu.value === name ? '' : name
+}
 
 function openHelp(section) {
+  closeOverlays('settings')
   settingsTab.value = section
   showSettings.value = true
   openMenu.value = ''
@@ -539,14 +880,16 @@ function connect(taskId) {
    与「发送」的单任务不同，夜班会反复体检/派工/开发/机械验收，直到收敛或预算耗尽。
    协作方式由 core/policy.py 决定：甲方模式代码默认由远端写（本地 7B 兜底），
    开发者模式必须由人给实现方案。界面只负责把这件事摆到手边。 */
-const night = reactive({ hours: 6, plan: '', taskId: '', busy: false, info: null,
+const night = reactive({ plan: '', taskId: '', busy: false, info: null,
                          // 全自主模式：只给一句话目标，系统自己规划切片/验收对象/预算分配
                          // （对应 core/auto.py：蓝图 → 切片 → 逐片生成 → 覆盖观测 → 重规划）
                          goalMode: false, goal: '',
                          // 右上角选定的远端模型档案（flash / pro）；空 = 整条八档阶梯
                          remoteProfile: '',
-                         // 每夜花费硬上限（元）。默认 1 元，自己可改；0 = 不设上限
-                         maxCny: 1,
+                         // 两步法：先「估算花费」构建蓝图 + 估算，再开工；无用户上限输入框
+                         estimateText: '', estimateBusy: false,
+                         // 唯一停机线（系统预算 ×1.05），从 .sixcoder/budget.json 读，用户不可改
+                         sysBudget: 0, stopThreshold: 0, spent: null,
                          delivery: '', lines: [],
                          // 目标代码规模：不同规模的约束完全不同（core/scale.py）。
                          // 甲方模式的硬要求：提需求时就写明，不写就不是"明确的需求"。
@@ -661,6 +1004,8 @@ async function saveProfile(p) {
     priority: Number(p.priority), enabled: !!p.enabled,
     // OpenAI 兼容端点不认 reasoning_effort，强制单档
     efforts: isOpenAI(p) ? ['none'] : (p.efforts || []),
+    supports_tools: p.supports_tools === true || p.supports_tools === 'true' ? true
+      : (p.supports_tools === false || p.supports_tools === 'false' ? false : ''),
     max_output_tokens: Number(p.max_output_tokens),
     temperature: Number(p.temperature),
     pricing: p.pricing,
@@ -733,20 +1078,36 @@ async function startNight() {
     errMsg.value = '请选择目标代码规模（S/M/L/XL）——约束按规模分级，选错等于没约束'; return
   }
   night.busy = true; errMsg.value = ''; night.lines = []; night.delivery = ''
-  night.info = null
+  night.info = null; night.estimateText = ''; night.sysBudget = 0
+  night.stopThreshold = 0; night.spent = null
   try {
     const d = await api('/v1/night', { method: 'POST', body: JSON.stringify({
       repo: form.repo,
       requirement: auto ? '' : form.requirement,
       goal: auto ? night.goal : '',
       model: form.model,
-      hours: Number(night.hours) || 6, plan: night.plan, scale: night.scale,
-      remote_profile: night.remoteProfile,
-      max_cny: Number(night.maxCny) || 0 }) })
+      plan: night.plan, scale: night.scale,
+      remote_profile: night.remoteProfile }) })
     night.taskId = d.task_id
     night.info = { state: 'running', mode: d.mode, policy: d.policy, verified: 0, total: 0 }
     connectNight(d.task_id)
   } catch (e) { night.busy = false; errMsg.value = e.message }
+}
+
+/* 两步法第一步：只构建蓝图 + 估算花费，不跑夜班；单价与系统预算都在 .sixcoder/budget.json */
+async function estimateNight() {
+  const text = night.goalMode ? night.goal : form.requirement
+  if (!form.repo || !text.trim()) { errMsg.value = '请先选择仓库并填写目标/需求'; return }
+  night.estimateBusy = true; night.estimateText = ''
+  try {
+    const d = await api('/v1/night/estimate', { method: 'POST', body: JSON.stringify({
+      repo: form.repo,
+      requirement: night.goalMode ? '' : form.requirement,
+      goal: night.goalMode ? night.goal : '',
+      model: form.model }) })
+    night.estimateText = d.report || (d.ok ? '估算完成' : '估算不可用')
+  } catch (e) { night.estimateText = '估算失败：' + e.message }
+  finally { night.estimateBusy = false }
 }
 
 function connectNight(taskId) {
@@ -758,6 +1119,14 @@ function connectNight(taskId) {
       nightEs.close(); nightEs = null; night.busy = false
       loadNight(taskId)
       return
+    }
+    // 唯一停机线与实际花费：从事件里抓出来常驻展示（系统预算用户不可改）
+    if (ev.kind === 'night_start') {
+      if (ev.payload && ev.payload.system_budget_cny) night.sysBudget = ev.payload.system_budget_cny
+      if (ev.payload && ev.payload.stop_threshold_cny) night.stopThreshold = ev.payload.stop_threshold_cny
+    }
+    if (ev.kind === 'night_done' && ev.payload && ev.payload.spent_cny != null) {
+      night.spent = ev.payload.spent_cny
     }
     night.lines.push({ kind: ev.kind, ts: ev.ts, text: nightBrief(ev.payload) })
     if (night.lines.length > 500) night.lines.shift()
@@ -1185,35 +1554,40 @@ onUnmounted(() => {
 
 <template>
   <div class="app">
-    <!-- 顶栏 -->
+    <!-- 顶栏：所有按钮从左往右排列 -->
     <div class="topbar">
-      <div class="brand">SixCoder</div>
+      <!-- 左端：左栏开关（VSCode：侧栏收起后从屏幕左边滑出把手条） -->
+      <button class="ghost menu-btn rail-toggle" :class="{ active: !leftCollapsed }"
+              @click="toggleLeft"
+              :title="leftCollapsed ? '展开左栏' : '收起左栏'">☰</button>
+      <div class="menu-wrap">
+        <button class="ghost menu-btn" :class="{ active: showGitPanel }"
+                @click="toggleRepoDrop('git', $event)" title="Git 客户端：状态 / 提交 / 分支 / 远端同步">⑂ Git 客户端</button>
+        <button class="ghost menu-btn" :class="{ active: showTcPanel }"
+                @click="toggleRepoDrop('tc', $event)" title="工具链配置：JDK / Python / Node 等可用性">🔧 工具链</button>
+        <button class="ghost menu-btn" @click="openRemote($event)"
+                :title="remote.available ? '远端厂商已配置（点此切换）' : '配置远端厂商'">
+          远端 <span class="dot" :class="remote.available ? 'on' : 'off'"></span>
+        </button>
+        <button class="ghost menu-btn" @click="openHelp('help')">帮助</button>
+        <button class="ghost menu-btn" @click="openLogin()"
+                :title="openAtLogin ? '已开启开机自启' : '开机自启未开启'">
+          登录选项 <span class="dot" :class="openAtLogin ? 'on' : 'off'"></span>
+        </button>
+      </div>
       <span class="spacer"></span>
-      <!-- 远端模型：这一夜让哪个远端档案来写（flash / pro），用于区分不同模型的产出 -->
-      <select v-if="(remoteModels || []).length" class="mode-select" v-model="night.remoteProfile"
-              title="远端模型档案：只走这个档案的档位；选「整条阶梯」则按 flash→pro 自动升档">
-        <option value="">远端模型：整条阶梯（自动升档）</option>
-        <option v-for="m in remoteModels" :key="m.id" :value="m.id"
-                :disabled="!m.enabled">
-          远端模型：{{ m.label || m.id }}{{ m.enabled ? '' : '（未启用）' }}
-        </option>
-      </select>
       <select v-if="modes.length" class="mode-select" v-model="currentMode"
               @change="setMode(currentMode.id)"
               :title="currentMode ? currentMode.desc + '\n边界：' + currentMode.boundary : ''">
         <option v-for="m in modes" :key="m.id" :value="m">{{ m.name }}</option>
       </select>
-      <span class="pill" v-if="currentMode" :class="autoApprove() ? 'b-ok' : 'b-warn'"
-            :title="autoApprove() ? '人工处置全部放行（无人值守也能跑完）' : '关键节点必须人工审核，不会自动放行'">
-        {{ autoApprove() ? '自动放行' : '需人审' }} {{ currentMode.key_nodes.length || 0 }}
-      </span>
       <span v-if="questions.length" class="pill b-warn"
-            style="cursor:pointer" @click="settingsOpen = true"
+            style="cursor:pointer" @click="openSettingsAt('help')"
             :title="'有 ' + questions.length + ' 个问题在等你回答'">
         待答 {{ questions.length }}
       </span>
       <span v-if="pendingApprovals.length" class="pill b-warn"
-            style="cursor:pointer" @click="settingsOpen = true"
+            style="cursor:pointer" @click="openSettingsAt('help')"
             :title="'有 ' + pendingApprovals.length + ' 个待审节点等你通过'">
         待审 {{ pendingApprovals.length }}
       </span>
@@ -1228,20 +1602,148 @@ onUnmounted(() => {
           {{ m }}{{ tooSmall(m) ? '（' + paramsB(m) + 'B 低于门槛，不可选）' : '' }}
         </option>
       </select>
-      <div class="menu-wrap">
-        <button class="ghost menu-btn" @click="openRemote()"
-                :title="remote.available ? '远端模型已配置（点此修改）' : '配置远端模型密钥（DeepSeek）'">
-          远端 <span class="dot" :class="remote.available ? 'on' : 'off'"></span>
-        </button>
-        <button class="ghost menu-btn" @click="openHelp('help')">帮助</button>
-        <button class="ghost menu-btn" @click="openLogin()"
-                :title="openAtLogin ? '已开启开机自启' : '开机自启未开启'">
-          登录选项 <span class="dot" :class="openAtLogin ? 'on' : 'off'"></span>
-        </button>
-        <span class="dim" :title="'当前前端 bundle：' + (buildId || '未知')"
-              style="font-size:10px;opacity:.6">#{{ buildId || 'dev' }}</span>
-      </div>
+      <!-- 右端：右栏开关 -->
+      <button class="ghost menu-btn rail-toggle" :class="{ active: !rightCollapsed }"
+              @click="toggleRight"
+              :title="rightCollapsed ? '展开右栏' : '收起右栏'">☰</button>
       <div v-if="openMenu" class="menu-mask" @click="openMenu = ''"></div>
+    </div>
+
+    <!-- ============ 远端厂商（顶栏「远端」按钮 → 下拉面板） ============ -->
+    <div v-if="showRemotePanel" class="remote-panel" :style="{ left: dropAnchorLeft + 'px', right: 'auto' }" @click.self="showRemotePanel = false">
+      <div class="remote-panel-head">
+        <strong>远端厂商</strong>
+        <span class="badge" :class="remote.available ? 'b-ok' : 'b-dim'">
+          {{ remote.available ? '可用' : '未配置' }}
+        </span>
+        <span class="spacer"></span>
+        <span class="dim" style="font-size:11px">
+          正在使用：{{ (currentProvider() || {}).label || '（未配置）' }}
+        </span>
+        <button class="ghost tiny" @click="showRemotePanel = false">关闭 ✕</button>
+      </div>
+
+      <div class="pv-cards">
+        <!-- **整张卡片可点**（2026-11-18 用户口径：不要只点小按钮）：
+             点卡片 = 关面板 + 打开该厂商的 key 列表；只有右侧「正在使用」是独立动作。 -->
+        <div v-for="p in providers" :key="p.id"
+             class="pv-card"
+             :class="{ 'is-current': p.current }"
+             style="cursor:pointer"
+             :title="'点开配置「' + (p.label || p.id) + '」的所有 key 与模型'"
+             @click="showRemotePanel = false; openProviderModal(p.id)">
+          <div class="pv-name">{{ p.label || p.id }}</div>
+          <!-- 右侧：切换「正在使用」（单独点击，不连带打开配置） -->
+          <div class="pv-current" @click.stop="useProvider(p.id)">
+            <span class="pv-radio" :class="{ 'on': p.current }"></span>
+            <span class="pv-current-text">{{ p.current ? '正在使用' : '设为使用' }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="dim" style="font-size:11px;line-height:1.7;margin-top:9px;padding:0 2px">
+        点厂商卡片进 <b>key 列表</b>（每把 key 起名字/选用途/填 <b>API key</b>）、
+        管理该厂商的<b>模型</b>（可添加/删除）。
+        DeepSeek 与 GLM 已预置默认模型，只需填 key；OpenAI 没有默认模型，需要自己添加。
+      </div>
+    </div>
+
+
+    <!-- ============ Git 客户端浮层 ============ -->
+    <div v-if="showGitPanel" class="repo-pop repo-pop-git" :style="{ left: dropAnchorLeft + 'px', right: 'auto' }" @click.self="showGitPanel = false">
+      <div class="repo-pop-head">
+        <strong>Git 客户端</strong>
+        <span class="spacer"></span>
+        <span class="badge" :class="gitReady ? 'b-acc' : 'b-warn'">{{ gitReady ? (taskInfo?.id ? '目标：任务工作区' : '目标：所选仓库') : '未选目标' }}</span>
+        <button class="ghost tiny" @click="showGitPanel = false">关闭 ✕</button>
+      </div>
+      <div v-if="!gitReady" class="alert-inline">{{ gitNoTargetMsg }}</div>
+      <div class="git-status" v-if="gitStatus">
+        <span class="badge b-acc">{{ gitStatus.branch }}</span>
+        <span class="mono dim">@{{ gitStatus.head }}</span>
+        <span class="badge" :class="gitStatus.clean ? 'b-ok' : 'b-warn'">{{ gitStatus.clean ? '干净' : gitStatus.changes.length + ' 处改动' }}</span>
+        <span class="badge b-dim">↑{{ gitStatus.ahead }} ↓{{ gitStatus.behind }}</span>
+      </div>
+      <div v-if="gitStatus && gitStatus.changes.length" class="table-wrap" style="max-height:120px;margin:6px 0">
+        <table>
+          <thead><tr><th style="width:36px">状态</th><th>文件</th><th style="width:110px">撤回</th></tr></thead>
+          <tbody>
+            <tr v-for="c in gitStatus.changes" :key="c.path">
+              <td><span class="badge" :class="c.code === '??' ? 'b-acc' : 'b-warn'">{{ c.code }}</span></td>
+              <td class="mono wrap" style="font-size:10.5px;cursor:pointer" @click="gitRead('diff', { path: c.path })">{{ c.path }}</td>
+              <td>
+                <button class="ghost tiny" :disabled="gitBusy || !can('git.commit')" @click="gitDo('undo', { path: c.path })">撤回</button>
+                <button class="ghost tiny" :disabled="gitBusy || !can('git.commit')" @click="gitDo('undo_sandbox_file', { path: c.path })">沙箱</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:6px">
+        <button class="ghost" :disabled="gitBusy || !can('git.commit')" @click="gitDo('init', { branch: 'main' })">初始化仓库</button>
+        <button class="ghost" :disabled="gitBusy || !can('git.read')" @click="refreshGit(); gitRead('status')">状态</button>
+        <button class="ghost" :disabled="gitBusy || !can('git.read')" @click="gitRead('log', { n: 20 })">历史</button>
+        <button class="ghost" :disabled="gitBusy || !can('git.read')" @click="gitRead('diff')">差异</button>
+        <button class="ghost" :disabled="gitBusy || !can('git.read')" @click="gitRead('branches')">分支列表</button>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:6px">
+        <select v-model="commitType" class="commit-type" :title="COMMIT_TYPES.find(t => t.id === commitType)?.desc">
+          <option v-for="t in COMMIT_TYPES" :key="t.id" :value="t.id">{{ t.label }}</option>
+        </select>
+        <input v-model="commitMsg" placeholder="提交描述" style="flex:1;min-width:140px" />
+        <button class="ghost" :disabled="gitBusy || !can('git.commit')" @click="gitDo('stage')">暂存全部</button>
+        <button :disabled="gitBusy || !can('git.commit')" @click="gitDo('commit', { message: commitFull })">提交</button>
+      </div>
+      <div class="dim mono" style="font-size:10px;margin:2px 0 6px;word-break:break-all">将提交：{{ commitFull }}</div>
+      <div class="row" style="flex-wrap:wrap;gap:6px">
+        <input v-model="remoteUrl" placeholder="远端仓库地址" style="flex:1;min-width:140px" />
+        <button class="ghost" :disabled="gitBusy || !can('git.remote')" @click="gitDo('set_remote', { name: 'origin', url: remoteUrl })">设置远端</button>
+        <button class="ghost" :disabled="gitBusy || !can('git.remote')" @click="gitDo('fetch')">获取</button>
+        <button class="ghost" :disabled="gitBusy || !can('git.remote')" @click="gitDo('pull')">拉取</button>
+        <button class="ghost" :disabled="gitBusy || !can('git.remote')" @click="gitDo('push')">推送</button>
+        <button :disabled="gitBusy || !can('git.remote')" @click="gitDo('sync')">一键同步</button>
+      </div>
+      <div class="row" style="flex-wrap:wrap;gap:6px;margin-top:6px">
+        <input v-model="branchInput" placeholder="新分支名" style="max-width:120px" />
+        <button class="ghost" :disabled="gitBusy || !can('git.branch')" @click="gitDo('new_branch', { name: branchInput })">新建并切换</button>
+        <input v-model="switchTarget" placeholder="切换到" style="max-width:110px" />
+        <button class="ghost" :disabled="gitBusy || !can('git.branch')" @click="gitDo('switch', { name: switchTarget })">切换</button>
+        <input v-model="mergeSource" placeholder="合并源" style="max-width:110px" />
+        <button class="ghost" :disabled="gitBusy || !can('git.branch')" @click="gitDo('merge', { source: mergeSource })">合并</button>
+      </div>
+      <pre v-if="gitOut" style="max-height:120px">{{ gitOut }}</pre>
+    </div>
+
+    <!-- ============ 工具链浮层 ============ -->
+    <div v-if="showTcPanel" class="repo-pop repo-pop-tc" :style="{ left: dropAnchorLeft + 'px', right: 'auto' }" @click.self="showTcPanel = false">
+      <div class="repo-pop-head">
+        <strong>工具链</strong>
+        <span class="badge" :class="toolchains.every(t => t.ok) ? 'b-ok' : 'b-warn'" style="margin-left:6px">
+          {{ toolchains.filter(t => t.ok).length }}/{{ toolchains.length }} 可用
+        </span>
+        <span class="spacer"></span>
+        <button class="ghost tiny" @click="loadToolchains()">刷新</button>
+        <button class="ghost tiny" @click="showTcPanel = false">关闭 ✕</button>
+      </div>
+      <table>
+        <tr v-for="t in toolchains" :key="t.id">
+          <td class="mono" style="width:52px">{{ t.id }}</td>
+                <td style="width:20px">
+                  <span v-if="t.ok" class="badge b-ok">✓</span>
+                  <span v-else-if="t.version" class="badge b-warn">!</span>
+                  <span v-else class="badge b-bad">✗</span>
+                </td>
+                <td class="mono dim" style="width:60px">{{ t.version || '—' }}</td>
+                <td class="mono dim wrap" style="font-size:9.5px">{{ t.path || '未找到' }}</td>
+                <td style="width:34px">
+                  <button v-if="isShell && can('toolchain.config')" class="ghost tiny"
+                          :title="'指定 ' + t.id + ' 目录'" @click="pickToolchainDir(t)">…</button>
+                </td>
+              </tr>
+            </table>
+            <div v-if="!isShell" class="dim" style="font-size:10px;margin-top:4px">
+              「指定目录」需桌面版外壳（Electron）；网页版可编辑 <code>data/toolchains.json</code>
+            </div>
     </div>
 
     <div v-if="errMsg" class="alert-bar" @click="errMsg = ''" title="点击关闭">
@@ -1249,16 +1751,21 @@ onUnmounted(() => {
       <span class="spacer"></span><span class="dim" style="font-size:10px">点击关闭 ✕</span>
     </div>
 
-    <div class="cols">
+    <!-- VSCode 式：侧栏收起后，从屏幕左右边缘各滑出一条窄把手条，点它侧栏再滑出 -->
+    <button v-if="leftCollapsed" class="edge-rail edge-left" @click="toggleLeft" title="展开左栏">›</button>
+    <button v-if="rightCollapsed" class="edge-rail edge-right" @click="toggleRight" title="展开右栏">‹</button>
+
+    <div class="cols" :class="{ 'left-collapsed': leftCollapsed, 'right-collapsed': rightCollapsed }">
+
       <!-- ============ 左栏 ============ -->
-      <div class="col col-left">
-        <div class="panel">
-          <div class="panel-title">仓库</div>
+      <div class="col col-left" v-show="!leftCollapsed">
+        <div class="panel repo-panel">
           <div class="row">
             <input v-model="form.repo" placeholder="仓库路径" @input="saveSessionSoon" />
             <button v-if="isShell" class="ghost" title="打开目录选择器" @click="pickRepoDir">浏览…</button>
             <button class="ghost" :disabled="busy" @click="doProbe">探测</button>
           </div>
+
           <div v-if="probeInfo" style="margin-top:6px">
             <span class="badge b-acc">{{ probeInfo.state }}</span>
             <span class="dim" style="font-size:11px;margin-left:6px">{{ probeInfo.policy }}</span>
@@ -1288,126 +1795,40 @@ onUnmounted(() => {
 
         <div class="panel">
           <div class="panel-title">
-            工具链
-            <span class="badge" :class="toolchains.every(t => t.ok) ? 'b-ok' : 'b-warn'" style="margin-left:6px">
-              {{ toolchains.filter(t => t.ok).length }}/{{ toolchains.length }} 可用
-            </span>
+            文件
             <span class="spacer"></span>
-            <span class="tab" :class="{ active: showTc }" @click="showTc = !showTc">{{ showTc ? '收起' : '展开' }}</span>
+            <span class="dim mono" style="font-size:10px">{{ treeRoot || '未选仓库' }}</span>
+            <button class="ghost tiny" @click="loadTree('')">刷新</button>
           </div>
-          <div v-if="showTc" class="table-wrap" style="max-height:180px">
-            <table>
-              <tr v-for="t in toolchains" :key="t.id">
-                <td class="mono" style="width:52px">{{ t.id }}</td>
-                <td style="width:20px">
-                  <span v-if="t.ok" class="badge b-ok">✓</span>
-                  <span v-else-if="t.version" class="badge b-warn">!</span>
-                  <span v-else class="badge b-bad">✗</span>
-                </td>
-                <td class="mono dim" style="width:64px">{{ t.version || '—' }}</td>
-                <td class="mono dim wrap" style="font-size:9.5px">{{ t.path || '未找到' }}</td>
-                <td style="width:34px">
-                  <button v-if="isShell && can('toolchain.config')" class="ghost tiny"
-                          :title="'指定 ' + t.id + ' 目录'" @click="pickToolchainDir(t)">…</button>
-                </td>
-              </tr>
-            </table>
+          <div v-if="treeError" class="alert-inline">{{ treeError }}</div>
+          <div class="tree-root">
+            <div v-if="!form.repo" class="empty">先在上方填仓库路径或点「浏览…」</div>
+            <div v-else-if="treeLoading && !treeNodes['']" class="empty">正在读取…</div>
+            <div v-else-if="!treeChildrenOf('').length" class="empty">（空目录）</div>
+            <template v-else>
+              <div v-for="n in treeChildrenOf('')" :key="n.path" class="tree-node" :style="{ paddingLeft: '2px' }">
+                <div class="tree-row" :class="{ dir: n.is_dir }" @click="n.is_dir ? toggleDir(n) : openInEditor(n)">
+                  <span class="tree-caret">{{ n.is_dir ? (treeExpanded[n.path] ? '▾' : '▸') : '' }}</span>
+                  <span class="tree-icon">{{ n.is_dir ? '📁' : '📄' }}</span>
+                  <span class="tree-name">{{ n.name }}</span>
+                  <span v-if="!n.is_dir" class="dim" style="font-size:9.5px">{{ n.size }}</span>
+                </div>
+                <template v-if="n.is_dir && treeExpanded[n.path]">
+                  <div v-for="c in treeChildrenOf(n.path)" :key="c.path" class="tree-node" :style="{ paddingLeft: '14px' }">
+                    <div class="tree-row" :class="{ dir: c.is_dir }" @click="c.is_dir ? toggleDir(c) : openInEditor(c)">
+                      <span class="tree-caret">{{ c.is_dir ? (treeExpanded[c.path] ? '▾' : '▸') : '' }}</span>
+                      <span class="tree-icon">{{ c.is_dir ? '📁' : '📄' }}</span>
+                      <span class="tree-name">{{ c.name }}</span>
+                      <span v-if="!c.is_dir" class="dim" style="font-size:9.5px">{{ c.size }}</span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
           </div>
-          <div v-if="showTc && !isShell" class="dim" style="font-size:10px;margin-top:4px">
-            「指定目录」需桌面版外壳（Electron）；网页版可编辑 <code>data/toolchains.json</code>
+          <div class="dim" style="font-size:10px;margin-top:5px">
+            点目录展开，点文件用系统默认编辑器打开。
           </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-title">Git 客户端
-            <span class="spacer"></span>
-            <span class="badge" :class="gitReady ? 'b-acc' : 'b-warn'">{{ gitReady ? (taskInfo?.id ? '目标：任务工作区' : '目标：所选仓库') : '未选目标' }}</span>
-          </div>
-          <div v-if="!gitReady" class="dim" style="font-size:10.5px;margin-bottom:6px">{{ gitNoTargetMsg }}</div>
-            <div class="git-status" v-if="gitStatus">
-              <span class="badge b-acc">{{ gitStatus.branch }}</span>
-              <span class="mono dim">@{{ gitStatus.head }}</span>
-              <span class="badge" :class="gitStatus.clean ? 'b-ok' : 'b-warn'">{{ gitStatus.clean ? '干净' : gitStatus.changes.length + ' 处改动' }}</span>
-              <span class="badge b-dim">↑{{ gitStatus.ahead }} ↓{{ gitStatus.behind }}</span>
-              <span class="mono dim wrap" style="font-size:10px">
-                {{ Object.entries(gitStatus.remotes).map(([k, v]) => k + ' → ' + v).join('  ') || '无远端' }}
-              </span>
-            </div>
-
-            <!-- 改动文件：可逐个撤回 -->
-            <div v-if="gitStatus && gitStatus.changes.length" class="table-wrap" style="max-height:150px;margin-bottom:8px">
-              <table>
-                <thead><tr><th style="width:40px">状态</th><th>文件</th><th style="width:150px">撤回</th></tr></thead>
-                <tbody>
-                  <tr v-for="c in gitStatus.changes" :key="c.path">
-                    <td><span class="badge" :class="c.code === '??' ? 'b-acc' : 'b-warn'">{{ c.code }}</span></td>
-                    <td class="mono wrap" style="font-size:11px;cursor:pointer" @click="gitRead('diff', { path: c.path })">{{ c.path }}</td>
-                    <td>
-                      <button class="ghost tiny" :disabled="gitBusy || !can('git.commit')"
-                              :title="c.code === '??' ? '删除这个新文件（删前备份）' : '恢复该文件到上次提交版本'"
-                              @click="gitDo('undo', { path: c.path })">撤回</button>
-                      <button class="ghost tiny" :disabled="gitBusy || !can('git.commit')"
-                              title="按引擎写盘日志回滚该文件（连未提交的改动也能撤）"
-                              @click="gitDo('undo_sandbox_file', { path: c.path })">沙箱撤回</button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div v-else-if="gitStatus" class="dim" style="font-size:10.5px;margin-bottom:6px">
-              工作区没有改动（上表会列出每个改动文件，可逐个撤回）
-            </div>
-
-            <div class="row" style="flex-wrap:wrap;gap:6px">
-              <button class="ghost" :disabled="gitBusy || !can('git.commit')"
-                      title="在当前仓库目录里 git init：不需要填仓库名（名字就是目录名），默认分支 main，并做一次首次快照"
-                      @click="gitDo('init', { branch: 'main' })">初始化仓库</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.read')" @click="refreshGit(); gitRead('status')">状态</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.read')" @click="gitRead('log', { n: 20 })">历史</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.read')" @click="gitRead('diff')">差异</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.read')" @click="gitRead('branches')">分支列表</button>
-            </div>
-
-            <div class="row" style="flex-wrap:wrap;gap:6px">
-              <select v-model="commitType" class="commit-type" :title="COMMIT_TYPES.find(t => t.id === commitType)?.desc">
-                <option v-for="t in COMMIT_TYPES" :key="t.id" :value="t.id">{{ t.label }}</option>
-              </select>
-              <input v-model="commitMsg" placeholder="提交描述（不写前缀）" style="flex:1;min-width:180px" />
-              <button class="ghost" :disabled="gitBusy || !can('git.commit')" @click="gitDo('stage')">暂存全部</button>
-              <button :disabled="gitBusy || !can('git.commit')" @click="gitDo('commit', { message: commitFull })">提交</button>
-            </div>
-            <div class="dim mono" style="font-size:10.5px;margin:-2px 0 6px;word-break:break-all">
-              将提交：{{ commitFull }}
-            </div>
-
-            <div class="row" style="flex-wrap:wrap;gap:6px">
-              <input v-model="remoteUrl" placeholder="远端仓库地址（本地裸仓库路径或 https/ssh）" style="flex:1;min-width:170px" />
-              <button class="ghost" :disabled="gitBusy || !can('git.remote')" @click="gitDo('set_remote', { name: 'origin', url: remoteUrl })">设置远端</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.remote')" @click="gitDo('fetch')">获取</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.remote')" @click="gitDo('pull')">拉取</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.remote')" @click="gitDo('push')">推送</button>
-              <button :disabled="gitBusy || !can('git.remote')" @click="gitDo('sync')">一键同步</button>
-            </div>
-            <div v-if="!can('git.remote')" class="dim" style="font-size:10.5px;margin:-2px 0 6px">
-              远端同步需要「甲方模式」或「开发者模式」（当前：{{ currentMode?.name }}）
-            </div>
-
-            <div class="row" style="flex-wrap:wrap;gap:6px">
-              <input v-model="branchInput" placeholder="新分支名" style="max-width:130px" />
-              <button class="ghost" :disabled="gitBusy || !can('git.branch')" @click="gitDo('new_branch', { name: branchInput })">新建并切换</button>
-              <input v-model="switchTarget" placeholder="要切换到的分支" style="max-width:120px" />
-              <button class="ghost" :disabled="gitBusy || !can('git.branch')" @click="gitDo('switch', { name: switchTarget })">切换</button>
-              <input v-model="mergeSource" placeholder="合并源分支" style="max-width:120px" />
-              <button class="ghost" :disabled="gitBusy || !can('git.branch')" @click="gitDo('merge', { source: mergeSource })">合并</button>
-            </div>
-
-            <div class="row" style="flex-wrap:wrap;gap:6px">
-              <input v-model="undoPathInput" placeholder="文件路径" style="max-width:180px" />
-              <button class="ghost" :disabled="gitBusy || !can('git.commit')" @click="gitDo('undo', { path: undoPathInput })">撤回该文件</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.commit')" @click="gitDo('undo_sandbox_file', { path: undoPathInput })">沙箱撤回该文件</button>
-              <button class="ghost" :disabled="gitBusy || !can('git.commit')" @click="gitDo('undo_sandbox', { steps: 1 })">沙箱撤回一步</button>
-            </div>
-            <pre v-if="gitOut" style="max-height:170px">{{ gitOut }}</pre>
         </div>
 
         <div class="panel grow">
@@ -1508,18 +1929,13 @@ onUnmounted(() => {
                       : '提需求 → 系统反复体检/派工/开发/机械验收 → 交付报告'"
                     @click="startNight">{{ night.busy ? '夜班进行中…'
                       : (night.goalMode ? '全自主开始' : '开始夜班') }}</button>
-            <label class="dim" style="font-size:10.5px;display:flex;align-items:center;gap:3px">
-              预算
-              <input type="number" min="0.1" step="0.5" v-model.number="night.hours"
-                     style="width:64px" /> 小时
-            </label>
-            <!-- 花费上限：自己填，超过就自动收工（防止跑飞了烧钱） -->
-            <label class="dim" style="font-size:10.5px;display:flex;align-items:center;gap:3px"
-                   title="每夜的远端花费硬上限（人民币）。超过就立刻收工，收工原因写「花费到上限」。填 0 = 不设上限">
-              上限
-              <input type="number" min="0" step="0.5" v-model.number="night.maxCny"
-                     style="width:64px" /> 元
-            </label>
+            <!-- 两步法第一步：先估算花费（构建蓝图 + 估算金额），用户据此充值，再开工。
+                 不再有"上限/预算"输入框：唯一停机线 = 系统总预算 ×1.05，写在 .sixcoder/budget.json -->
+            <button class="ghost tiny" :disabled="night.busy || night.estimateBusy || !can('agent.run')
+                    || !form.repo || !(night.goalMode ? night.goal.trim() : form.requirement.trim())"
+                    :title="night.goalMode ? '用目标模式构建蓝图并估算需要多少钱（不跑夜班）'
+                            : '构建蓝图并估算需要多少钱（不跑夜班）'"
+                    @click="estimateNight">{{ night.estimateBusy ? '估算中…' : '① 估算花费' }}</button>
             <!-- 目标代码规模：约束按规模分级；每级到底管什么，见「需求帮助」里那张表 -->
             <label class="dim" style="font-size:10.5px;display:flex;align-items:center;gap:3px">
               规模
@@ -1532,6 +1948,9 @@ onUnmounted(() => {
                     title="需求怎么写、规模怎么选、字段怎么填"
                     @click="settingsTab = 'help'; showSettings = true">帮助</button>
           </div>
+          <!-- 两步法第一步的结果：预计需要多少钱（token × 用户填的单价）+ 唯一停机线说明 -->
+          <div v-if="isClientMode && night.estimateText"
+               style="margin-top:6px;border:1px solid var(--line);border-radius:6px;padding:8px;white-space:pre-wrap;font-size:11px">{{ night.estimateText }}</div>
 
           <!-- 开发者模式：单任务，照人给的方案实现 -->
           <div v-else class="row" style="margin-top:8px;gap:10px;flex-wrap:wrap;align-items:flex-end">
@@ -1565,6 +1984,10 @@ onUnmounted(() => {
                 {{ night.info.verified }}/{{ night.info.total }}</span>
               <span v-if="night.info?.policy" class="dim" style="font-size:10.5px">
                 协作方式：{{ night.info.policy }}</span>
+              <!-- 钱的三件事：系统预算（唯一停机线的基准）、停机阈值、实际花费 -->
+              <span v-if="night.sysBudget" class="badge b-acc">系统预算 ¥{{ night.sysBudget.toFixed(2) }}</span>
+              <span v-if="night.stopThreshold" class="badge b-warn">停机线 ¥{{ night.stopThreshold.toFixed(2) }}</span>
+              <span v-if="night.spent != null" class="badge b-ok">已花 ¥{{ night.spent.toFixed(2) }}</span>
             </div>
             <div v-if="night.lines.length" class="table-wrap" style="max-height:150px;margin-top:6px">
               <div v-for="(l, i) in night.lines.slice(-60)" :key="i"
@@ -1623,7 +2046,7 @@ onUnmounted(() => {
         </div>
 
       <!-- ============ 右栏 ============ -->
-      <div class="col col-right">
+      <div class="col col-right" v-show="!rightCollapsed">
         <div class="panel">
           <div class="panel-title">节点</div>
           <div v-if="!nodes.length" class="empty">暂无</div>
@@ -1696,293 +2119,169 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- ============ 远端模型（顶栏「远端」按钮直达） ============ -->
-    <div v-if="showRemoteModal" class="modal-mask" @click.self="showRemoteModal = false">
-      <div class="modal" style="max-width:620px">
+    <!-- ============ 厂商配置（二级弹窗：点厂商矩形弹出来） ============ -->
+    <div v-if="providerModal && providerDraft" class="modal-mask"
+         style="z-index:120" @click.self="closeProviderModal()">
+      <div class="modal" style="max-width:720px">
         <div class="modal-head">
-          <strong>远端模型（DeepSeek）</strong>
-          <span class="badge" :class="remote.available ? 'b-ok' : 'b-dim'">
-            {{ remote.available ? '可用' : '未配置' }}
+          <strong>{{ providerDraft.label || providerDraft.id }} 配置</strong>
+          <span class="badge" :class="providerById(providerDraft.id)?.key_configured ? 'b-ok' : 'b-dim'">
+            {{ providerById(providerDraft.id)?.key_configured ? 'key 已配置' : '未配置 key' }}
           </span>
           <span class="spacer"></span>
-          <button class="ghost tiny" @click="showRemoteModal = false">关闭 ✕</button>
+          <button class="ghost tiny" @click="closeProviderModal()">关闭 ✕</button>
         </div>
         <div class="modal-body">
-          <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.6">
-            下面是<b>已保存的模型</b>，按协议分成两类。点开任意一个就能改它的连接、参数、key、价格与闲时设置。
-            <b>一次运行只用它标着「当前」的那一个</b>；其余只是存着备用。
-            网址与 key 按协议族自动隔离（DeepSeek 走官方、OpenAI 兼容继承全局），互不串用。
-            key 只存本机设置文件，界面只显示掩码。
+          <!-- 返回上一级：回到远端厂商列表（2026-11-18 用户口径） -->
+          <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
+            <button class="ghost tiny" style="font-size:12px;padding:3px 10px"
+                    @click="closeProviderModal(); showRemotePanel = true">← 返回厂商列表</button>
+            <span class="dim" style="font-size:10.5px">当前：{{ providerDraft.label || providerDraft.id }}</span>
+          </div>
+          <!-- 连接 -->
+          <div class="mp-sec">
+            <div class="mp-sec-t">连接</div>
+            <div class="mp-grid">
+              <label><span>显示名</span><input v-model="providerDraft.label" placeholder="厂商显示名" /></label>
+              <label><span>请求网址</span><input v-model="providerDraft.base_url" class="mono" placeholder="https://…" /></label>
+            </div>
+            <div class="dim" style="font-size:10.5px;margin-top:4px;line-height:1.6">
+              每家厂商的 key 各自独立，不会跨厂商兜底（把 A 家的 key 发到 B 家端点必然 401）。
+              key 只存本机设置文件，界面只显示掩码。key 在下面<b>每一把的卡片里</b>分别填。
+            </div>
           </div>
 
-          <!-- ① 已保存的模型：两类分组的卡片列表，点开看完整配置 -->
-          <div class="row" style="gap:8px;align-items:center;margin-bottom:10px">
-            <button class="ghost tiny" @click="addProfile(false)">＋ DeepSeek 模型</button>
-            <button class="ghost tiny" @click="addProfile(true)">＋ OpenAI 兼容模型</button>
-            <span class="spacer"></span>
-            <span class="dim" style="font-size:11px">共 {{ remoteModels.length }} 个</span>
+          <!-- 思考强度等级 -->
+          <div class="mp-sec">
+            <div class="mp-sec-t">拥有的思考强度等级</div>
+            <div class="row" style="gap:8px;flex-wrap:wrap">
+              <button v-for="e in EFFORT_LEVELS" :key="e" class="ghost tiny"
+                      :class="{ 'sel': providerDraft.efforts.includes(e) }"
+                      @click="draftToggleEffort(e)">{{ e }}</button>
+            </div>
+            <div class="dim" style="font-size:10.5px;margin-top:4px;line-height:1.6">
+              勾选这家厂商**实际支持**的档位。GLM 官方只有 low / high / max（没有 none，
+              "不思考"要用 thinking.type=disabled，而 GLM-5.3 起已不支持禁用）；
+              DeepSeek 是 none / low / high / max 四档。
+            </div>
           </div>
 
-          <div v-for="g in modelGroups" :key="g.key" class="mp-group">
-            <div class="mp-group-head">
-              <b>{{ g.title }}</b>
-              <span class="badge b-acc">{{ g.tag }}</span>
-              <span class="dim" style="font-size:11px">{{ g.items.length }} 个</span>
+
+          <!-- ===== key 卡片列表（第一层，和厂商卡片一样） ===== -->
+          <div class="mp-sec" v-if="!keyViewKey">
+            <div class="mp-sec-t">key（{{ (providerDraft.keys || []).length }} 把）
+              <span class="dim" style="font-weight:400;font-size:10.5px">｜点卡片进去配这把 key 的模型</span>
               <span class="spacer"></span>
-              <span class="dim" style="font-size:10.5px">{{ g.desc }}</span>
+              <button class="ghost tiny" @click="draftAddKey()">＋ 新增 key</button>
             </div>
-            <div v-if="!g.items.length" class="dim" style="font-size:11px;padding:6px 2px">
-              这一类还没有保存的模型，点上面的按钮加一个。
+            <div v-if="!(providerDraft.keys || []).length"
+                 class="dim" style="font-size:11px;padding:12px 2px;text-align:center">
+              这家厂商还没有 key。
+              <button class="primary tiny" style="margin-left:8px" @click="draftAddKey()">＋ 新增第一把 key</button>
             </div>
-
-            <div v-for="p in g.items" :key="p.id" class="mp-card" :class="{ 'is-open': openProfileId === p.id }">
-              <!-- 卡片头：一眼看清是谁、什么类型、当前用哪个、档位与价格摘要 -->
-              <div class="mp-head" @click="toggleProfile(p)">
-                <span class="mp-caret">{{ openProfileId === p.id ? '▾' : '▸' }}</span>
-                <div class="mp-head-main">
-                  <div class="mp-title">
-                    {{ p.label || p.id }}
-                    <span v-if="isCurrent(p)" class="badge b-ok">当前</span>
-                    <span v-if="p._draft" class="badge b-warn">未保存</span>
-                    <span v-else-if="!p.enabled" class="badge b-dim">停用</span>
-                  </div>
-                  <div class="dim mono" style="font-size:10.5px">
-                    {{ p.id }} · {{ p.model || '（未填模型名）' }}
-                  </div>
-                </div>
-                <div class="mp-head-meta">
-                  <div class="dim" style="font-size:10.5px">{{ effortSummary(p) }}</div>
-                  <div class="mono" style="font-size:10.5px">闲时 ¥{{ priceLine(p) }}</div>
-                </div>
-              </div>
-
-              <!-- 展开：这个模型的全部配置 -->
-              <div v-if="openProfileId === p.id" class="mp-body">
-                <div class="mp-sec">
-                  <div class="mp-sec-t">协议类型</div>
-                  <div class="row" style="gap:8px;margin-bottom:0">
-                    <button class="ghost tiny" :class="{ 'sel': !isOpenAI(p) }" @click="setKind(p, false)">DeepSeek（四档）</button>
-                    <button class="ghost tiny" :class="{ 'sel': isOpenAI(p) }" @click="setKind(p, true)">OpenAI 兼容（单档）</button>
-                    <span class="dim" style="font-size:10.5px">切换会重置档位与默认网址，改完记得保存</span>
-                  </div>
-                </div>
-
-                <div class="mp-sec">
-                  <div class="mp-sec-t">连接</div>
-                  <div class="mp-grid">
-                    <label><span>显示名</span><input v-model="p.label" placeholder="给这个模型起个名字" /></label>
-                    <label><span>模型名</span><input v-model="p.model" class="mono" placeholder="deepseek-flash / gpt-4o" /></label>
-                    <label style="grid-column:1/-1"><span>请求网址</span>
-                      <input v-model="p.base_url" class="mono"
-                             :placeholder="isOpenAI(p) ? 'https://open.bigmodel.cn/api/paas/v4（留空则继承全局网址）' : 'https://api.deepseek.com（留空则自动用 DeepSeek 官方地址）'" /></label>
-                  <div class="dim" style="font-size:10.5px;margin-top:3px;line-height:1.6">
-                    留空时按<b>协议类型</b>自动选：DeepSeek 走官方地址，OpenAI 兼容继承全局网址。
-                    两者互不串用，所以 DeepSeek 模型不用手填网址也能连。
-                  </div>
-                    <label style="grid-column:1/-1"><span>API key</span>
-                      <input v-model="p.keyInput" type="password" placeholder="sk-...（留空 = 不修改已有 key）" /></label>
-                  </div>
-                  <div class="dim" style="font-size:10.5px;margin-top:4px;line-height:1.6">
-                    已保存的 key：
-                    <span class="mono">{{ p.key_masked || (p.key_configured ? '已配置' : '未设置') }}</span>
-                    <template v-if="!p.key_configured">
-                      · {{ isOpenAI(p) ? 'OpenAI 兼容模型会继承全局 key' : 'DeepSeek 不会继承别家的全局 key，请在这里填一把' }}
-                    </template>
-                    <br />网址 / 协议 / key 必须属于同一家，否则会报 401。
-                  </div>
-                </div>
-
-                <div class="mp-sec">
-                  <div class="mp-sec-t">请求参数</div>
-                  <div class="mp-grid">
-                    <label><span>最大输出 token</span>
-                      <input type="number" min="0" v-model.number="p.max_output_tokens" />
-                      <small class="dim">0 = 由引擎按任务规模算</small></label>
-                    <label><span>temperature</span>
-                      <input type="number" min="0" max="2" step="0.1" v-model.number="p.temperature" /></label>
-                    <label><span>优先级</span>
-                      <input type="number" step="1" v-model.number="p.priority" />
-                      <small class="dim">数字小 = 自动挑选时优先</small></label>
-                    <label class="mp-check"><span>启用</span>
-                      <input type="checkbox" v-model="p.enabled" style="width:auto" /></label>
-                  </div>
-                </div>
-
-                <div class="mp-sec">
-                  <div class="mp-sec-t">思考强度</div>
-                  <template v-if="!isOpenAI(p)">
-                    <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:4px">
-                      <label v-for="d in EFFORT_DEFS" :key="d.v" class="mp-effort"
-                             :title="d.hint">
-                        <input type="checkbox" style="width:auto"
-                               :checked="(p.efforts || []).includes(d.v)"
-                               @change="toggleEffort(p, d.v)" />
-                        <span class="mono">{{ d.label }}</span>
-                      </label>
-                    </div>
-                    <div class="dim" style="font-size:10.5px;line-height:1.6">
-                      勾上的档位组成这个模型的阶梯：系统按难度自动挑，同一档连续失败到阈值就升下一档，
-                      升到最深仍不过就停下来交报告。至少要留一个档位。
-                    </div>
-                  </template>
-                  <div v-else class="dim" style="font-size:11px;line-height:1.6">
-                    <span class="badge b-dim">固定单档 off</span>
-                    OpenAI 兼容端点不认 reasoning_effort 多档切换，这里只提供基础请求框架，
-                    不参与思考强度升降。适用于智谱 / 混元 / 其它 OpenAI 兼容服务。
-                  </div>
-                </div>
-
-                <div class="mp-sec">
-                  <div class="mp-sec-t">价格（人民币 / 每百万 token）</div>
-                  <div class="mp-price-t dim">闲时价</div>
-                  <div class="mp-grid3">
-                    <label><span>未命中输入</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.offpeak.in_miss" /></label>
-                    <label><span>命中输入</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.offpeak.in_hit" /></label>
-                    <label><span>输出</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.offpeak.out" /></label>
-                  </div>
-                  <div class="mp-price-t dim">高峰价</div>
-                  <div class="mp-grid3">
-                    <label><span>未命中输入</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.peak.in_miss" /></label>
-                    <label><span>命中输入</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.peak.in_hit" /></label>
-                    <label><span>输出</span><input type="number" step="0.01" min="0" v-model.number="p.pricing.peak.out" /></label>
-                  </div>
-                  <div class="dim" style="font-size:10.5px;margin-top:4px">
-                    价格只用于"算钱"和报告，不影响实际调用。下方「闲时设置」决定哪些时段按闲时价计。
-                  </div>
-                </div>
-
-                <div class="mp-sec">
-                  <div class="mp-sec-t">闲时设置 <span class="dim" style="font-weight:400;font-size:10.5px">（全局共用，改一次对所有模型生效）</span></div>
-                  <div class="row" style="gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
-                    <span class="dim" style="font-size:10.5px">高峰时段</span>
-                    <input v-model="windowForm.range1" class="mono" placeholder="09:00-12:00" style="width:110px" />
-                    <input v-model="windowForm.range2" class="mono" placeholder="14:00-18:00" style="width:110px" />
-                    <label class="dim mp-effort" style="font-size:10.5px">
-                      <input type="checkbox" v-model="windowForm.weekdays_only" style="width:auto" /> 仅工作日
-                    </label>
-                  </div>
-                  <div class="dim" style="font-size:10.5px;margin-bottom:4px">
-                    上面之外的时间（含周末）都按闲时价；时区固定按北京时间判断。
-                  </div>
-                  <button class="ghost tiny" @click="savePricingWindow()">保存闲时时段</button>
-                </div>
-
-                <div class="row" style="gap:8px;margin:10px 0 0">
-                  <button class="primary tiny" @click="saveProfile(p)">保存这个模型</button>
-                  <button class="ghost tiny" @click="useProfile(p)" :disabled="isCurrent(p) || p._draft">
-                    {{ isCurrent(p) ? '已是当前' : '设为当前' }}</button>
-                  <span class="spacer"></span>
-                  <button class="ghost tiny danger" @click="deleteProfile(p)">{{ p._draft ? '丢弃草稿' : '删除模型' }}</button>
+            <div v-else class="pv-cards" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+              <div v-for="(k, ki) in providerDraft.keys" :key="ki" class="pv-card"
+                   style="cursor:pointer;position:relative" @click="keyViewKey = k"
+                   :title="'点进去配置「' + (k.label || roleName(k.role)) + '」的模型'">
+                <button class="ghost tiny danger"
+                        style="position:absolute;top:4px;right:4px"
+                        title="删除这把 key（同步写入配置文件；编号会被下一把复用）"
+                        @click.stop="draftRemoveKey(k)">删除</button>
+                <div class="pv-name">{{ k.label || roleName(k.role) }}</div>
+                <div class="pv-sub dim">
+                  {{ roleName(k.role) }} ·
+                  key {{ k.key_configured ? (k.key_masked || '已配置') : '未配置' }} ·
+                  {{ (k.models || []).length }} 个模型
                 </div>
               </div>
             </div>
+            <div class="dim" style="font-size:10.5px;margin-top:8px;line-height:1.6">
+              新增 key 只需要 <b>起名字 + 选用途 + 填 key</b>（保存按钮在 key 详情页里），
+              模型自动按厂商默认配好，点进具体 key 再改它的模型。
+              用途 = 角色：写作者写码，审核者 1/2 死局时协商（多数决）。删除立即写进配置文件。
+            </div>
           </div>
 
-          <!-- ② 运行规则：只读说明 + 升档阈值 -->
-          <details style="margin-top:14px">
-            <summary class="dim" style="font-size:12px;cursor:pointer;font-weight:600">
-              运行规则：档位怎么切、何时升档
-            </summary>
-            <div class="dim" style="font-size:11.5px;line-height:1.7;margin-top:6px">
-              当前模型支持的档位：<span class="mono">
-                {{ (remoteLadder || []).map(x => x.effort).join(' → ') || '（未配置）' }}</span><br />
-              选档规则：<b>规格/方案 → 最深一档</b>；<b>样板/校验/日志/适配 → 不思考</b>；
-              <b>写代码 → 按难度自动挑</b>（依据：依赖数、函数数、契约示例数、历史失败次数、是否还是空桩）。<br />
-              失败时只在<b>同一个模型</b>内升档；升到最深还不过就停下来交报告。
+          <!-- ===== 单个 key 详情（第二层：模型配置在这里） ===== -->
+          <div class="mp-sec" v-else>
+            <div class="mp-sec-t" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <button class="ghost tiny" style="font-size:12px;padding:3px 10px"
+                      @click="keyViewKey = null">← 返回 key 列表</button>
+              <strong>{{ keyViewKey.label || roleName(keyViewKey.role) }}</strong>
+              <span class="dim" style="font-weight:400;font-size:10.5px">｜{{ roleName(keyViewKey.role) }}</span>
+              <span class="spacer" style="flex:1"></span>
+              <button class="ghost tiny danger"
+                      @click="draftRemoveKey(keyViewKey); keyViewKey = null"
+                      title="删除后它的编号（k2/k3…）会被下一把新 key 自动复用">删除这把 key</button>
             </div>
-            <div class="dim mono" style="font-size:11px;margin-top:4px">
-              完整阶梯：{{ (remoteLadder || []).map(x => x.profile_id + ':' + x.effort).join(' → ') || '（空）' }}
+            <div class="mp-grid">
+              <label><span>用途（角色）</span>
+                <select v-model="keyViewKey.role" @change="draftSetRole(keyViewKey, keyViewKey.role)">
+                  <option value="writer">写作者 ★</option>
+                  <option value="reviewer1">审核者 1</option>
+                  <option value="reviewer2">审核者 2</option>
+                  <option value="">备用（不参与）</option>
+                </select>
+              </label>
+              <label><span>名字</span>
+                <input v-model="keyViewKey.label" placeholder="如：主账号 / 审核小号" /></label>
+              <label style="grid-column:1/-1"><span>API key</span>
+                <input v-model="keyViewKey.api_key" type="password"
+                       :placeholder="keyViewKey.key_configured ? ('已配置：' + (keyViewKey.key_masked || '') + '（留空 = 不修改）') : 'sk-…（这把 key）'" /></label>
             </div>
-            <div class="row" style="gap:8px;align-items:center;margin-top:8px">
-              <span class="dim" style="font-size:11px">升档阈值</span>
-              <input type="number" min="1" max="9" v-model.number="escalateAfter"
-                     style="width:56px" @change="saveRemote({escalate_after: escalateAfter})" />
-              <span class="dim" style="font-size:11px">次（同一档连续失败几次才升思考强度）</span>
+            <div v-if="keyViewKey._draft" class="dim"
+                 style="font-size:10.5px;margin-top:8px;line-height:1.6">
+              新 key 的模型保存时会**自动按厂商默认配好**（deepseek：flash + pro）。
+              保存后回到列表点进来，就能增删改这把 key 自己的模型。
             </div>
-          </details>
-
-          <div v-if="currentMode?.id === 'developer'" class="row" style="gap:8px;align-items:center;margin-top:10px">
-            <label class="dim" style="font-size:11.5px;display:flex;align-items:center;gap:6px">
-              <input type="checkbox" :checked="remote.remote?.dev_remote" style="width:auto"
-                     @change="saveRemote({ dev_remote: $event.target.checked })" />
-              开发者模式允许调用远端（默认关；打开等于一定程度加强本地模型能力）
-            </label>
-          </div>
-          <div v-if="currentMode?.id === 'client'" class="dim" style="font-size:11px;margin-top:10px">
-            甲方模式（= 夜班）：远端<b>强制开启</b>，没有开关 —— 上限就是远端能力。
-          </div>
-          <div v-if="currentMode?.id === 'readonly'" class="dim" style="font-size:11px;margin-top:10px">
-            只读模式：远端<b>强制关闭</b>。
-          </div>
-
-          <!-- ③ 用量与花费：只读 -->
-          <div class="panel-title" style="margin-top:14px">用量与花费（人民币）</div>
-          <table>
-            <tr><td class="dim" style="width:130px">调用次数</td><td class="mono">{{ remote.usage?.calls ?? 0 }}</td></tr>
-            <tr><td class="dim">prompt / completion</td>
-                <td class="mono">{{ remote.usage?.prompt_tokens ?? 0 }} / {{ remote.usage?.completion_tokens ?? 0 }}</td></tr>
-            <tr><td class="dim">缓存命中率</td>
-                <td class="mono">{{ ((remote.usage?.cache_hit_rate ?? 0) * 100).toFixed(0) }}%
-                  <span class="dim" style="font-size:11px">（命中输入便宜 50 倍：flash 0.02 vs 1 元/百万）</span></td></tr>
-            <tr><td class="dim">reasoning tokens</td><td class="mono">{{ remote.usage?.reasoning_tokens ?? 0 }}</td></tr>
-            <tr><td class="dim">高峰（全价）</td>
-                <td class="mono">{{ remote.usage?.peak?.calls ?? 0 }} 次 · ¥{{ (remote.usage?.peak?.cost_cny ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">空闲（半价）</td>
-                <td class="mono">{{ remote.usage?.offpeak?.calls ?? 0 }} 次 · ¥{{ (remote.usage?.offpeak?.cost_cny ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">总花费</td><td class="mono">¥{{ (remote.usage?.cost_cny ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">缓存省下</td><td class="mono">¥{{ (remote.usage?.cache_saved_cny ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">高峰时段</td>
-                <td class="mono">{{ (remote.usage?.window?.ranges || []).join('、') || '09:00-12:00、14:00-18:00' }}
-                  （北京时间工作日；其余含周末半价）</td></tr>
-          </table>
-          <details style="margin-top:6px">
-            <summary class="dim" style="font-size:11.5px;cursor:pointer">按模型 / 按思考档位拆账</summary>
-            <table v-if="remote.usage?.by_model && Object.keys(remote.usage.by_model).length" style="margin-top:6px">
-              <tr><th>按模型</th><th>次数</th><th>输入</th><th>输出</th><th>花费</th></tr>
-              <tr v-for="(v, k) in remote.usage.by_model" :key="k">
-                <td class="mono">{{ k }}</td><td class="mono">{{ v.calls }}</td>
-                <td class="mono">{{ v.prompt_tokens }}</td><td class="mono">{{ v.completion_tokens }}</td>
-                <td class="mono">¥{{ (v.cost_cny ?? 0).toFixed(4) }}</td>
-              </tr>
-            </table>
-            <table v-if="remote.usage?.by_effort && Object.keys(remote.usage.by_effort).length" style="margin-top:6px">
-              <tr><th>按思考档位</th><th>次数</th><th>reasoning</th><th>花费</th></tr>
-              <tr v-for="(v, k) in remote.usage.by_effort" :key="k">
-                <td class="mono">{{ k }}</td><td class="mono">{{ v.calls }}</td>
-                <td class="mono">{{ v.reasoning_tokens }}</td>
-                <td class="mono">¥{{ (v.cost_cny ?? 0).toFixed(4) }}</td>
-              </tr>
-            </table>
-          </details>
-
-          <details style="margin-top:10px">
-            <summary class="dim" style="font-size:12px;cursor:pointer;font-weight:600">
-              回归用例库（{{ regressions.length }} 组）
-            </summary>
-            <div class="dim" style="font-size:11.5px;margin:6px 0">
-              远端成功过的判据，同一需求每次运行都会强制检查 —— 登记后同类错误不会再静默通过。
+            <template v-else>
+              <div class="dim" style="font-size:10px;margin:10px 0 2px 2px">
+                这把 key 用的模型（{{ (keyViewKey.models || []).length }} 个）
+                <button class="ghost tiny" style="margin-left:8px" @click="draftAddModelTo(keyViewKey)">＋ 添加模型</button>
+              </div>
+              <div v-if="!(keyViewKey.models || []).length" class="dim" style="font-size:11px;padding:6px 2px">
+                这把 key 还没配模型（审核者会借写作者的模型但用本 key 发请求）。
+              </div>
+              <div v-for="(m, mi) in (keyViewKey.models || [])" :key="mi" class="pv-model">
+                <div class="row" style="gap:8px;align-items:center">
+                  <label style="flex:1;min-width:120px"><span class="dim" style="font-size:10px">模型名</span>
+                    <input v-model="m.model" class="mono" placeholder="deepseek-flash / glm-5.3 / gpt-4o" /></label>
+                  <label style="flex:1;min-width:100px"><span class="dim" style="font-size:10px">ID</span>
+                    <input v-model="m.id" class="mono" placeholder="flash" /></label>
+                  <label style="flex:1;min-width:110px"><span class="dim" style="font-size:10px">显示名</span>
+                    <input v-model="m.label" placeholder="给这个模型起个名字" /></label>
+                  <button class="ghost tiny danger" @click="draftRemoveModelOf(keyViewKey, m)">删除</button>
+                </div>
+                <div class="row" style="gap:8px;align-items:center;margin-top:5px">
+                  <label style="width:130px"><span class="dim" style="font-size:10px">最大输出 token</span>
+                    <input type="number" min="0" v-model.number="m.max_output_tokens" /></label>
+                  <label style="width:100px"><span class="dim" style="font-size:10px">温度</span>
+                    <input type="number" min="0" max="2" step="0.1" v-model.number="m.temperature" /></label>
+                  <label style="width:100px"><span class="dim" style="font-size:10px">优先级</span>
+                    <input type="number" v-model.number="m.priority" /></label>
+                  <label style="width:150px" title="这个模型支不支持原生 function calling。选「不支持」时引擎不再往请求里挂 tools，改走文本协议；自动判断 = 查本地能力表，踩过坑会自动记住">
+                    <span class="dim" style="font-size:10px">原生工具调用</span>
+                    <select v-model="m.supports_tools">
+                      <option value="">自动判断</option>
+                      <option value="true">支持</option>
+                      <option value="false">不支持</option>
+                    </select>
+                  </label>
+                  <label class="dim" style="font-size:10.5px;display:flex;align-items:center;gap:4px">
+                    <input type="checkbox" v-model="m.enabled" style="width:auto" /> 启用
+                  </label>
+                  <span class="dim mono" style="font-size:10px">思考 {{ (m.efforts || []).join('/') || '继承厂商' }}</span>
+                </div>
+              </div>
+            </template>
+            <div class="row" style="gap:8px;margin-top:10px">
+              <span class="spacer"></span>
+              <button class="primary tiny" @click="saveProviderDraft()">保存这个 key</button>
             </div>
-            <table v-if="regressions.length">
-              <tr><th style="width:60px">id</th><th>模块</th><th>来源</th><th>登记时间</th><th style="width:70px"></th></tr>
-              <tr v-for="r in regressions" :key="r.id">
-                <td class="mono">#{{ r.id }}</td>
-                <td class="mono">{{ r.module }}</td>
-                <td class="dim">{{ r.source }}</td>
-                <td class="dim" style="font-size:11.5px">{{ r.created_at }}</td>
-                <td><button class="ghost tiny" @click="deleteRegression(r.id)">删除</button></td>
-              </tr>
-            </table>
-            <div v-else class="dim" style="font-size:11.5px">
-              还没有回归用例。远端协助成功一次后会自动登记。
+            <div class="dim" style="font-size:10.5px;margin-top:4px;line-height:1.6">
+              模型名留空的那条会被忽略；ID 必须填（留空时用模型名当 ID）。「最大输出 token」填 0 = 由引擎按任务规模算。
+              key 输入框留空保存 = 不修改已有。
             </div>
-            <div class="row" style="gap:8px;margin-top:8px" v-if="regressions.length">
-              <button class="ghost tiny" @click="loadRegressions()">刷新</button>
-              <button class="ghost tiny" @click="clearRegressions()">清空全部</button>
-            </div>
-          </details>
-
-          <div class="dim" style="font-size:11.5px;margin-top:10px">
-            命令行等价：<code>python cli.py remote --key sk-...</code>　|　交接：<code>python cli.py handoff &lt;task&gt; --node N --remote --apply</code>
           </div>
         </div>
       </div>

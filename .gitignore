@@ -44,6 +44,7 @@ projects/**/__pycache__/
 llm-config.yml
 .env
 prototype/data/settings.json
+prototype/data/capability.json
 
 # 工具/编辑器杂项
 .qwen/
@@ -108,3 +109,26 @@ projects/*
 # 全量自检输出（本地运行产物，可随时重建）
 /prototype/checks_full_*.txt
 /checks_full_*.txt
+
+# ── 本地草稿 / 阶段性备份 / 需求原文（2026-11-19 上传前清理）──────────────
+# 为什么：引擎仓库必须**不含任何具体项目内容**；需求原文、临时隔离目录、
+# 诊断碎片、被删文件的暂存目录都属于"本机工作现场"，不属于引擎源码。
+/_requirements/
+/prototype/.removed_*/
+/prototype/.tmp_*/
+/prototype/_logs/
+/prototype/_fix_acct.py
+/prototype/checks_last.txt
+/prototype/diag*.json
+/prototype/proto.db
+/prototype/web/_mv2.py
+/开发文档.md.bak-*
+
+# 本机设置备份（含曾经的 key 掩码与个人配置）
+/prototype/data/settings.json*
+
+# 第三方无障碍扫描库（axe-core，541K）：不随仓库分发。
+# core/browser.py 取不到就**跳过 a11y 扫描**（不阻塞主流程）；
+# 需要 D7 的 a11y 检查时自行下载放到 prototype/data/axe.min.js。
+# 另外它内部大量 18 位数字串会被隐私扫描误判成身份证号，入库只会制造噪声。
+/prototype/data/axe.min.js

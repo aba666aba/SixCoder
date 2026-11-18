@@ -46,9 +46,8 @@ def on(kind, payload):
 
 
 before = remote.usage_summary("")
-res = company.night(DST, REQ, "qwen2.5-coder:7b", hours=0.05, use_remote=True,
-                    contract_file=str(SRC / ".sixcoder" / "contract.txt"), emit=on,
-                    max_cny=1.0)
+res = company.night(DST, REQ, "qwen2.5-coder:7b", use_remote=True,
+                    contract_file=str(SRC / ".sixcoder" / "contract.txt"), emit=on)
 after = remote.usage_summary("")
 print(f"\n结果：{res.verified}/{res.total}｜{res.spent_s:.0f}s｜{res.reason[:160]}")
 print(f"本次调用 {after['calls'] - before['calls']} 次，¥{round(after['cost_cny'] - before['cost_cny'], 4)}")

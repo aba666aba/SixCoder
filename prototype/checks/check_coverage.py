@@ -296,6 +296,67 @@ def main() -> int:
           str(weird["caps"]["cap.http"]))
     check("unsupported 不计入 done", coverage.done_count(weird) == 0)
 
+    print("[10] 失败证据必须带上'判据实际发了什么请求'（2026-11-18 血泪）")
+    # 坑：detail 原来只有 actual/expected，没有请求体 → 远端盯着源码瞎猜键名，
+    #     实测猜了 5 轮（topicIds/preferenceList/...）都没猜中探针真发的 `items`。
+    # 钉三件事：① 纯函数提取 ② coverage.run 的失败分支真调用 ③ 报告渲染层没截断。
+    ws_r = make_ws()
+    (ws_r / "main.py").write_text(
+        'async def app(scope, receive, send):\n'
+        '    if scope["type"] == "http":\n'
+        '        await send({"type": "http.response.start", "status": 200,\n'
+        '                    "headers": [(b"content-type", b"application/json")]})\n'
+        '        await send({"type": "http.response.body", "body": b\'{"total": 0}\'})\n',
+        encoding="utf-8")
+    req_cap = {"id": "cap.prefs.submit", "desc": "提交志愿",
+               "probe": {"kind": "http", "steps": [
+                   {"method": "POST", "path": "/api/v1/prefs/",
+                    "json": {"items": [{"topic_id": "1", "rank": 1}]},
+                    "expect_status": 201, "expect_json": {"total": 3}}]},
+               "funcs_est": 1}
+    cov_r = coverage.run(bp_of([req_cap]), ws_r, timeout=5)
+    det_r = cov_r["caps"]["cap.prefs.submit"]["detail"]
+    check("断言失败的条目仍是 absent（补全证据不改判定）",
+          cov_r["caps"]["cap.prefs.submit"]["status"] == "absent", det_r[:200])
+    check("失败详情带请求体（判据实发的 items 键名可见）",
+          "items" in det_r and "请求体" in det_r, det_r[:200])
+    check("失败详情带期望值（状态 + 字段）",
+          "期望状态=201" in det_r and "期望字段" in det_r, det_r[:200])
+    # 实际响应体：远端必须看到"产物返回了什么字段"才能对准契约
+    # （实测 trace 要 unacceptable_count、产物返回 unacceptable 列表 → 字段名错位，
+    #   远端看不见全貌就误改 topic 键改了 5 轮）
+    check("失败详情带实际响应体（产物返回的字段全貌可见）",
+          "实际响应" in det_r and "total=0" in det_r, det_r[:400])
+    req_lines = [ln for ln in det_r.splitlines() if "请求体=" in ln]
+    check("请求证据行存在且 < 300（下游 [:300] 不会静默切掉）",
+          bool(req_lines) and all(len(ln) < 300 for ln in req_lines),
+          str([(len(ln), ln[:80]) for ln in req_lines]))
+    resp_lines = [ln for ln in det_r.splitlines() if "实际响应" in ln]
+    check("响应证据行存在且 < 300（不被下游截断）",
+          bool(resp_lines) and all(len(ln) < 300 for ln in resp_lines),
+          str([(len(ln), ln[:80]) for ln in resp_lines]))
+    # 纯函数：没有"第N步"就返回空，不误加
+    check("无失败步骤号时不硬加请求段",
+          coverage.failed_step_request({"steps": [{"path": "/x"}]}, "整体失败") == "")
+    # 报告渲染层：整仓报告必须把请求体交到远端
+    from core import wholerepo  # noqa: E402
+    rep_r = wholerepo.report_from_state(cap_cov=cov_r)
+    check("整仓报告保留 items 请求体（远端真能读到，不用猜）",
+          "items" in rep_r._text and "请求体" in rep_r._text, rep_r._text[:300])
+    check("整仓报告保留实际响应体（字段名对照能读到）",
+          "实际响应" in rep_r._text and "total=0" in rep_r._text, rep_r._text[:300])
+    # 工作单链（red_modules）也曾把详情截前 300 吃掉响应段 —— 钉住它也带上了
+    from core import openhouse  # noqa: E402
+    _bp_r = bp_of([req_cap])
+    # red_modules 按端点路径反查落点模块；/prefs/ 需要仓里有 app/prefs.py 才定位得到
+    (ws_r / "app").mkdir(exist_ok=True)
+    (ws_r / "app" / "prefs.py").write_text("# prefs 落点\n", encoding="utf-8")
+    _mods, _det = openhouse.red_modules(cov_r, _bp_r, ws=ws_r)
+    _all_ev = " ".join(sum(_det.values(), []))
+    check("工作单链也带实际响应（不被 red_modules 的 [:300] 吃掉）",
+          "实际响应" in _all_ev and "total=0" in _all_ev,
+          "mods=%s ev=%s" % (_mods, _all_ev[:200]))
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")

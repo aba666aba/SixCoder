@@ -95,11 +95,28 @@ def main() -> int:
     check("工作单（每单都变）放在最后", i_order > i_target and i_order > 0)
     check("铁律在最前（全局共享前缀）", p.find("铁律：") < i_src)
 
+    # 7) 真实源码钉死：company.py 三条写码路径**都必须有成功回落**（双向弹性）。
+    #    背景 2026-11-10：函数体主路（author_bodies）只升不降——升档 11-09 补通后，
+    #    模块升到 high/max 就锁死，简单模块也在用最贵档跑（实测 74% 花费在 max）。
+    #    修复 = 对齐另两条路（工作单路 tier_reset / 整文件路"解决即回最低档"）。
+    print("[4] 三条写码路径都有「成功回落」（防只升不降复发）")
+    src = (Path(__file__).resolve().parent.parent / "core" / "company.py"
+           ).read_text(encoding="utf-8")
+    n_reset = src.count('emit("tier_reset"')
+    check("工作单路与函数体主路都有 tier_reset 事件（≥2 处）", n_reset >= 2,
+          f"count={n_reset}")
+    check("整文件路：解决即回最低档", "tier_of[rel] = 0                     # 解决即回最低档" in src)
+    # 函数体主路的回落特征：elif ok 分支里 tier_of[rel] = 0（带中文注释块）
+    check("函数体主路：成功也回 tier 0",
+          "emit(\"tier_reset\", {\"order\": f\"函数体 {rel}\"" in src)
+    check("升档通道仍在（三条路共 ≥3 处升档写点）",
+          src.count("tier_of[rel] = lvl + 1") + src.count("tier_of[okey(o)] = lvl + 1") >= 3)
+
     print()
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")
         return 1
-    print("全部通过（阈值升档 / 解决回档 / 单独立档 / 偶发不升 / 前缀稳定）")
+    print("全部通过（阈值升档 / 解决回档 / 单独立档 / 偶发不升 / 前缀稳定 / 三路回落）")
     return 0
 
 

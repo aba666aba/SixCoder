@@ -108,7 +108,7 @@ def run_system_arm(ws: Path, requirement: str, hours: float,
     ws.mkdir(parents=True)
     before = _usage()
     t0 = time.time()
-    res = company.night(ws, requirement, "qwen2.5-coder:7b", hours=hours, use_remote=True,
+    res = company.night(ws, requirement, "qwen2.5-coder:7b", use_remote=True,
                         contract_file=contract_file)
     ms = int((time.time() - t0) * 1000)
     after = _usage()

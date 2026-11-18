@@ -78,6 +78,20 @@ def apply_fails(bp, fails: dict, *, limit: int = FAIL_DESCOPE) -> list[str]:
     for cid, n in (fails or {}).items():
         if int(n or 0) < limit:
             continue
+        # 地基保护（实测 2026-11-09）：只看失败次数会把 `topic.create_draft`、
+        # `batch.create` 这类**被多条能力依赖的主干**自动降级，下游全部失去前置，
+        # 于是覆盖停滞 → 每轮 replan → 一整夜 7 次重规划、零产出。
+        # 判据机械：有多少条能力的 deps 指向它。≥2 就不许自动放弃。
+        dependents = sum(1 for c in bp.caps if cid in (c.deps or []))
+        if dependents >= 2:
+            c = bp.by_id(cid)
+            if c is not None:
+                c.status = "absent"
+                c.attempts = 0
+                c.why = (f"连续 {n} 次失败，但被 {dependents} 条能力依赖（地基）→ "
+                         f"拒绝自动降级；需拆小切片或人工介入")
+            bp.notes.append(f"[地基保护] {cid} 被 {dependents} 条能力依赖，不降级")
+            continue
         if _bp.descope(bp, cid, f"连续 {n} 次切片尝试仍未通过 → 降级（避免一条能力吃掉全部预算；"
                                 "需要人工决定是拆小还是换做法）"):
             out.append(cid)
@@ -86,7 +100,7 @@ def apply_fails(bp, fails: dict, *, limit: int = FAIL_DESCOPE) -> list[str]:
 
 def replan(bp, *, cov: dict | None = None, ws=None, llm=None, reason: str = "",
            fails: dict | None = None, do_audit: bool = True,
-           emit=None) -> dict:
+           stall_streak: int = 0, emit=None) -> dict:
     """重规划一次：降级卡死的 → 独立复评未完成部分 → 机械修补 → 记 diff。
 
     返回 {ok, blueprint, diff, descoped, issues, calls}。ok=False 时蓝图**不回退**
@@ -95,9 +109,20 @@ def replan(bp, *, cov: dict | None = None, ws=None, llm=None, reason: str = "",
     calls = 0
     if bp is None:
         return {"ok": False, "blueprint": bp, "diff": {}, "descoped": [],
-                "issues": ["没有蓝图"], "calls": calls}
+                "issues": ["没有蓝图"], "calls": calls,
+                "strategy": "flat", "halt": False}
     old = _bp.Blueprint.from_dict(bp.to_dict())        # 深拷贝（diff 要用）
     descoped = apply_fails(bp, fails or {}, limit=FAIL_DESCOPE)
+    # 停滞阶梯：连续停滞时**换推进策略**，而不是每次都重复「降级+复评」。
+    # 实测 2026-11-09：7 次「覆盖停滞」重规划做的全是同一件事，最后只报一句
+    # 「重规划次数到顶」。这里把「人推翻框架」机械化：收缩范围 → 请人换方向。
+    from . import strategy as _strat
+    _sname = _strat.choose(stall_streak)
+    _sr = _strat.apply(bp, _sname, fails=fails)
+    if _sname != "flat" and emit:
+        emit("strategy_shift", {"strategy": _sname, "stall_streak": stall_streak,
+                                "changed": _sr["changed"], "halt": _sr["halt"],
+                                "orphan_left": _sr["orphan_left"]})
     issues: list[str] = []
 
     if do_audit and bp.pending():
@@ -143,7 +168,8 @@ def replan(bp, *, cov: dict | None = None, ws=None, llm=None, reason: str = "",
                         "removed": d.get("removed"), "rewired": list(d.get("rewired") or {}),
                         "descoped": d.get("descoped"), "reason": reason[:120]})
     return {"ok": not issues, "blueprint": bp, "diff": d, "descoped": descoped,
-            "issues": issues, "calls": calls}
+            "issues": issues, "calls": calls,
+            "strategy": _sname, "halt": bool(_sr.get("halt"))}
 
 
 def record_diff(ws, d: dict) -> Path:

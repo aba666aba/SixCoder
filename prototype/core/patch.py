@@ -44,6 +44,10 @@ PATCH_PROMPT = """你在做**行级修复**。只改必要的那几行，不要�
    · 新增的 import 只用标准库；第三方库会在依赖自查里被点名，能用标准库就别引入。
 5. **不可以改函数签名**（参数/返回类型变了就不是"行修复"，那时会走函数级重写）。
 6. 如果失败是因为某个名字根本没定义，就补上它的定义，而不是在调用处绕过去。
+7. **old 可以跨多行**（引擎会按多行块定位与替换，起始行 = 你填的 line）：
+   要改的是连续几行时，old 写这几行的完整原文（用 \\n 分隔），
+   new 写改后的对应几行（同样用 \\n 分隔）；缩进按原样写，引擎会自己对齐。
+   —— 但如果只改一行，就只写那一行。**能少写就少写，补丁越小越安全。**
 """
 
 LINE_HINTS = (
@@ -53,6 +57,30 @@ LINE_HINTS = (
     # traceback 常见写法：store.py:93: in _row_values（旧实现认不出，定位退回模块级）
     re.compile(r"[\w./\\-]+\.py:(\d+)"),
 )
+
+# 多行锚点定位时，在提示行号**上下**各找这么多行（§11.4m）。
+# 为什么要有：远端给的 old 首行可能是文件那一行的一部分，行号只当提示，
+# 真实位置可能偏几行。窗口开太大又会"改错地方"——定位仍以**内容逐字匹配**为准，
+# 匹配不上就拒绝（宁可不改，也不许乱改）。
+_PATCH_LOOKBACK = 40
+
+
+def _line_match(want: str, actual: str) -> bool:
+    """old 的一行与文件那一行是否算匹配（§11.4m）。
+
+    远端复制 old 时经常**丢掉尾部标点**（`\'k\': keywords` vs 文件里的 `\'k\': keywords,`）
+    或**截断**（只复制一行的一部分）。
+    口径：先逐字相同；再允许"去掉尾部逗号后相同"；再允许"文件行包含 old"。
+    仍然匹配不上 → 拒绝（安全规则不退让）。
+    """
+    a = actual.strip()
+    if a == want:
+        return True
+    if a.rstrip(",") == want.rstrip(","):
+        return True
+    if want and want in a:
+        return True
+    return False
 
 
 def _numbered(code: str, start: int = 1) -> str:
@@ -100,10 +128,21 @@ def apply_patches(code: str, patches: list[dict]) -> dict:
       · old 非空 → **替换**第 N 行（原文必须逐字匹配，否则拒绝）；
       · old 为空 → **在第 N 行之前插入** new（new 可含多行），原第 N 行不受影响。
 
+    **old 支持多行**（2026-11-11 实测后加，§11.4m）：
+      远端经常把 `old` 写成**跨几行的一段代码**（从带行号的源码里复制，
+      复制到换行为止）—— 实测日志原文：
+      `期望 "'direction': direction_text,\n           "，实际 "'direction': direction_text,"`
+      旧实现拿**单行**去比多行 old → **永远不等** → 100% 被拒 →
+      引擎拿不到行级修复 → 退回**整文件重写** → 打掉该文件里已通过的能力
+      （实测 `app/models.py` 承载 9 条 done 能力）→ 净倒退。
+      现在：`old` 含换行时，按**多行块**定位与替换（起始行 = N）。
+
     安全规则（防止"改错行"把对的代码改坏）：
       · 行号越界 → 拒绝（插入允许 N = 行数+1，即追加到末尾）；
-      · 那一行原文与 old 不一致 → 拒绝；
-      · 缩进层级按原行对齐（插入则原样保留 new 的缩进）。
+      · 那一行（多行时：那几行）原文与 old 不一致 → 拒绝；
+      · 缩进层级按原行对齐（插入则原样保留 new 的缩进）；
+      · 多行块替换时，**new 的每一行都套用原块首行的缩进**（远端给的 new
+        常不带缩进，直接拼进去会语法错）。
     """
     lines = code.splitlines()
     applied: list[str] = []
@@ -114,17 +153,85 @@ def apply_patches(code: str, patches: list[dict]) -> dict:
         old = (pt.get("old") or "").strip()
         new = pt.get("new") or ""
         if old:
+            old_lines = old.splitlines()
             if n < 1 or n > len(lines):
                 rejected.append(f"第 {n} 行不存在（文件只有 {len(lines)} 行）")
                 continue
-            cur = lines[n - 1]
-            if cur.strip() != old.strip():
-                rejected.append(f"第 {n} 行原文对不上：期望 {old.strip()[:40]!r}，"
-                                f"实际 {cur.strip()[:40]!r}")
-                continue
-            indent = cur[:len(cur) - len(cur.lstrip())]
-            lines[n - 1] = (indent + new.strip()) if new.strip() else ""
-            applied.append(f"第 {n} 行替换")
+            if len(old_lines) == 1:
+                # ---- 单行替换（原有语义，逐字不变）----
+                cur = lines[n - 1]
+                _want = old_lines[0].strip()
+                if not _line_match(_want, cur):
+                    rejected.append(f"第 {n} 行原文对不上：期望 {_want[:40]!r}，"
+                                    f"实际 {cur.strip()[:40]!r}")
+                    continue
+                if cur.strip() != _want:
+                    # **片段替换**（§11.4m）：old 是那一行的一部分 →
+                    # 只替换内部这一段（保留前后缀），不动行首缩进。
+                    _pre, _post = cur.split(_want, 1)
+                    lines[n - 1] = _pre + new.strip() + _post
+                    applied.append(f"第 {n} 行替换（行内片段）")
+                    continue
+                indent = cur[:len(cur) - len(cur.lstrip())]
+                lines[n - 1] = (indent + new.strip()) if new.strip() else ""
+                applied.append(f"第 {n} 行替换")
+            else:
+                # ---- 多行块替换（§11.4m 新增）----
+                # 远端给的 old 是**连续几行**的原文；但它的首行可能只是文件那一行的
+                # **一部分**（复制时截了一段），也可能整体缩进与文件不同。
+                # → 不死绑"第 N 行起"，改成**按块内容在文件里定位**：
+                #   行号只当提示，定位以内容为准；定位不到就拒绝（安全规则不退让）。
+                _norm = [o.strip() for o in old_lines if o.strip()]   # 去掉纯缩进的空行
+                if not _norm:
+                    rejected.append(f"第 {n} 行的 old 只有空白，没法定位")
+                    continue
+                _start = -1
+                _hit_len = 0
+                _total = len(lines)
+                _lo = max(0, n - 1 - _PATCH_LOOKBACK)
+                _hi = min(_total, n - 1 + _PATCH_LOOKBACK + 1)
+                # **必须整块匹配**：old 有 k 行就要连续命中 k 行，**不许退化成只用首行**
+                # （退化 = 把"这块要改的地方"缩成一行 → 改错位置）。
+                # 首行允许 old 是文件那一行的**子串**（远端复制时可能只复制一段）；
+                # 其余行必须逐字相同（容忍尾部逗号差异）。
+                _k = len(_norm)
+                for _i in range(_lo, max(_lo, _hi - _k + 1)):
+                    if _i + _k > _total:
+                        break
+                    _blk = lines[_i:_i + _k]
+                    if _norm[0] not in _blk[0]:
+                        continue
+                    if all(_line_match(_norm[_j], _blk[_j]) for _j in range(1, _k)):
+                        _start = _i
+                        _hit_len = _k
+                        break
+                if _start < 0:
+                    rejected.append(f"第 {n} 行附近找不到 old 的原文（多行锚点定位失败）："
+                                    f"{_norm[0][:40]!r}")
+                    continue
+                # 命中的块：把 old 的每一行替换成 new 的对应行
+                new_lines = new.splitlines()
+                if not new_lines:
+                    lines[_start:_start + _hit_len] = []
+                    applied.append(f"第 {_start + 1}~{_start + _hit_len} 行删除（{_hit_len} 行）")
+                    continue
+                # 缩进：把 new 的**相对缩进**（相对它自己的首行）套到原块首行的缩进上。
+                # 为什么不能"每行都套首行缩进"：new 的第 2、3 行通常比首行多缩进
+                # （续行/字典项），全平掉会语法错（实测用例4）。
+                _first = new_lines[0]
+                own = _first[:len(_first) - len(_first.lstrip())]
+                _base = lines[_start][:len(lines[_start]) - len(lines[_start].lstrip())]
+                out = []
+                for _nl in new_lines:
+                    if own and _nl.startswith(own):
+                        out.append(_base + _nl[len(own):])
+                    elif _nl.strip():
+                        out.append(_base + _nl.lstrip())
+                    else:
+                        out.append(_nl)          # 空行保持空
+                lines[_start:_start + _hit_len] = out
+                applied.append(f"第 {_start + 1}~{_start + _hit_len} 行替换"
+                               f"（{_hit_len} 行 → {len(out)} 行）")
         else:
             if n < 1 or n > len(lines) + 1:
                 rejected.append(f"插入位置 {n} 越界（文件只有 {len(lines)} 行）")
@@ -250,14 +357,52 @@ def request_line_fix(ws: Path, path: str, evidence: str, step_index: int = 0,
         if hint > 0:
             rows = code.splitlines()
             span = "\n".join(rows[max(0, hint - 3):hint + 3])
-        max_out = _tokens.output_budget(span or code, factor=0.6, floor=800)
+        max_out = _tokens.output_budget(span or code, factor=0.6, floor=1200)
     prompt = PATCH_PROMPT.format(evidence=narrow_evidence(evidence), numbered=view_for_patch(code, hint),
                                  path=path)
-    r = remote.complete(prompt, task_id=task_id or "patch", node_id=f"patch:{path}",
-                        workspace=str(ws), emit=emit, step_index=step_index, json_mode=True,
-                        max_out=max_out)
-    if not r.get("ok"):
-        return {"ok": False, "reason": f"远端调用失败：{r.get('error')}"[:180]}
+    # 行级修复也带**只读工具**：远端改之前可以先 outline/read_file 看真实代码
+    # （原来它只能看提示词里那几行编号，容易把相邻行改坏）。
+    _ans = ""
+    _usage: dict = {}
+    _failed = [False]
+    try:
+        from . import remotetools as _rtl
+
+        def _fc(_instr: str, messages: list, _tools=None) -> dict:
+            nonlocal _usage
+            rr = remote.complete(_instr, task_id=task_id or "patch", node_id=f"patch:{path}",
+                                 workspace=str(ws), emit=emit, step_index=step_index,
+                                 json_mode=True, max_out=max_out,
+                                 messages=messages, tools=_tools)
+            if isinstance(rr, dict):
+                _usage = rr.get("usage") or {}
+                if not rr.get("ok"):
+                    _failed[0] = True
+                return {"answer": rr.get("answer") or "",
+                        "tool_calls": list(rr.get("tool_calls") or []),
+                        "message": rr.get("message") or {}}
+            return {"answer": "", "tool_calls": [], "message": {}}
+
+        _lp = _rtl.ToolLoop(ws, max_rounds=2, emit=emit, complete_fn=_fc)
+        _lr = _lp.run(prompt)
+        _ans = str(_lr.get("answer") or "")
+        if emit:
+            emit("patch_tools", {"path": path, "rounds": _lr.get("rounds"),
+                                 "tools": len(_lr.get("tool_calls") or [])})
+    except Exception as exc:                            # noqa: BLE001
+        if emit:
+            emit("notice", {"message": f"行级修复工具循环跳过：{type(exc).__name__}"})
+        _ans = ""
+    if not _ans and not _failed[0]:
+        r = remote.complete(prompt, task_id=task_id or "patch", node_id=f"patch:{path}",
+                            workspace=str(ws), emit=emit, step_index=step_index, json_mode=True,
+                            max_out=max_out)
+        if not r.get("ok"):
+            return {"ok": False, "reason": f"远端调用失败：{r.get('error')}"[:180]}
+        _ans = r.get("answer") or ""
+    elif _failed[0]:
+        return {"ok": False, "reason": "远端调用失败（工具循环已试过，不重复补打）"[:180]}
+    r = {"ok": True, "answer": _ans, "usage": _usage}
     patches = parse_patches(r.get("answer") or "")
     if not patches:
         return {"ok": False, "reason": "没有给出 patches"}

@@ -143,19 +143,25 @@ def cut(text: str, budget_tokens: int = 6000, keep_tail: bool = False) -> str:
 
 def output_budget(text: str, factor: float = 1.5, floor: int = 1200,
                   ceil: int = 384000) -> int:
-    """按"这次要写的东西有多大"给输出配额，而不是拍一个固定上限。
+    """给远端的**输出上限**：只按模型物理上限兜底，**不按任务量掐**。
 
-    为什么不是固定值：
-      · 实测 76 行的 clean.py 整份 = 706 token（JSON 包裹 878），而整文件模式原先固定给
-        32,000 —— 模型在额度里漫游，最多一次写了 24,636 token，是需要的 27 倍；
-      · 另一方面大文件必须能重写：2,000 行 ≈ 18,000 token，配额随之到 ~27,000，
-        不会被人造天花板挡住。
+    2026-11-09 用户指令（"为什么要限制输出，这不是限制远端能力吗，先断开这个限制"）：
+    本函数原来按"这次要写的东西有多大"算一个数（need*factor+400，floor 1200）。
+    那个数**不约束远端**（实际 max_tokens 由 remote.max_tokens_for 取
+    max(desired, safety_cap()) ≥ 128000），但它被当成了**截断判定阈值**：
+    `正文 token >= max_out*0.98` → 判为"被配额截断" → 放大重试。
+    于是 max_out=3000 时，远端正常写 3000 token 正文就被误判成"被截断" →
+    白放大重试一轮 → 再失败 → heal_stop（同一份证据）→ 白烧钱。
+    这就是"掐小 = 把机制问题记成模型能力问题"。
 
-    上限只有模型的物理上限（384K）；本函数的作用是"按任务量给"，不是"砍到某个数"。
-    factor 留出重构/增删辅助函数的余量；floor 保证一个函数体不会被掐得太紧。
+    现在：**按任务量算出来的那个数不再当上限**，只把"模型物理上限"传下去。
+    floor 仍保留为最小值（防止某个端点只给几十 token），但它取自调用方
+    （REMOTE_OUT_FLOOR），不再是 1200 这种人为小值。
+
+    factor/text 参数保留是为了不破坏调用点签名（行级小修仍可用小 floor），
+    但**不再参与上限计算**。
     """
-    need = estimate_tokens(text or "")
-    return int(max(int(floor), min(int(ceil), need * float(factor) + 400)))
+    return int(max(int(floor), int(ceil)))
 
 
 def needs_compression(text: str, budget_tokens: int | None = None,

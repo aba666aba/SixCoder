@@ -818,7 +818,8 @@ def _repair_test_files(ws: Path, node: dict, task_id: str, emit) -> dict:
         checks = props_mod.from_requirement((need or "") + "\n" + requirement, impl_symbols)
     except Exception:                                    # noqa: BLE001
         checks = []
-    engine_code = props_mod.render_pytest(impl_stem, checks) if checks else ""
+    engine_code = (props_mod.render_pytest(impl_stem, checks, target_rel=impl_rel)
+                   if checks else "")
 
     for rel in targets:
         p = ws / rel
@@ -1635,7 +1636,8 @@ def _run_node(ws: Path, task_id: str, node: dict, model: str,
                     echecks = props_mod.from_requirement(
                         (node.get("contract") or "") + "\n" + _task_requirement(node), syms)
                     if echecks:
-                        engine_code = props_mod.render_pytest(Path(impl_rel).stem, echecks)
+                        engine_code = props_mod.render_pytest(
+                            Path(impl_rel).stem, echecks, target_rel=impl_rel)
                         emit("engine_tests", {"node": node["nid"],
                                               "checks": [c["desc"] for c in echecks][:6],
                                               "code": engine_code[:800]})

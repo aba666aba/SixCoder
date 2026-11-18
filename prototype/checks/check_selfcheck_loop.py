@@ -249,13 +249,11 @@ def test_repair_fixes_it() -> None:
         ck("没模块时不动手", "没有可改的模块" in got["stop"], got.get("stop"))
         ck("没模块时不花远端调用", not llm.prompts)
 
-    # 预算用尽 → 一步都不跑
-    with tempfile.TemporaryDirectory() as td:
-        ws = _ws_with_entry(Path(td), WRONG)
-        llm = ScriptLLM(["x"])
-        got = sl.repair(ws, [_cap()], llm=llm, budget_cny=0.5, cost_used=1.0)
-        ck("预算用尽立刻停", got["stop"] == "预算用尽", got.get("stop"))
-        ck("预算用尽不花调用", not llm.prompts)
+    # 预算上限机制已删（2026-11-10）：repair() 不再收预算参数、不再按钱停——静态钉死
+    import inspect as _insp
+    _rp = set(_insp.signature(sl.repair).parameters)
+    ck("repair 不再收 budget_cny / cost_used 参数",
+       not ({"budget_cny", "cost_used"} & _rp), str(sorted(_rp)))
 
     # 步数到顶 → 如实报仍红
     with tempfile.TemporaryDirectory() as td:
@@ -303,7 +301,7 @@ def test_into_auto() -> None:
             return {"ok": True, "answer": "```json\n" + json.dumps(obj, ensure_ascii=False) + "\n```"}
         return _bp_llm
 
-    def fake_runner(ws, brief, contract_path, budget, **kw):
+    def fake_runner(ws, brief, contract_path, **kw):
         (Path(ws) / "cli_core.py").write_text(WRONG, encoding="utf-8")
         return {"ok": True, "reason": "假执行器", "verified": 0, "total": 1,
                 "spent_s": 0.1, "cost_cny": 0.01, "delivery": ""}
@@ -328,7 +326,7 @@ def test_into_auto() -> None:
 
     def run_once(selfcheck: bool, broken: bool):
         td = tempfile.mkdtemp(prefix="sc-")
-        res = auto.night_auto(Path(td), "做一个计数器", budget_cny=5.0, max_slices=1,
+        res = auto.night_auto(Path(td), "做一个计数器", max_slices=1,
                               llm=fake_llm_factory(broken), runner=fake_runner,
                               recon=fake_recon, selfcheck=selfcheck,
                               emit=lambda k, p=None: None)

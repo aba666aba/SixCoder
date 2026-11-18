@@ -124,7 +124,7 @@ def main() -> int:
             with _sandbox_temp() as td:
                 ws = Path(td)
                 res = company.night(ws, "1) main.go：\n   - func Add(a int, b int) int：两数相加",
-                                    "qwen2.5-coder:7b", hours=0.01, use_remote=True, max_cny=0.05)
+                                    "qwen2.5-coder:7b", use_remote=True)
                 files = sorted(p.name for p in ws.iterdir() if p.suffix in (".go", ".py"))
         finally:
             remote.complete = _orig_complete

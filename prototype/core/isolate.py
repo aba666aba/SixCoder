@@ -61,17 +61,23 @@ def _own_clean_repo(ws: Path) -> tuple[bool, str]:
 
 
 def _py_files(ws: Path) -> dict[str, bytes]:
+    """快照：仓库里所有文件的内容（跳过引擎自己的目录）。
+
+    2026-11-09 修：原来用 `rglob("*")` + **事后**过滤 `_SKIP_DIRS` ——
+    事后过滤救不了"已经遍历进去"：`.sixcoder/tmp` 里堆着 36754 个探针沙箱目录，
+    每开一次隔离层就要把它们全走一遍（内存快照 + 回滚各一次），
+    夜班因此慢到跑不动。改成 `os.walk` + **目录层面剪枝**，命中的目录根本不进去。
+    """
     out: dict[str, bytes] = {}
-    for p in Path(ws).rglob("*"):
-        if not p.is_file():
-            continue
-        rel = p.relative_to(ws)
-        if any(part in _SKIP_DIRS for part in rel.parts):
-            continue
-        try:
-            out[str(rel).replace("\\", "/")] = p.read_bytes()
-        except OSError:
-            continue
+    for root, dirs, files in os.walk(ws):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        for fname in files:
+            p = Path(root) / fname
+            rel = p.relative_to(ws)
+            try:
+                out[str(rel).replace("\\", "/")] = p.read_bytes()
+            except OSError:
+                continue
     return out
 
 

@@ -91,18 +91,24 @@ def main() -> int:
     check("配额不是按桩算出来的（> 桩估算的 3 倍）", got > stub_est * 3, f"{got} vs {stub_est}")
     check("配额对得起契约规模（> 契约 token × 2）", got >= contract_est * 2,
           f"{got} vs {contract_est}")
-    check("配额依然远小于老的 32,000（不回到漫游）", got < 16000, str(got))
+    # 2026-11-09（用户指令："为什么要限制输出，这不是限制远端能力吗，先断开这个限制"）：
+    # 原来的断言是「配额依然远小于老的 32,000（不回到漫游）」——那是**旧语义**：
+    # 输出按任务量掐、截断靠放大配额解决。现在输出上限**彻底断开**（恒为模型物理上限），
+    # 截断改用硬信号 finish_reason=='length' 判定 + 重试。
+    check("输出上限 = 模型物理上限 384000（不再按任务量掐）", got == 384000, str(got))
 
-    print("[2] 输出顶到配额 → 判为截断并自动放大（不是模型能力问题）")
+    print("[2] 输出被截断 → 识别出来并重试（硬信号 finish_reason）")
     calls.clear()
 
     def fake_trunc(prompt, **kw):                                 # noqa: ANN001
         calls.append({"max_out": kw.get("max_out"), "grew": "截断" in prompt})
-        if len(calls) == 1:                                       # 第一次：撞上限、内容不完整
+        if len(calls) == 1:                                       # 第一次：被截断、内容不完整
             return {"ok": True, "answer": '{"files":[{"path":"clean.py","content":"def f():',
+                    "finish_reason": "length",
                     "usage": {"completion_tokens": int(kw.get("max_out") or 0)}}
         payload = '{"files":[{"path":"clean.py","content":"def f():\\n    return 1\\n"}]}'
-        return {"ok": True, "answer": payload, "usage": {"completion_tokens": 40}}
+        return {"ok": True, "answer": payload, "finish_reason": "stop",
+                "usage": {"completion_tokens": 40}}
 
     remote.complete = fake_trunc                                  # type: ignore[assignment]
     try:
@@ -112,10 +118,11 @@ def main() -> int:
             written = (ws / "clean.py").read_text(encoding="utf-8")
     finally:
         remote.complete = orig                                    # type: ignore[assignment]
-    check("识别出截断并放大配额重试", len(calls) >= 2 and calls[1]["max_out"] > calls[0]["max_out"],
+    check("识别出截断并重试（不再靠放大配额）",
+          len(calls) >= 2 and calls[1]["max_out"] == calls[0]["max_out"],
           str([c["max_out"] for c in calls]))
     check("重试时明确告知模型上一版被截断", bool(calls[1]["grew"]), str(calls[1]))
-    check("放大后成功落盘", r.get("ok") and "return 1" in written, str(r.get("reason"))[:120])
+    check("重试后成功落盘", r.get("ok") and "return 1" in written, str(r.get("reason"))[:120])
 
     print("[3] 一直截断也不会无限放大（有上限）")
     calls.clear()
@@ -164,7 +171,7 @@ def main() -> int:
     if FAILS:
         print(f"有失败项：{', '.join(FAILS)}")
         return 1
-    print("全部通过（配额按契约规模 / 截断自愈 / 放大有上限）")
+    print("全部通过（输出上限=模型物理上限 / 截断靠 finish_reason 识别并重试 / 放大有上限）")
     return 0
 
 

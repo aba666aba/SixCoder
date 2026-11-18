@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from . import contract as contract_mod
-from . import db, gates, ollama, props, symedit, tools, workorder
+from . import db, enterprise, gates, ollama, props, symedit, tools, workorder
 
 
 def ensure_scaffold(ws: Path, contracts: dict) -> list[str]:
@@ -278,6 +278,43 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
         _all_keys |= _proj_k.global_keys(contracts, _proj_k.load_map(ws))
     except Exception:                                    # noqa: BLE001
         pass
+    # §20.6 C 档：工程声明（数据/运行/质量层）是**全局**验收，只跑一次，不 import 被测模块。
+    # 契约没写新段 → parse_sections 返回 [] → 不调 run（零开销、零影响）。
+    _eng_text = "\n".join(dict.fromkeys(
+        str(getattr(_c, "full_text", "") or getattr(_c, "raw", "") or "")
+        for _c in contracts.values()))
+    _eng_specs = enterprise.parse_sections(_eng_text)
+    _eng_res = enterprise.run(ws, _eng_specs) if _eng_specs else {}
+    _eng_fails = _eng_res.get("fails") or []
+    _eng_missing = [str(f.get("path") or "") for f in _eng_fails]
+    _eng_details = [str(f.get("detail") or "") for f in _eng_fails
+                    if f.get("detail")][:4]
+    # §20.6 C 档落点 1（语言层）：契约里出现**非 Python 模块**时，真跑该语言的
+    # 测试套件/类型检查。这是全仓级判据，只跑一次，不 import 被测模块
+    # （props.RUNNER 对 lang_test/lang_typecheck 不触发 _load）。
+    # 没有非 .py 模块 → 一个字节都不多算（老行为零变化）。
+    _foreign_paths = [str(p) for p in contracts
+                      if str(p).lower().endswith(
+                          (".go", ".java", ".js", ".ts", ".cs", ".rs", ".kt",
+                           ".swift", ".php", ".rb", ".c", ".cpp", ".cc", ".hpp"))]
+    if _foreign_paths:
+        try:
+            from . import lang as _lang_mod
+            from . import langtest as _langtest
+            _flang = _lang_mod.detect("", _foreign_paths).get("lang") or "python"
+            _lchecks = _langtest.checks_for(ws, _flang)
+            if _lchecks:
+                _lres = props.run(ws, _foreign_paths[0], _lchecks, timeout=300)
+                for _lf in (_lres.get("fails") or []):
+                    _d = str(_lf.get("detail") or "")
+                    if _d and _d not in _eng_details and len(_eng_details) < 4:
+                        _eng_details.append(_d)
+                    _eng_missing.append(f"{_flang}:{_lf.get('kind')}")
+                passed_n += int(_lres.get("passed") or 0)
+                total_n += int(_lres.get("total") or 0)
+        except Exception:                                # noqa: BLE001
+            # 语言判据接不上不许拖垮 Python 主链路，但要留痕（下面 fails 会带）。
+            pass
     for path, c in contracts.items():
         p = ws / path
         src = p.read_text(encoding="utf-8-sig", errors="replace") if p.exists() else ""
@@ -291,6 +328,12 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
         # 显式记录"机械判据已经判红的函数"。不能只靠 fails 文本里搜名字：
         # fails 只留前 4 条，靠后的失败会被截断，e2e 就会把红函数重新算成绿的。
         hard_failed: set[str] = set()
+        # 显式记录"**判据自己没跑起来**的函数"（2026-11-10 修假绿洞）。
+        # 这类函数既没判红、也没判绿 —— 它是"判不了"，不是"没问题"。
+        # 以前它们和"契约太薄造不出判据"的函数一起塞进 untested，
+        # 于是 e2e 业务流一跑通就把它们算成"已验收" → 模块判绿、标 done、再也不碰，
+        # 而实际上**没有任何机械判据验证过它**（机制问题被记成了产物合格）。
+        engine_failed: set[str] = set()
         passed_n = total_n = 0
         typed = []
         try:
@@ -364,6 +407,8 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
                 # 实测：探针路径 bug 让 5/5 的正确产物被判 0/5，夜班空转 6 轮远端调用。
                 engine_err = True
                 untested.append(f.name)
+                # **记名字**：这个函数是"判不了"，不许被 e2e 洗成"已验收"。
+                engine_failed.add(f.name)
                 if _e_note not in notes:
                     notes.append(_e_note)
             elif r.get("ok"):
@@ -374,6 +419,21 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
                           for x in (r.get("fails") or [])][:1]
         # 模块级判据：数据库写→读端到端、共享文件的按序读写。
         # 这两类在单函数视图里永远看不到（前者要真连接，后者要先写后读），必须单独跑。
+        # §20.4 落点 2/3：契约声明的"必须产出的文件"也在模块级验收 ——
+        # 文件缺失/缺要点 → 模块欠活（needs_work），作者下一轮被点名去产出它。
+        _art_missing: list[str] = []
+        try:
+            _art_checks = props.artifact_checks(getattr(c, "artifacts", None))
+        except Exception:                                # noqa: BLE001
+            _art_checks = []
+        for _achk in _art_checks:
+            _ar = props.run(ws, path, [_achk])
+            passed_n += int(_ar.get("passed") or 0)
+            total_n += int(_ar.get("total") or 0)
+            if not _ar.get("ok"):
+                _d = str(((_ar.get("fails") or [{}])[0] or {}).get("detail") or "")
+                fails.append(_d or f"产物文件缺失：{_achk.get('path')}")
+                _art_missing.append(str(_achk.get("path")))
         try:
             mod_checks = [x for x in props.from_contract(c, _shared)
                           if x.get("kind") in ("db_end2end", "seq", "expr_eq", "expr_seq")]
@@ -396,6 +456,8 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
                             untested.remove(nm)
             elif r.get("engine_error"):
                 engine_err = True
+                # 模块级判据跑不起来 → 被它覆盖的函数同样是"判不了"，一并记名。
+                engine_failed.update(covers)
                 if _e_note not in notes:
                     notes.append(_e_note)
             else:
@@ -451,10 +513,14 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
                 fails.append(qm.detail)
         except Exception:
             pass
-        # 字段名幻觉：函数里下标的键必须是契约知道的键（实测 row['domain'] 这类必错）
+        # 字段名幻觉：函数里下标的键必须是契约知道的键（实测 row['domain'] 这类必错）。
+        # 只扫本契约签名表内的函数：文件里的历史函数不在本轮契约，它们用的键不在
+        # allowed 里，整文件扫等于让已验收代码陪绑判红（models.py 48 函数判红一整天）。
         try:
+            _only = {f.name for f in (getattr(c, "funcs", None) or [])} or None
             dk, adv = gates.gate_dict_keys(ws, [path], _all_keys,
-                                           getattr(c, "raw", "") or "")
+                                           getattr(c, "raw", "") or "",
+                                           only_funcs=_only)
             if not dk.ok:
                 fails.append(dk.detail)
                 for nm in re.findall(r"::(\w+)\(\) 用了字段", dk.detail or ""):
@@ -508,19 +574,47 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
                     notes.append(f"{f.name} 的 docstring 是契约说明的残句（少 "
                                  f"{len(want_doc) - len(got_doc)} 字，缺："
                                  f"{want_doc[len(got_doc):]}）——实现可能按残句漂移了")
+        # §20.6：工程声明未兑现 → 明细进模块 fails（远端/收工理由看得见），
+        # 具体欠活判定交给 engineering_missing 字段 + needs_work_state。
+        for _d in _eng_details:
+            if _d and _d not in fails:
+                fails.append(_d)
         res = {"passed": passed_n, "total": total_n, "ok": not fails, "fails": fails}
         state[path] = {"exists": p.exists(), "symbols": have, "stubs": stubs,
                        "missing": missing,
                        "funcs": len(c.funcs), "verified": len(verified),
                        "verified_names": sorted(verified),
                        "hard_failed": sorted(hard_failed),
+                       "engine_failed": sorted(engine_failed),
                        "untested": untested,
                        "notes": notes[:4],
                        "engine_errors": engine_err,
-                       "fails_all": fails[:6],
+                       # §20.4：契约声明但还没产出/不达要点的产物文件（模块欠活的依据之一）
+                       "artifacts_missing": _art_missing,
+                       # §20.6：全局工程声明未兑现的路径（同样算模块欠活）
+                       "engineering_missing": _eng_missing,
+                       # fails_all 是**给远端看的完整失败清单**（判定仍用 fails 的前 4 条）：
+                       # 原来只留 6 条 → 远端看到的失败真相被掐掉一半以上。
+                       "fails_all": fails[:50],
                        "checks": {"passed": res.get("passed"), "total": res.get("total")},
                        "fails": [str(f.get("detail") if isinstance(f, dict) else f)
                                  for f in (res.get("fails") or [])][:4]}
+    # 跨文件同名函数语义重复（2026-11-08 run_student_da 实测：services 与 matching_core
+    # 各一份 run_batch_endpoint、语义互斥——单文件 duplicates 闸门抓不到跨文件形态）。
+    # fail 记到**涉及模块中第一个在契约里的**：随该模块验收一起派单修复。
+    try:
+        _cd = gates.gate_cross_dupes(ws, list(contracts.keys()))
+        if not _cd.ok:
+            _hit = next((m for m in contracts if str(m) in str(_cd.detail)),
+                        next(iter(contracts)))
+            _st0 = state.get(_hit)
+            if _st0 is not None:
+                _msg = f"跨文件同名函数语义重复：{_cd.detail}"
+                if _msg not in _st0["fails"]:
+                    _st0["fails"] = (_st0["fails"] + [_msg])[:4]
+                    _st0["fails_all"] = (_st0["fails_all"] + [_msg])[:50]
+    except Exception:                                    # noqa: BLE001
+        pass
     # 跨模块业务流：单元判据证明不了"连起来对不对"，通过后给相关函数补强证据
     ev = _e2e_evidence(ws, contracts)
     covers = list(ev.get("covers") or [])
@@ -537,6 +631,12 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
                 # 但 e2e 跑通就把它加回 verified，于是 8/8 里混进一个已知会崩的函数。
                 if name in (st.get("hard_failed") or ()):
                     continue
+                # **判据引擎自己没跑起来**的函数也不许拿 e2e 信用（2026-11-10 修假绿洞）：
+                # 它既没判红也没判绿，是"判不了"。e2e 跑通只证明正常路径跑通，
+                # 证明不了边界 —— 拿它当"已验收"就是假绿：模块会判绿、标 done、再也不碰，
+                # 而这个函数**从头到尾没有任何机械判据验证过**。
+                if name in (st.get("engine_failed") or ()):
+                    continue
                 if any(name in str(x) for x in (st.get("fails") or [])):
                     continue
                 if name not in st["verified_names"]:
@@ -551,7 +651,7 @@ def inspect(ws: Path, contracts: dict[str, contract_mod.Contract],
                 msg = f"业务流未跑通：{ev.get('reason')}"
                 if msg not in st["fails"]:
                     st["fails"] = (st["fails"] + [msg])[:4]
-                    st["fails_all"] = (st["fails_all"] + [msg])[:6]
+                    st["fails_all"] = (st["fails_all"] + [msg])[:50]
     return state
 
 
@@ -1037,11 +1137,25 @@ def execute_local(ws: Path, order: dict, model: str, attempts: int = 1,
             from . import remote as _remote
             ok_r, _why = _remote.available()
             if ok_r:
-                rr = _remote.complete(prompt, task_id="worker-escalation", node_id="escalate", workspace=str(ws))
-                if rr.get("ok"):
-                    edits = _extract_edits(rr.get("answer") or "")
+                def _esc_call(messages, tools=None):
+                    return _remote.complete(prompt, task_id="worker-escalation",
+                                            node_id="escalate", workspace=str(ws),
+                                            messages=messages, tools=tools)
+
+                try:
+                    from . import remotetools as _rtl
+                    _et = _rtl.run_with_tools(ws, prompt, _esc_call, max_rounds=2)
+                    _etext = _et.get("answer") or ""
+                except Exception:                        # noqa: BLE001
+                    _etext = ""
+                if not _etext:
+                    rr = _remote.complete(prompt, task_id="worker-escalation",
+                                          node_id="escalate", workspace=str(ws))
+                    _etext = rr.get("answer") or ""
+                if _etext:
+                    edits = _extract_edits(_etext)
                     if edits:
-                        text = rr.get("answer") or ""
+                        text = _etext
         except Exception:                                # noqa: BLE001
             pass
     if not edits:
@@ -1207,10 +1321,31 @@ def execute_order_remote(ws: Path, order: dict, evidence: str = "", brief: str =
                 prompt += _policy.plan_block(plan)
             except Exception:                            # noqa: BLE001
                 pass
-    rr = _remote.complete(prompt, task_id=task_id or "rescue",
-                          node_id=("author" if as_author else "rescue") + f":{want}",
-                          workspace=str(ws), emit=emit, thinking=thinking,
-                          step_index=step_index, json_mode=True)
+    # 救援路径也带**只读工具**：它要新建/改一个符号，先看真实代码（outline/read_file/
+    # imports）才知道该往哪儿接，别凭想象写。
+    _usage: dict = {}
+
+    def _call(messages, tools=None):
+        r = _remote.complete(prompt, task_id=task_id or "rescue",
+                             node_id=("author" if as_author else "rescue") + f":{want}",
+                             workspace=str(ws), emit=emit, thinking=thinking,
+                             step_index=step_index, json_mode=True, messages=messages,
+                             tools=tools)
+        if isinstance(r, dict):
+            _usage.update(r.get("usage") or {})
+        return r
+
+    try:
+        from . import remotetools as _rtl
+        _tr = _rtl.run_with_tools(ws, prompt, _call, max_rounds=3, emit=emit)
+        rr = {"ok": True, "answer": _tr.get("answer") or "", "usage": _usage}
+        if emit:
+            emit("rescue_tools", {"want": str(want), "rounds": _tr.get("rounds"),
+                                  "tools": len(_tr.get("tool_calls") or [])})
+    except Exception as exc:                            # noqa: BLE001
+        if emit:
+            emit("notice", {"message": f"救援工具循环跳过：{type(exc).__name__}"})
+        rr = _call(None, None)
     if not rr.get("ok"):
         return {"ok": False, "reason": f"远端调用失败：{rr.get('error')}"[:200]}
     edits = _extract_edits(rr.get("answer") or "")
@@ -1306,9 +1441,16 @@ def add_engine_tests(ws: Path, contracts: dict, target: str = "") -> dict:
     """
     ws = Path(ws)
     name = Path(target or "").name
+    def test_name(path: str) -> str:
+        # 子目录同名模块（app/services/batches.py 与 app/api/batches.py）若都写成
+        # test_batches.py 会互相覆盖。把目录编进文件名，仍以 test_ 开头便于发现。
+        parts = [p for p in Path(str(path).replace("\\", "/")).parts[:-1]
+                 if p not in (".", "")]
+        return "test_" + ("_".join(parts) + "_" if parts else "") + Path(path).stem + ".py"
+
     pairs = []
     for path, c in (contracts or {}).items():
-        tp = "test_" + Path(path).stem + ".py"
+        tp = test_name(path)
         if name and name not in (tp, Path(path).name):
             continue
         pairs.append((path, c, tp))
@@ -1326,7 +1468,10 @@ def add_engine_tests(ws: Path, contracts: dict, target: str = "") -> dict:
             return {"ok": False, "reason": "产物先过不了契约判据，测试写出来也是红的："
                                           + props.as_feedback(pre)[:220]}
         fp = ws / tp
-        fp.write_text(props.render_pytest(Path(path).stem, checks), encoding="utf-8")
+        # 带子目录的模块必须按路径加载，否则根目录测试文件里的 `from audit import ...`
+        # 会 ModuleNotFoundError（实测夜班：引擎测试 100% 失败、测试文件被删）
+        fp.write_text(props.render_pytest(Path(path).stem, checks, target_rel=path),
+                      encoding="utf-8")
         tr = gates.gate_tests(ws, [tp], timeout=120)
         if not tr.ok:
             try:
@@ -1348,6 +1493,10 @@ def iterate(repo: Path, requirement: str, model: str, rounds: int = 3,
     try:
         model, model_warn = model_policy.enforce(model)
     except model_policy.ModelTooSmall as exc:
+        # 现行口径下 enforce 不抛这个异常（"选哪个模型是用户的判断"），
+        # 但 except 分支必须**合法**：2026-11-12 实测发现 ModelTooSmall 当时**从未定义** →
+        # 这个 except 分支一旦进入就抛 AttributeError（找不到属性），
+        # 反而把真正的异常盖掉了。现在类已定义（core/model_policy.py），分支合法。
         return {"ok": False, "reason": str(exc)}
     if model_warn and emit:
         emit("notice", {"message": model_warn})
