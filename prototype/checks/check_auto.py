@@ -111,7 +111,10 @@ def make_runner(log: list, write_code: bool = True, cost: float = 0.05):
             if "cap.store.record" in caps:
                 (ws / "store.py").write_text(STORE_OK, encoding="utf-8")
             if "cap.cli.count" in caps or "cap.cli.report" in caps:
-                (ws / "core.py").write_text(CORE_OK, encoding="utf-8")
+                # 引擎约定：CLI 逻辑统一放 `cli_core.py`（入口 main.py 由引擎生成并 import 它）。
+                # 早期这里写的是 core.py —— 与实现脱节后，main.py 导入失败 → 能力反复红 →
+                # 连续 3 次被降级 → "没有可做的切片"（2026-11-23 查明）。
+                (ws / "cli_core.py").write_text(CORE_OK, encoding="utf-8")
         return {"ok": True, "reason": "假执行器", "verified": 1, "total": 1, "spent_s": 0.1,
                 "cost_cny": cost, "delivery": ""}
     return run

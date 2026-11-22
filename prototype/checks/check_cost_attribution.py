@@ -22,9 +22,13 @@ sys.path.insert(0, str(PROTO))
 from core import attribution as AT  # noqa: E402
 from core import remote as RM  # noqa: E402
 from core import triage as TR  # noqa: E402
+from core import db as _db  # noqa: E402
 
 FAILS = []
-DB = PROTO / "data" / "proto.db"
+# 必须用运行时真实的库路径：引擎写的是仓库根 data/proto.db，而本文件在 prototype/ 下，
+# 硬编码 PROTO/"data"/"proto.db" 会读到**另一个文件**→ 永远看不到新写入的明细行
+# （2026-11-23 查明：测试一直读到历史 handoff 行，误判"上下文没写进去"）。
+DB = Path(_db.DB_PATH)
 
 
 def ck(name, ok, detail=""):

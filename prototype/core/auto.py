@@ -259,6 +259,11 @@ import importlib
 import sys
 from pathlib import Path
 
+# 内置 Python 是 `._pth` 隔离模式：**连脚本所在目录都不会自动进 sys.path**，
+# 不显式注入的话，下面 `importlib.import_module` 永远找不到同目录的 cli_core
+# （2026-11-23 实测：表现为"仓库里没有 cli_run"→ 退出码 70 → 能力反复红 → 降级）。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 
 def _find():
     here = Path(__file__).resolve().parent
