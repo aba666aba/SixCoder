@@ -691,6 +691,18 @@ def validate(probe: dict) -> list[str]:
         return [f"探针种类 {kind or '(空)'} 没有执行器（支持：{', '.join(PROBE_KINDS)}）"]
     out: list[str] = []
     if kind == "cli":
+        _cmd = probe.get("cmd")
+        if _cmd is not None:
+            # 跨语言命令模式（生态包补栈，2026-11-23）：不要求 entry，但必须列表 + 有断言
+            if not isinstance(_cmd, list) or not _cmd:
+                out.append("cli.cmd 必须是非空字符串列表（如 ['mvn','-q','test']）")
+            else:
+                _exe = str(_cmd[0]).replace("\\", "/").split("/")[-1].lower()
+                if _exe not in _CMD_ALLOW:
+                    out.append(f"cli.cmd 的可执行文件不在白名单：{_cmd[0]}")
+            if not (probe.get("stdout_has") or probe.get("stdout_eq")):
+                out.append("cli.cmd 只看退出码：空壳也能过 → 必须给 stdout_has 或 stdout_eq")
+            return out
         entry = str(probe.get("entry") or "").strip()
         if not entry:
             out.append("cli 探针缺 entry（入口文件，如 main.py）")
@@ -803,6 +815,15 @@ def describe(probe: dict) -> str:
         return "（没有观测方式）"
     kind = str(probe.get("kind") or "")
     if kind == "cli":
+        if probe.get("cmd") is not None:
+            _cmds = " ".join(str(x) for x in (probe.get("cmd") or []))
+            _t0 = ""
+            if probe.get("stdout_has"):
+                _v = probe.get("stdout_has")
+                _t0 = f" → stdout 含 {_v if isinstance(_v, str) else '/'.join(map(str, _v))!r}"
+            elif probe.get("stdout_eq") is not None:
+                _t0 = f" → stdout 等于 {probe.get('stdout_eq')!r}"
+            return _cmds + _t0
         args = " ".join(str(a) for a in (probe.get("args") or []))
         cmd = f"python {probe.get('entry') or '?'}" + (f" {args}" if args else "")
         tail = ""
@@ -1545,7 +1566,78 @@ def _run_child(cmd: list[str], *, cwd: str, timeout: int,
                     pass
 
 
+# 跨语言构建/测试命令的可执行白名单（2026-11-23，生态包补栈用）。
+# argv 是**列表传参、不经 shell**，不存在注入面；白名单只是防止探针被写成任意程序，
+# 也避免"验收"变成"在用户机器上跑任何东西"。
+_CMD_ALLOW = {
+    "python", "python.exe", "py", "pytest",
+    "node", "npm", "npx", "pnpm", "yarn", "bun",
+    "mvn", "mvnw", "mvn.cmd", "gradle", "gradlew", "gradlew.bat",
+    "go", "cargo", "dotnet", "make", "cmake",
+    "php", "composer", "ruby", "bundle", "mix", "sbt", "stack", "deno",
+}
+
+
+def _judge_cli(probe: dict, out: str, err: str, code: int, out_cap: int) -> dict:
+    """cli/cmd 共用判定：退出码（写了才判）+ stdout/stderr 断言。
+
+    与 `_run_cli` 尾部口径完全一致；抽出来是为了让跨语言 `cmd` 探针复用同一套判据。
+    """
+    want_exit = probe.get("expect_exit")
+    problems: list[str] = []
+    if want_exit is not None and code != int(want_exit):
+        problems.append(f"退出码 {code}（期望 {int(want_exit)}）")
+    has = probe.get("stdout_has")
+    if has:
+        needles = [has] if isinstance(has, str) else list(has)
+        for n in needles:
+            if str(n) not in out:
+                problems.append(f"stdout 里没有 {str(n)!r}")
+    if probe.get("stdout_eq") is not None:
+        if out.strip() != str(probe.get("stdout_eq")).strip():
+            problems.append(f"stdout 是 {_tail(out, 120)!r}，期望 {probe.get('stdout_eq')!r}")
+    for n in ([probe.get("stderr_has")] if isinstance(probe.get("stderr_has"), str)
+              else list(probe.get("stderr_has") or [])):
+        if n and str(n) not in err:
+            problems.append(f"stderr 里没有 {str(n)!r}")
+    if problems and err.strip():
+        problems.append("stderr：" + _tail(err, 200))
+    return {"ok": not problems,
+            "detail": "；".join(problems) if problems else "退出码 0，stdout 符合预期",
+            "evidence": {"exit": code, "stdout": _tail(out, out_cap),
+                         "stderr": _tail(err, out_cap)}}
+
+
+def _run_cmd(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict:
+    """跨语言构建/测试命令（mvn test / go test ./... / npm test …）。
+
+    为什么需要：cli 探针原本写死 `python <entry>`，Java/Go/Node/Rust 项目**根本没法验收**，
+    生态包也就只能覆盖 Python——这是"栈太少"的结构原因（2026-11-23）。
+    安全：argv 列表传参不经 shell；可执行文件必须在白名单；cwd 固定在项目根。
+    """
+    raw = probe.get("cmd")
+    if not isinstance(raw, list) or not raw:
+        return {"ok": False, "invalid": True, "detail": "cmd 必须是非空字符串列表"}
+    argv = [str(x) for x in raw]
+    exe = Path(argv[0]).name.lower()
+    if exe not in _CMD_ALLOW:
+        return {"ok": False, "invalid": True,
+                "detail": f"cmd 的可执行文件 {argv[0]!r} 不在白名单（如 mvn/go/cargo/npm/python）"}
+    try:
+        _r = _run_child(argv, cwd=str(ws), timeout=timeout, env=_env(ws))
+        if _r["timed_out"]:
+            return {"ok": False, "detail": f"命令超时 {timeout}s：{' '.join(argv[:4])}"}
+        return _judge_cli(probe, _r["out"], _r["err"], _r["code"], out_cap)
+    except FileNotFoundError:
+        return {"ok": False, "detail": f"命令不存在：{argv[0]}（本机未安装该工具链）"}
+    except Exception as exc:                             # noqa: BLE001
+        return {"ok": False, "detail": f"命令执行失败：{type(exc).__name__}: {exc}"}
+
+
 def _run_cli(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict:
+    # 跨语言命令优先（生态包 spring_boot / go_service / node_express 用）
+    if probe.get("cmd") is not None:
+        return _run_cmd(ws, probe, timeout, out_cap)
     entry = str(probe.get("entry") or "").strip()
     target = (ws / entry).resolve()
     try:

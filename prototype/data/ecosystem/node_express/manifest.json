@@ -1,0 +1,12 @@
+{
+ "name": "node_express",
+ "version": "1",
+ "kind": "stack",
+ "description": "Node.js Express 后端：识别 server.js，用 cli.cmd 探针跑 npm test（或 node 自检脚本），断言退出码与输出（跨语言栈，2026-11-23）",
+ "provides": ["stack:node_express", "probe:cli"],
+ "needs": [],
+ "adapter_class": "NodeExpressAdapter",
+ "detect_markers": ["server.js"],
+ "verify": ["python", "-c", "print('node_express ok')"],
+ "notes": "marker 只用 server.js（不共用 package.json，避免与 frontend_spa 抢判；spa 的 marker 是 package.json+vite）。cli.cmd 探针必须给 stdout_has/stdout_eq，可执行文件须在白名单（npm/npx/node/pnpm/yarn）。本机没装 Node 时如实报『命令不存在』，不假装通过。"
+}

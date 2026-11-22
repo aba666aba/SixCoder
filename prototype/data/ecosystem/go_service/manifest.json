@@ -1,0 +1,12 @@
+{
+ "name": "go_service",
+ "version": "1",
+ "kind": "stack",
+ "description": "Go 服务/命令行（go.mod）：用 cli.cmd 探针真跑 go test ./...，断言 ok 与编译通过（跨语言栈，2026-11-23）",
+ "provides": ["stack:go_service", "probe:cli"],
+ "needs": [],
+ "adapter_class": "GoServiceAdapter",
+ "detect_markers": ["go.mod"],
+ "verify": ["python", "-c", "print('go_service ok')"],
+ "notes": "marker 只用 go.mod（独特，不与 pom.xml/package.json/manage.py 冲突）。cli.cmd 探针必须给 stdout_has（go test 的 'ok' 或 'PASS'），可执行文件须在白名单（go）。本机没装 Go 时如实报『命令不存在』，不假装通过。"
+}

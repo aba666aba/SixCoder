@@ -1,0 +1,12 @@
+{
+ "name": "spring_boot",
+ "version": "1",
+ "kind": "stack",
+ "description": "Java Spring Boot（Maven）：识别 pom.xml，用 cli.cmd 探针真跑 mvn test，断言 BUILD SUCCESS 与用例通过（跨语言栈，2026-11-23）",
+ "provides": ["stack:spring_boot", "probe:cli"],
+ "needs": [],
+ "adapter_class": "SpringBootAdapter",
+ "detect_markers": ["pom.xml"],
+ "verify": ["python", "-c", "print('spring_boot ok')"],
+ "notes": "marker 只用 pom.xml（与 Python 的 manage.py/app/main.py、Node 的 server.js、Go 的 go.mod 都不重叠）。cli.cmd 探针必须给 stdout_has（如 Maven 的 BUILD SUCCESS），可执行文件须在白名单（mvn/mvnw/gradle/gradlew）。本机没装 JDK/Maven 时如实报『命令不存在』，不假装通过。"
+}

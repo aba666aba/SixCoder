@@ -232,6 +232,33 @@ def main() -> int:
     check("有 pyproject.toml 但无 lib/ → 仍判 cli_tool（marker 不共用抢判）",
           _stk2.detect(_cli_only) == "cli_tool", _stk2.detect(_cli_only))
 
+    print("[4e] spring_boot / go_service / node_express 跨语言栈（cli.cmd 真探针）")
+    for _n, _marker, _needle in (("spring_boot", "pom.xml", "mvn"),
+                                 ("go_service", "go.mod", "go test"),
+                                 ("node_express", "server.js", "npm")):
+        check(f"{_n} 已登记", _n in packs, str(packs))
+        _inst2, _why2 = eco.load_adapter(_n)
+        check(f"{_n} 适配器可加载", _inst2 is not None, _why2)
+        if _inst2:
+            check(f"{_n} 非 ASGI（不走 http 探针）", _inst2.asgi_app() is False)
+            check(f"{_n} web_rules 引导 cli.cmd 探针",
+                  "cli.cmd" in bpmod.web_rules(_n), bpmod.web_rules(_n)[:80])
+            check(f"{_n} web_rules 点名构建命令", _needle in bpmod.web_rules(_n))
+        _w2 = _P2(_t3.mkdtemp(prefix="eco_%s_" % _n))
+        _TMP.append(_w2)
+        (_w2 / _marker).write_text("x", encoding="utf-8")
+        check(f"{_n} 项目被正确识别", _stk2.detect(_w2) == _n, _stk2.detect(_w2))
+    from core import probe as _pr2
+    check("cmd 探针接受 mvn test",
+          not _pr2.validate({"kind": "cli", "cmd": ["mvn", "-q", "test"],
+                             "stdout_has": "BUILD SUCCESS"}))
+    check("cmd 探针拒绝非白名单可执行",
+          any("白名单" in x for x in _pr2.validate(
+              {"kind": "cli", "cmd": ["rm", "-rf", "/"], "stdout_has": "x"})))
+    check("cmd 探针拒绝只看退出码",
+          any("stdout_has" in x for x in _pr2.validate(
+              {"kind": "cli", "cmd": ["go", "test"]})))
+
     print("[5] 协商接线：install_ecosystem")
     op = {"op": "install_ecosystem", "cap": "cap.x", "pack": _pack("t_wi")}
     check("valid_patch_op 放行合法生态包", jf.valid_patch_op(op)[0])
