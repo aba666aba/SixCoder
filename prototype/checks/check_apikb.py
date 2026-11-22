@@ -26,6 +26,14 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp()) / "api_index.db"
     st = apikb.build([str(STDLIB)], tmp)
     print(f"索引: {st}")
+    if st["files"] == 0:
+        # 内置 Python 是嵌入式发行版：标准库打进 python3xx.zip，`Lib/` 下只剩
+        # 第三方子目录（site-packages 被 apikb.SKIP 排除）→ os.walk 拿不到标准库 .py。
+        # 这不是 apikb 的缺陷，更不是产物错；产品里 apikb 索引的是**项目 venv 的
+        # site-packages**（有真实 .py），不受影响（2026-11-23 查明）。
+        print("SKIP：本解释器标准库以 zip 分发（无 .py 源文件），标准库索引不适用。")
+        print("      换普通 CPython 或对项目依赖建索引时本自检有效（不算通过，只是没覆盖）。")
+        return 0
     ok &= check("索引构建成功", st["api_total"] > 500, str(st))
     ok &= check("耗时在可接受范围（<60s）", st["seconds"] < 60, str(st["seconds"]))
 

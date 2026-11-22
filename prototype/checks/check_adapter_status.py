@@ -147,6 +147,16 @@ def main() -> int:
     ck("禁止在返回值里塞 status", "在返回值里塞 `status`" in rules, rules[-260:])
 
     print()
+    try:
+        import django  # noqa: F401
+    except ImportError:
+        # 这条自检要真起 django 项目验"状态码归传输层"，引擎内置 Python 不带 django
+        # （requirements.txt 也没有——django 是**用户项目**的依赖，不是引擎的）。
+        # 缺依赖就如实跳过，别把"没跑成"记成"跑红了"（2026-11-23）。
+        print("[2] 适配层：本环境没有 django → SKIP（pip install django 后可跑，不算通过）")
+        print()
+        print("SKIP：django 适配层未覆盖（缺依赖）；[1] 契约规则已通过")
+        return 0
     print("[2] 适配层：真发请求看状态码")
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
