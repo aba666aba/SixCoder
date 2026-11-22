@@ -374,8 +374,8 @@ def _effective_cmd(cmd: list[str]) -> list[str]:
     """把命令首元素解析成真正能被执行的形式。
 
     为什么（本机实测）：
-      · 裸 "python" 可能是 WorkBuddy 自带的 3.13（没 pytest），而引擎跑在
-        D:/Python/python.exe（有 pytest）—— 用 sys.executable 才拿得到测试依赖。
+      · 裸 "python" 可能是别的解释器（没 pytest），而引擎跑在自带解释器
+        （sys.executable，有 pytest）—— 用它才拿得到测试依赖。
       · Windows 上 npm/npx/mvn 是 .CMD，直接 Popen(["npm", ...]) 必
         FileNotFoundError；shutil.which 解析出带 .CMD 的绝对路径后才能真跑。
     """

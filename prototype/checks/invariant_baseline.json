@@ -2064,13 +2064,6 @@
     "snip": "\"这类**没有来源证据**，不要当成'流到了哪里'的结论\"]}",
     "依据": "交付报告/台账里的提示文本：写给维护者看的建议或边界说明，不是系统硬性限制"
   },
-  "flow.py|截断长度|160|de5b45d3": {
-    "file": "flow.py",
-    "kind": "截断长度",
-    "value": "160",
-    "snip": "out[\"error\"] = \"构造探针对象失败：%s: %s\" % (type(exc).__name__, str(exc)[:160])",
-    "依据": "异常摘要截断：只把异常写进失败原因给人看，判据看的是 ok 布尔与异常类型，不看截断后的文字"
-  },
   "contextpack.py|截断长度|30|a67c459b": {
     "file": "contextpack.py",
     "kind": "截断长度",
@@ -2685,13 +2678,6 @@
     "kind": "截断长度",
     "value": "300",
     "snip": "out[\"checks\"].append({\"name\": name, \"ok\": bool(ok), \"detail\": str(detail)[:300]})",
-    "依据": "展示/日志截断（2026-11-08 修复批次引入）：只影响契约渲染与报告可读性，不参与机械判据"
-  },
-  "flow.py|截断长度|120|015d75ee": {
-    "file": "flow.py",
-    "kind": "截断长度",
-    "value": "120",
-    "snip": "out[\"error\"] = \"import %s 失败：%s: %s\" % (stem, type(exc).__name__, str(exc)[:120])",
     "依据": "展示/日志截断（2026-11-08 修复批次引入）：只影响契约渲染与报告可读性，不参与机械判据"
   },
   "flow.py|截断长度|200|9bd75402": {
@@ -3513,13 +3499,6 @@
     "snip": "\"detail\": str(getattr(_sm, \"detail\", \"\") or \"\")[:300],",
     "依据": "展示/日志截断（2026-11-10 修复批次）：只影响提示与报告可读性，不参与机械判据"
   },
-  "openhouse.py|截断长度|300|1cb38537": {
-    "file": "openhouse.py",
-    "kind": "截断长度",
-    "value": "300",
-    "snip": "_d = str(c.get(\"detail\") or \"\")[:300]",
-    "依据": "展示/日志截断（2026-11-10 修复批次）：只影响提示与报告可读性，不参与机械判据"
-  },
   "patch.py|默认上限|floor=1200|5110f10a": {
     "file": "patch.py",
     "kind": "默认上限",
@@ -3772,20 +3751,6 @@
     "snip": "\"路由由引擎接线层按函数名自动挂；**不要写 app/main.py**（引擎生成）\")",
     "依据": "提示词约定：约束远端写码时的落点选择（入口由引擎生成）；违反时由结构体检/机械判据兜住，不参与数值判据"
   },
-  "auto.py|禁令|  **不要**写 `user` / `account` / `principa|058858e9": {
-    "file": "auto.py",
-    "kind": "禁令",
-    "value": "  **不要**写 `user` / `account` / `principa",
-    "snip": "\" **不要**写 `user` / `account` / `principal` 这类对象参数\\n\"",
-    "依据": "提示词约定：约束远端写码时的函数签名形态（凭据参数必须叫 authorization 且是 str）；违反时由接线层接不上→404 的机械判据兜住，不参与数值判据（§11.4k）"
-  },
-  "company.py|截断长度|800|0aa24db4": {
-    "file": "company.py",
-    "kind": "截断长度",
-    "value": "800",
-    "snip": "_ev = \"；\".join(_cap_ev.get(_m) or [])[:800]",
-    "依据": "展示/日志截断：长度 800 用于失败证据摘要，不影响判据（真判据跑的是完整契约示例）"
-  },
   "patch.py|截断长度|40|3abafd5c": {
     "file": "patch.py",
     "kind": "截断长度",
@@ -3813,5 +3778,474 @@
     "value": "800",
     "snip": "ev = \"；\".join(evidence.get(m) or [])[:800]",
     "依据": "展示/日志截断：从原 _cap_ev 循环原样搬入 _cap_orders_from_red（纯函数），失败证据摘要截断 800 字符，不影响判据（真判据跑的是端到端探针）。与原 company.py|截断长度|800|0aa24db4 同一限制"
+  },
+  "browser.py|截断长度|160|917bb1a8": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"%s %s (%s)\" % (req.method, req.url[:160],",
+    "依据": "展示/台账/日志截断：长度 160 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "browser.py|截断长度|160|628e4c0a": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"HTTP %d %s\" % (resp.status, resp.url[:160]))",
+    "依据": "展示/台账/日志截断：长度 160 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "browser.py|截断长度|300|312d7e30": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "visit_res.error = \"%s: %s\" % (type(exc).__name__, str(exc)[:300])",
+    "依据": "展示/台账/日志截断：长度 300 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "company.py|截断长度|120|23c1d0f5": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "% (type(_exc).__name__, str(_exc)[:120])})",
+    "依据": "展示/台账/日志截断：长度 120 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "company.py|截断长度|600|a766e310": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "extra=(\"本轮业务流：\" + str(biz_flow)[:600]",
+    "依据": "展示/台账/日志截断：长度 600 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "company.py|截断长度|600|0fe460c0": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "\"rootcause\": str(_wres.get(\"rootcause\") or \"\")[:600],",
+    "依据": "展示/台账/日志截断：长度 600 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "converge.py|禁令|→ 换打法（拆小批次/点名具体改法），不许继续循环|dbf5f422": {
+    "file": "converge.py",
+    "kind": "禁令",
+    "value": "→ 换打法（拆小批次/点名具体改法），不许继续循环",
+    "snip": "f\"→ 换打法（拆小批次/点名具体改法），不许继续循环\",",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "coverage.py|截断长度|60|ad23df37": {
+    "file": "coverage.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "_vs = _vs[:60] + \"…\"",
+    "依据": "展示/台账/日志截断：长度 60 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "coverage.py|截断长度|293|d014eb85": {
+    "file": "coverage.py",
+    "kind": "截断长度",
+    "value": "293",
+    "snip": "_rb = _rb[:293] + \"…\"",
+    "依据": "展示/台账/日志截断：长度 293 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "coverage.py|截断长度|4000|87aeccf2": {
+    "file": "coverage.py",
+    "kind": "截断长度",
+    "value": "4000",
+    "snip": "\"detail\": str(row.get(\"detail\") or \"\")[:4000],",
+    "依据": "展示/台账/日志截断：长度 4000 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|截断长度|2000|fddbde96": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "2000",
+    "snip": "\"round\": round_no, \"detail\": str(detail or \"\")[:2000],",
+    "依据": "展示/台账/日志截断：长度 2000 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|截断长度|2000|fcc33207": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "2000",
+    "snip": "\"round\": int(round_no), \"detail\": str(detail or \"\")[:2000],",
+    "依据": "展示/台账/日志截断：长度 2000 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|截断长度|220|93438f87": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "220",
+    "snip": "item[k] = (json.dumps(v, ensure_ascii=False)[:220]",
+    "依据": "展示/台账/日志截断：长度 220 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|截断长度|3000|6adb857c": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "3000",
+    "snip": "\"实际现象\": str((_row or {}).get(\"detail\") or \"\")[:3000]})",
+    "依据": "展示/台账/日志截断：长度 3000 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|禁令|不要只凭「判据定义」的文本推断。实测教训：连续 6 轮审核者只盯着判据文本|ab415cf0": {
+    "file": "deadlock.py",
+    "kind": "禁令",
+    "value": "不要只凭「判据定义」的文本推断。实测教训：连续 6 轮审核者只盯着判据文本",
+    "snip": "\"不要只凭「判据定义」的文本推断。实测教训：连续 6 轮审核者只盯着判据文本\"",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "deadlock.py|禁令|期望值是否合理、步骤要不要增删）由你们三方判断并给处方，引擎只做|90fc0491": {
+    "file": "deadlock.py",
+    "kind": "禁令",
+    "value": "期望值是否合理、步骤要不要增删）由你们三方判断并给处方，引擎只做",
+    "snip": "\"期望值是否合理、步骤要不要增删）由你们三方判断并给处方，引擎只做\"",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "deadlock.py|禁令|**安全边界**（只碰判据、不碰产物代码）。宁可你们多改，也不要本地|20e0e067": {
+    "file": "deadlock.py",
+    "kind": "禁令",
+    "value": "**安全边界**（只碰判据、不碰产物代码）。宁可你们多改，也不要本地",
+    "snip": "\"**安全边界**（只碰判据、不碰产物代码）。宁可你们多改，也不要本地\"",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "deadlock.py|截断长度|300|f5ae6db1": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "reasons[role] = {\"reason\": str(v.get(\"reason\") or \"\")[:300],",
+    "依据": "展示/台账/日志截断：长度 300 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|截断长度|300|908a6161": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"judge_fix\": str(v.get(\"judge_fix\") or \"\")[:300],",
+    "依据": "展示/台账/日志截断：长度 300 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|截断长度|1500|b73b11c1": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "1500",
+    "snip": "\"写作者说明\": str(rootcause or \"\")[:1500],",
+    "依据": "展示/台账/日志截断：长度 1500 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|截断长度|300|857595c6": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"judge_fix\": str(v.get(\"judge_fix\") or \"\")[:300]}",
+    "依据": "展示/台账/日志截断：长度 300 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "detectors.py|截断长度|800|61f121cf": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "evidence=tail[:800], symbol=\"app.main\")]",
+    "依据": "展示/台账/日志截断：长度 800 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "detectors.py|截断长度|600|1f6ac3ae": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "evidence=str(details.get(cid) or \"\")[:600], symbol=str(cid)))",
+    "依据": "展示/台账/日志截断：长度 600 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "django_wire.py|禁令|方法不允许：%s|624453db": {
+    "file": "django_wire.py",
+    "kind": "禁令",
+    "value": "方法不允许：%s",
+    "snip": "' return JsonResponse({\"detail\": \"方法不允许：%s\"}, status=405)' % rel,",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "fullgen.py|禁令|本轮**只做诊断，不许改任何文件**：把 `<rootcause>` 写到你认为|025c4b75": {
+    "file": "fullgen.py",
+    "kind": "禁令",
+    "value": "本轮**只做诊断，不许改任何文件**：把 `<rootcause>` 写到你认为",
+    "snip": "_extra = (\"本轮**只做诊断，不许改任何文件**：把 `<rootcause>` 写到你认为\"",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "fullgen.py|禁令|## 检测器报出的问题（只改这些，不要重写无关部分）|a0ca70b3": {
+    "file": "fullgen.py",
+    "kind": "禁令",
+    "value": "## 检测器报出的问题（只改这些，不要重写无关部分）",
+    "snip": "lines = [\"## 检测器报出的问题（只改这些，不要重写无关部分）\", \"\"]",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "fullgen.py|截断长度|160|dbe5a004": {
+    "file": "fullgen.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"action\": verdict.action, \"why\": verdict.why[:160]})",
+    "依据": "展示/台账/日志截断：长度 160 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "openhouse.py|截断长度|300|cb78ce43": {
+    "file": "openhouse.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "_d = _head[:300] + \"\\n\" + _MARK + _tail[:1200]",
+    "依据": "展示/台账/日志截断：长度 300 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "openhouse.py|截断长度|1200|cb78ce43": {
+    "file": "openhouse.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "_d = _head[:300] + \"\\n\" + _MARK + _tail[:1200]",
+    "依据": "展示/台账/日志截断：长度 1200 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "openhouse.py|截断长度|300|b4e9494a": {
+    "file": "openhouse.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "_d = _raw_d[:300]",
+    "依据": "展示/台账/日志截断：长度 300 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "remote.py|截断长度|400|05a60cfe": {
+    "file": "remote.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "return str(kw[\"cap_id\"])[:400]",
+    "依据": "展示/台账/日志截断：长度 400 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "remote.py|截断长度|400|3986282b": {
+    "file": "remote.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "return str((_at.snapshot() or {}).get(\"cap_id\") or \"\")[:400]",
+    "依据": "展示/台账/日志截断：长度 400 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "scratch_store.py|截断长度|16|3a391c5c": {
+    "file": "scratch_store.py",
+    "kind": "截断长度",
+    "value": "16",
+    "snip": "return hashlib.sha1(p.rstrip(\"/\").lower().encode(\"utf-8\")).hexdigest()[:16]",
+    "依据": "展示/台账/日志截断：长度 16 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "settings_store.py|截断长度|32|53f58ccf": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "kid = str(raw.get(\"id\") or (\"k%d\" % (idx + 1))).strip()[:32]",
+    "依据": "展示/台账/日志截断：长度 32 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "settings_store.py|截断长度|48|76049ca5": {
+    "file": "settings_store.py",
+    "kind": "截断长度",
+    "value": "48",
+    "snip": "\"label\": str(raw.get(\"label\") or kid)[:48],",
+    "依据": "展示/台账/日志截断：长度 48 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "triage.py|截断长度|24|82e0b8e2": {
+    "file": "triage.py",
+    "kind": "截断长度",
+    "value": "24",
+    "snip": "return cls, action, \"%s（命中 %r）\" % (why, m.group(0)[:24])",
+    "依据": "展示/台账/日志截断：长度 24 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "validators.py|截断长度|400|84bd8992": {
+    "file": "validators.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "why = mw.group(1).strip()[:400]",
+    "依据": "展示/台账/日志截断：长度 400 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "wholerepo.py|截断长度|1200|a7e6324f": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "1200",
+    "snip": "str(h.get(\"text\") or \"\")[:1200]))",
+    "依据": "展示/台账/日志截断：长度 1200 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "wholerepo.py|禁令|\\n## 前几轮你已经下过的根因结论（不要重复分析；如果本轮证据推翻它，|3fb6bec0": {
+    "file": "wholerepo.py",
+    "kind": "禁令",
+    "value": "\\n## 前几轮你已经下过的根因结论（不要重复分析；如果本轮证据推翻它，",
+    "snip": "hist_txt = (\"\\n## 前几轮你已经下过的根因结论（不要重复分析；如果本轮证据推翻它，\"",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "wholerepo.py|截断长度|4000|75b6a826": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "4000",
+    "snip": "rc = m.group(0).strip()[:4000]",
+    "依据": "展示/台账/日志截断：长度 4000 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "wholerepo.py|截断长度|200|75ffda7f": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "(chk_detail or \"\")[:200]))",
+    "依据": "展示/台账/日志截断：长度 200 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "wholerepo.py|截断长度|24|a0e599fd": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "24",
+    "snip": "fields = [\"%s=%s\" % (k, str(v)[:24]) for k, v in list(ej.items())[:3]]",
+    "依据": "展示/台账/日志截断：长度 24 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "wholerepo.py|截断长度|110|57080308": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "110",
+    "snip": "desc = str(c.get(\"desc\") or \"\")[:110]",
+    "依据": "展示/台账/日志截断：长度 110 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "wholerepo.py|禁令|## ④ **已经通过的能力（红线：不许让它们变红）**（%d 条）|d32d571e": {
+    "file": "wholerepo.py",
+    "kind": "禁令",
+    "value": "## ④ **已经通过的能力（红线：不许让它们变红）**（%d 条）",
+    "snip": "lines.append(\"## ④ **已经通过的能力（红线：不许让它们变红）**（%d 条）\"",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "wholerepo.py|禁令|\\n### 🚫 本轮禁止提交对以下文件的任何改动（踩过的命门）\\n|a81a5a55": {
+    "file": "wholerepo.py",
+    "kind": "禁令",
+    "value": "\\n### 🚫 本轮禁止提交对以下文件的任何改动（踩过的命门）\\n",
+    "snip": "out.append(\"\\n### 🚫 本轮禁止提交对以下文件的任何改动（踩过的命门）\\n\")",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "wholerepo.py|禁令|论证非改它不可，也**不许交**。想办法在别处达成目标，|df6dba83": {
+    "file": "wholerepo.py",
+    "kind": "禁令",
+    "value": "论证非改它不可，也**不许交**。想办法在别处达成目标，",
+    "snip": "\"论证非改它不可，也**不许交**。想办法在别处达成目标，\"",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "wholerepo.py|禁令|\\n**本轮不要重做上次的改动**。先查清「为什么会弄红」，|8485dee9": {
+    "file": "wholerepo.py",
+    "kind": "禁令",
+    "value": "\\n**本轮不要重做上次的改动**。先查清「为什么会弄红」，",
+    "snip": "out.append(\"\\n**本轮不要重做上次的改动**。先查清「为什么会弄红」，\"",
+    "依据": "提示词约定：约束模型输出形态/行为边界（非系统硬限制），由结构体检与机械判据兜底；改动需同步改对应自检"
+  },
+  "wholerepo.py|截断长度|300|a39343c0": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "% json.dumps(_review.get(\"votes\") or {}, ensure_ascii=False)[:300],",
+    "依据": "展示/台账/日志截断：长度 300 只截取给人读或写进 .sixcoder 台账的文本，不参与判据、不是喂给远端的写码上下文（写码上下文上限在 author.py REMOTE_CTX_CHARS，不掐）"
+  },
+  "deadlock.py|截断长度|160|d97309ee": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"提示\": str(_tc.get(\"fix_hint\") or \"本机不可用\")[:160]})",
+    "依据": "台账/提示词截断：缺工具提示塞进协商 packet 时截 160 字，属展示性，不影响判据"
+  },
+  "deadlock.py|截断长度|160|56b4905a": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "{\"id\": \"browser\", \"提示\": str(_bwhy)[:160]})",
+    "依据": "台账/提示词截断：缺工具提示塞进协商 packet 时截 160 字，属展示性，不影响判据"
+  },
+  "deadlock.py|禁令|优先怀疑①或③，不要再改一遍判据期望值（追移动靶）。|27b6852f": {
+    "file": "deadlock.py",
+    "kind": "禁令",
+    "value": "优先怀疑①或③，不要再改一遍判据期望值（追移动靶）。",
+    "snip": "\"优先怀疑①或③，不要再改一遍判据期望值（追移动靶）。\"",
+    "依据": "提示词约定：诊断方法文案（约束审核者归因行为），非系统硬限制"
+  },
+  "tool_lib.py|禁令|verify 不允许安装/下载类命令：%s|d44be380": {
+    "file": "tool_lib.py",
+    "kind": "禁令",
+    "value": "verify 不允许安装/下载类命令：%s",
+    "snip": "return False, \"verify 不允许安装/下载类命令：%s\" % head",
+    "依据": "安全边界：verify 命令白名单（拒装包/下载），由 check_tool_lib[3] 五条断言覆盖；改动需同步该自检"
+  },
+  "tool_lib.py|禁令|verify 不允许包安装：%s %s|313de3dd": {
+    "file": "tool_lib.py",
+    "kind": "禁令",
+    "value": "verify 不允许包安装：%s %s",
+    "snip": "return False, \"verify 不允许包安装：%s %s\" % (tok, verify[i + 1])",
+    "依据": "安全边界：verify 命令白名单（拒装包/下载），由 check_tool_lib[3] 五条断言覆盖；改动需同步该自检"
+  },
+  "tool_lib.py|截断长度|200|ac36d689": {
+    "file": "tool_lib.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"description\": str(m.get(\"description\") or \"\")[:200],",
+    "依据": "展示截断：list_tools 的 description 截 200 字给人看，不参与判据、不喂远端写码上下文"
+  },
+  "deadlock.py|禁令|包名只允许 `名字` 或 `名字==精确版本`，禁止 -r/-e/git+/UR|0be476cc": {
+    "file": "deadlock.py",
+    "kind": "禁令",
+    "value": "包名只允许 `名字` 或 `名字==精确版本`，禁止 -r/-e/git+/UR",
+    "snip": "\"包名只允许 `名字` 或 `名字==精确版本`，禁止 -r/-e/git+/URL/路径；\"",
+    "依据": "提示词约定：install_env 包名白名单文案（约束审核者只开精确版本），真实校验在 envinstall.valid_package，由 check_env_install[2] 覆盖"
+  },
+  "deadlock.py|截断长度|80|30e0ed22": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "str(_er.get(\"verify\") or \"\")[:80]))",
+    "依据": "展示截断：安装/复验结果摘要截 80 字进协商台账，属展示性，不影响判据"
+  },
+  "judgefix.py|截断长度|80|6a9c2a06": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "str(er.get(\"verify\") or \"\")[:80]))",
+    "依据": "展示截断：安装/复验结果摘要截 80 字进协商台账，属展示性，不影响判据"
+  },
+  "deadlock.py|禁令|**同样需要 3/3 全票**；适配器源码**禁止 import os/subp|cbc8bc98": {
+    "file": "deadlock.py",
+    "kind": "禁令",
+    "value": "**同样需要 3/3 全票**；适配器源码**禁止 import os/subp",
+    "snip": "\"**同样需要 3/3 全票**；适配器源码**禁止 import os/subprocess/socket/shutil/\"",
+    "依据": "提示词约定：install_ecosystem 处方说明里给审核者的安全约束文案，真实校验在 ecosystem.validate_manifest"
+  },
+  "deadlock.py|禁令|importlib，禁止 open/exec/eval/write_text**|03b57a33": {
+    "file": "deadlock.py",
+    "kind": "禁令",
+    "value": "importlib，禁止 open/exec/eval/write_text**",
+    "snip": "\"importlib，禁止 open/exec/eval/write_text**（写盘由引擎做，adapter 只返回内容）；\"",
+    "依据": "提示词约定：install_ecosystem 处方说明里给审核者的安全约束文案，真实校验在 ecosystem.validate_manifest"
+  },
+  "ecosystem.py|禁令|禁止 import 危险模块：%s|8f877fbe": {
+    "file": "ecosystem.py",
+    "kind": "禁令",
+    "value": "禁止 import 危险模块：%s",
+    "snip": "return False, \"禁止 import 危险模块：%s\" % full",
+    "依据": "安全边界：生态包 AST 校验的拒绝文案，真实拦截逻辑由 check_ecosystem[1] 十几条断言覆盖；改动需同步该自检"
+  },
+  "ecosystem.py|禁令|禁止 from-import 危险模块：%s|98e7e897": {
+    "file": "ecosystem.py",
+    "kind": "禁令",
+    "value": "禁止 from-import 危险模块：%s",
+    "snip": "return False, \"禁止 from-import 危险模块：%s\" % mod",
+    "依据": "安全边界：生态包 AST 校验的拒绝文案，真实拦截逻辑由 check_ecosystem[1] 十几条断言覆盖；改动需同步该自检"
+  },
+  "ecosystem.py|禁令|禁止调用 %s()|c3a4c0c9": {
+    "file": "ecosystem.py",
+    "kind": "禁令",
+    "value": "禁止调用 %s()",
+    "snip": "return False, \"禁止调用 %s()\" % f.id",
+    "依据": "安全边界：生态包 AST 校验的拒绝文案，真实拦截逻辑由 check_ecosystem[1] 十几条断言覆盖；改动需同步该自检"
+  },
+  "ecosystem.py|禁令|禁止调用 .%s()（写盘/进程/删除类）|e7da9808": {
+    "file": "ecosystem.py",
+    "kind": "禁令",
+    "value": "禁止调用 .%s()（写盘/进程/删除类）",
+    "snip": "return False, \"禁止调用 .%s()（写盘/进程/删除类）\" % f.attr",
+    "依据": "安全边界：生态包 AST 校验的拒绝文案，真实拦截逻辑由 check_ecosystem[1] 十几条断言覆盖；改动需同步该自检"
+  },
+  "ecosystem.py|禁令|禁止访问 %s（逃逸面）|1903d62c": {
+    "file": "ecosystem.py",
+    "kind": "禁令",
+    "value": "禁止访问 %s（逃逸面）",
+    "snip": "return False, \"禁止访问 %s（逃逸面）\" % node.attr",
+    "依据": "安全边界：生态包 AST 校验的拒绝文案，真实拦截逻辑由 check_ecosystem[1] 十几条断言覆盖；改动需同步该自检"
+  },
+  "ecosystem.py|截断长度|200|ac36d689": {
+    "file": "ecosystem.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"description\": str(m.get(\"description\") or \"\")[:200],",
+    "依据": "展示截断：list_packs 的 description 截 200 字给人看，不参与判据"
+  },
+  "doctor.py|截断长度|24|e3333c4f": {
+    "file": "doctor.py",
+    "kind": "截断长度",
+    "value": "24",
+    "snip": "% (worst or \"无\", str(t[\"last_task\"])[:24]))))",
+    "依据": "展示截断：purpose 名在巡检证据里截 24 字给人看，不参与判据、不喂远端写码上下文"
+  },
+  "wholerepo.py|禁令|在 `<rootcause>` 里写明反证再动手；否则**按它修，不要重新分析*|377d2eb6": {
+    "file": "wholerepo.py",
+    "kind": "禁令",
+    "value": "在 `<rootcause>` 里写明反证再动手；否则**按它修，不要重新分析*",
+    "snip": "\"在 `<rootcause>` 里写明反证再动手；否则**按它修，不要重新分析**。\\n\\n\"",
+    "依据": "上下文保护：项目方诊断最多 8000 字符（结论不是文档，超长=没收敛）；超了截断不影响判据，避免撑爆简报/挤掉源码；由 check_wholerepo[9] 钉住截断行为"
   }
 }

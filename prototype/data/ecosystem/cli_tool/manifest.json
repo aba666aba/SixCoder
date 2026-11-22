@@ -1,0 +1,12 @@
+{
+ "name": "cli_tool",
+ "version": "1",
+ "kind": "stack",
+ "description": "Python 命令行工具（CLI）：识别 cli.py + pyproject.toml，用 cli 探针真跑入口脚本、断言 stdout 与退出码（含错误路径）验收",
+ "provides": ["stack:cli_tool", "probe:cli"],
+ "needs": [],
+ "adapter_class": "CliToolAdapter",
+ "detect_markers": ["cli.py"],
+ "verify": ["python", "-c", "print('cli_tool ok')"],
+ "notes": "marker 只用 cli.py（单一独特文件，避免与 py_lib 共用 pyproject.toml 抢判）；与内置 django(manage.py)/fastapi(app/main.py)、spa(package.json)、electron(main.cjs)、microservice(celery) 都不重叠。cli 探针要求 stdout_has/stdout_eq（不能只判退出码），错误路径用 expect_exit=1。"
+}

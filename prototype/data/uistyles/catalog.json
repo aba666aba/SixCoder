@@ -1,0 +1,115 @@
+{
+ "version": "1",
+ "description": "UI 审美样式库：列举页面/背景/菜单/按钮四类维度的全部类型，组合成 10 个风格预设。颜色一律是用户自填插槽（color_slots），库里不写死任何色值——只给语义与占位键，避免把'好不好看'的判据伪造成引擎可判。",
+ "dimensions": ["page", "background", "menu", "button"],
+ "color_slots": [
+  {"key": "primary", "label": "主色", "hint": "品牌/主操作色，如 #4F8CFF"},
+  {"key": "bg", "label": "背景色", "hint": "页面底色，如 #0E1117"},
+  {"key": "surface", "label": "表面色", "hint": "卡片/面板底色，如 #161B22"},
+  {"key": "text", "label": "正文色", "hint": "正文文字色，如 #E6EDF3"},
+  {"key": "accent", "label": "强调色", "hint": "链接/高亮色，如 #FF6B6B"},
+  {"key": "border", "label": "描边色", "hint": "分割线/边框色，如 #30363D"}
+ ],
+ "types": {
+  "page": [
+   {"id": "single-column", "label": "单栏", "note": "单列居中，正文阅读型"},
+   {"id": "two-column-sidebar", "label": "双栏侧栏", "note": "左导航右内容"},
+   {"id": "dashboard-grid", "label": "仪表盘网格", "note": "卡片指标网格"},
+   {"id": "landing-hero", "label": "落地页头图", "note": "大标题+主视觉+CTA"},
+   {"id": "card-list", "label": "卡片列表", "note": "等宽卡片纵向列表"},
+   {"id": "wizard-steps", "label": "分步向导", "note": "步骤条+单步表单"},
+   {"id": "kanban-board", "label": "看板", "note": "多列拖拽卡片"},
+   {"id": "split-screen", "label": "左右分屏", "note": "对等两栏"},
+   {"id": "timeline", "label": "时间线", "note": "纵向事件流"},
+   {"id": "settings-panel", "label": "设置面板", "note": "分组表单+侧导航"}
+  ],
+  "background": [
+   {"id": "solid", "label": "纯色", "note": "单色填充"},
+   {"id": "subtle-gradient", "label": "柔和渐变", "note": "两色低对比渐变"},
+   {"id": "mesh-gradient", "label": "网格渐变", "note": "多光斑径向叠加"},
+   {"id": "dark-solid", "label": "深色纯色", "note": "暗色底"},
+   {"id": "pattern-dots", "label": "点阵纹理", "note": "规则圆点背景"},
+   {"id": "image-overlay", "label": "图片叠加", "note": "图片+半透明遮罩"},
+   {"id": "noise-texture", "label": "噪点纹理", "note": "细颗粒质感"},
+   {"id": "aurora", "label": "极光", "note": "大面积柔光带"},
+   {"id": "grid-lines", "label": "网格线", "note": "细线网格"},
+   {"id": "paper", "label": "纸张", "note": "暖白纸感"}
+  ],
+  "menu": [
+   {"id": "top-bar", "label": "顶部横栏", "note": "水平导航"},
+   {"id": "left-sidebar", "label": "左侧栏", "note": "固定左导航"},
+   {"id": "collapsible-sidebar", "label": "可折叠侧栏", "note": "可收起的左导航"},
+   {"id": "bottom-nav", "label": "底部导航", "note": "移动式底栏"},
+   {"id": "hamburger-drawer", "label": "汉堡抽屉", "note": "点击展开抽屉"},
+   {"id": "tab-bar", "label": "标签栏", "note": "水平标签切换"},
+   {"id": "breadcrumb", "label": "面包屑", "note": "层级路径导航"},
+   {"id": "floating-dock", "label": "悬浮码头", "note": "居中悬浮胶囊"},
+   {"id": "command-palette", "label": "命令面板", "note": "搜索式快捷导航"},
+   {"id": "icon-rail", "label": "图标轨", "note": "窄图标竖栏"}
+  ],
+  "button": [
+   {"id": "solid-filled", "label": "实心填充", "note": "纯色填充按钮"},
+   {"id": "outline", "label": "描边", "note": "边框+透明底"},
+   {"id": "ghost", "label": "幽灵", "note": "仅文字悬浮显形"},
+   {"id": "pill", "label": "胶囊", "note": "大圆角"},
+   {"id": "gradient", "label": "渐变", "note": "双色渐变底"},
+   {"id": "shadow-raised", "label": "浮起阴影", "note": "带投影立体"},
+   {"id": "text-link", "label": "文字链接", "note": "无边框文字"},
+   {"id": "icon-only", "label": "纯图标", "note": "只有图标"},
+   {"id": "split-button", "label": "分裂按钮", "note": "主操作+下拉"},
+   {"id": "toggle", "label": "开关", "note": "二态切换"}
+  ]
+ },
+ "presets": [
+  {
+   "id": "minimal-clean", "label": "极简清爽", "category": "通用",
+   "description": "大留白、克制配色、细线条，内容优先。适合文档/后台/工具类。",
+   "dimensions": {"page": "single-column", "background": "solid", "menu": "top-bar", "button": "outline"}
+  },
+  {
+   "id": "dashboard-pro", "label": "专业仪表盘", "category": "数据",
+   "description": "指标卡片网格+固定侧栏，信息密度高。适合运营/监控后台。",
+   "dimensions": {"page": "dashboard-grid", "background": "dark-solid", "menu": "collapsible-sidebar", "button": "solid-filled"}
+  },
+  {
+   "id": "dark-neon", "label": "暗色霓虹", "category": "炫酷",
+   "description": "深色底+高饱和强调色+发光描边。适合游戏/创作者工具。",
+   "dimensions": {"page": "split-screen", "background": "mesh-gradient", "menu": "icon-rail", "button": "gradient"}
+  },
+  {
+   "id": "corporate-blue", "label": "企业蓝", "category": "商务",
+   "description": "稳重的蓝色主色+规范留白+面包屑。适合企业内部系统。",
+   "dimensions": {"page": "two-column-sidebar", "background": "subtle-gradient", "menu": "breadcrumb", "button": "solid-filled"}
+  },
+  {
+   "id": "warm-paper", "label": "暖色纸张", "category": "内容",
+   "description": "暖白纸底+衬线标题+柔和分隔。适合博客/阅读/知识库。",
+   "dimensions": {"page": "single-column", "background": "paper", "menu": "top-bar", "button": "text-link"}
+  },
+  {
+   "id": "glassmorphism", "label": "毛玻璃", "category": "现代",
+   "description": "半透明磨砂卡片+背景光斑+柔边。适合展示型/落地页。",
+   "dimensions": {"page": "landing-hero", "background": "aurora", "menu": "floating-dock", "button": "pill"}
+  },
+  {
+   "id": "brutalist", "label": "粗野主义", "category": "个性",
+   "description": "粗黑描边+硬阴影+高对比块面。适合创意/作品集。",
+   "dimensions": {"page": "card-list", "background": "grid-lines", "menu": "tab-bar", "button": "shadow-raised"}
+  },
+  {
+   "id": "soft-rounded", "label": "柔和圆角", "category": "亲和",
+   "description": "大圆角+低饱和+柔阴影。适合消费类/教育类应用。",
+   "dimensions": {"page": "wizard-steps", "background": "subtle-gradient", "menu": "bottom-nav", "button": "pill"}
+  },
+  {
+   "id": "nature-green", "label": "自然绿", "category": "内容",
+   "description": "大地色+点阵纹理+绿色主调。适合健康/环保/生活类。",
+   "dimensions": {"page": "timeline", "background": "pattern-dots", "menu": "left-sidebar", "button": "outline"}
+  },
+  {
+   "id": "retro-terminal", "label": "复古终端", "category": "极客",
+   "description": "等宽字体+深色底+命令行式交互。适合开发者工具/运维面板。",
+   "dimensions": {"page": "settings-panel", "background": "dark-solid", "menu": "command-palette", "button": "ghost"}
+  }
+ ]
+}

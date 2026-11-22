@@ -16,7 +16,8 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, r"E:\AAATOM\NewLai\SixCoder\prototype")
+ROOT = Path(__file__).resolve().parents[1]   # checks/ 的上一级 = prototype/（换盘符不失效）
+sys.path.insert(0, str(ROOT))
 
 from core import calibration, effort, settings_store  # noqa: E402
 
@@ -47,8 +48,7 @@ def main() -> int:
           effort.difficulty(funcs=9, examples=9, fails=9, stub=True, lines=999) >= 7)
 
     print("[3] 校准器不得再按成功率下调 code_effort_ceiling")
-    src = Path(r"E:\AAATOM\NewLai\SixCoder\prototype\core\calibration.py").read_text(
-        encoding="utf-8")
+    src = (ROOT / "core" / "calibration.py").read_text(encoding="utf-8")
     check("不再有 'want = max(good)[1]' 这种按成功率选档的写法",
           "want = max(good)[1]" not in src,
           "校准器又会把封顶按成功率压下去")
@@ -111,8 +111,7 @@ def main() -> int:
         check("台账损坏不抛错、返回空串", effort.proven_floor(ws, "app/x.py") == "")
 
     print("[8] company.py 起点接线（实测档案优先 + 先验兜底，静态钉住）")
-    csrc = Path(r"E:\AAATOM\NewLai\SixCoder\prototype\core\company.py").read_text(
-        encoding="utf-8")
+    csrc = (ROOT / "core" / "company.py").read_text(encoding="utf-8")
     check("起点 = proven_floor 优先", "_start = _pf or _eff_m.route_start(_score)" in csrc)
     check("proven_floor 查询已接入起点", "_eff_m.proven_floor(ws, rel)" in csrc)
     check("档案命中时事件流解释来源", "模块实测档案" in csrc)

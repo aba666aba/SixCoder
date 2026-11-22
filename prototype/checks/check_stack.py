@@ -49,7 +49,9 @@ print("[1] 注册表与默认栈（dataclass 覆盖坑的反向钉子）")
 
 st = ST.current(None)
 check("默认栈是 fastapi", st.name == "fastapi", st.name)
-check("两个适配器都注册了", set(ST.names()) == {"fastapi", "django"},
+# 内置两栈必须在；**允许生态包追加**（2026-11-19：frontend_spa 等由 ecosystem 注册，
+# 硬等号会把"合法的第三个栈"判红 —— 那正是判据过时）。
+check("内置两栈都注册了", {"fastapi", "django"} <= set(ST.names()),
       str(ST.names()))
 dj = ST.get("django")
 check("Django 适配器的 name 真是 django（不是被基类默认值盖掉）",

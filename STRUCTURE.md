@@ -1,6 +1,6 @@
 # SixCoder 结构说明
 
-> 一句话：**`prototype/` 是唯一的产品代码；一键启动是根目录的 `start.bat`；夜班启动是 `START_NIGHT.bat`；`开发文档.md` 是权威开发文档（认它，别认本文件）。**
+> 一句话：**`prototype/` 是唯一的产品代码；用户入口只有一个 —— 安装包 `SixCoder-Setup-*.exe`（根目录不再有任何 bat/ps1 启动脚本）；`开发文档.md` 是权威开发文档（认它，别认本文件）。**
 >
 > 本文件只回答"东西在哪、哪份是准的"。**行为口径一律以 `开发文档.md` 为准。**
 
@@ -8,10 +8,12 @@
 
 ```
 SixCoder/
-├─ start.bat / start.ps1     ★ 一键启动（双击）：后端 + 桌面窗口（start.ps1 认 -Web / -NoShell / -Port）
-├─ stop.bat / stop.ps1        停后端 + 关窗口
-├─ START_NIGHT.bat           ★ 夜班启动（双击）：起看门狗（看门狗按排班自动拉夜班）+ 巡检
-├─ STOP_NIGHT.bat            夜班停止（按 PID，只停 SixCoder，不碰用户其它 python 项目）
+├─ (无启动脚本)               ★ 用户入口 = 安装包；所有开关都在界面里（复核过：根目录零 bat/ps1）
+│     安装包 dist-installer/SixCoder-Setup-<版本>.exe
+│       ├─ 装到 %LOCALAPPDATA%\Programs\SixCoder（per-user，不弹 UAC，可覆盖安装）
+│       ├─ 自带便携 Python + 依赖（用户不需要装 Python/Node）
+│       └─ 控制面板可卸载；卸载页可选「保留本地运行数据」（默认保留）
+├─ packaging/                打包与验收（build_installer.py 打包 / test_uninstall.py 真装真卸）
 ├─ prototype/                ★ 产品本体（FastAPI 后端 + Vue 前端）
 │  ├─ server.py              HTTP 入口（含 /v1/settings/remote、/v1/night/* 等）
 │  ├─ cli.py                 命令行入口（night / run / remote / plan / clean ...）
@@ -73,10 +75,11 @@ python cli.py night --repo <dir> --goal-file <需求.md>      # 正式开工（�
 python cli.py plan show / plan slices          # 看蓝图 / 切片
 python cli.py remote                           # 远端用量与成本
 python cli.py clean --benchmarks --yes         # 清理基准任务与工作区
-python server.py --port 8760                   # 起后端（或用 start.bat / shell/ 桌面壳）
+python server.py --port 8760                   # 起后端（开发态；用户态由安装包里的壳拉起）
 ```
 
-夜班由 `START_NIGHT.bat` 起（看门狗按排班自动拉起夜班），`STOP_NIGHT.bat` 停。
+夜班的起停都在界面：`POST /v1/night/detached` 起（独立进程 + 看门狗），`POST /v1/night/stop` 停；
+检测 / 检测+修复 / 生成契约走 `POST /v1/ops/start`。**没有命令行脚本入口了。**
 
 ## 当前关键口径（细节看 `开发文档.md`）
 
@@ -93,7 +96,8 @@ python server.py --port 8760                   # 起后端（或用 start.bat / 
 
 - **代码只留产品需要的**：`reference/`（旧 Java/Vue/RAG）与 `graft_demo/`（符号图研究分支）已删除，
   可复用的部分**只保留知识与设计契约**（`docs/15`、`docs/18`）。
-- **一键启动在根目录**：`start.bat` / `start.ps1` / `stop.bat` / `stop.ps1`，路径与依赖都由脚本自己找。
+- **用户入口只有一个 EXE**：`start.bat` / `start.ps1` / `stop.bat` / `stop.ps1` / `START_NIGHT.bat` / `STOP_NIGHT.bat`
+  已全部删除（2026-11-20），功能搬进界面与 `server.py` 接口；打包脚本也从 ps1 收成 Python。
 - 自检脚本集中到 `prototype/checks/`，统一入口 `run_all.py`（168 个，可任意 cwd 运行）。
 - 运行期产物（`workspaces/`、`*.db`、`_logs/`、`node_modules/`、`dist/`）全部 gitignore，
   并把 `settings.json`（含明文 Key）与 `capability.json`（本地模型能力记忆）移出索引；

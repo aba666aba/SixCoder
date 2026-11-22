@@ -1,0 +1,24 @@
+{
+ "name": "electron",
+ "version": "1",
+ "kind": "stack",
+ "description": "Electron 桌面应用（主进程 BrowserWindow + React 渲染进程）：识别 electron/main.js，生成主进程与渲染页面，当前验收到渲染进程构建级（真机窗口 UI 待接 Playwright _electron）",
+ "provides": [
+  "stack:electron"
+ ],
+ "needs": [
+  "node",
+  "npm"
+ ],
+ "adapter_class": "ElectronAdapter",
+ "detect_markers": [
+  "electron/main.cjs",
+  "electron/main.js",
+  "electron/main.ts"
+ ],
+ "verify": [
+  "node",
+  "--version"
+ ],
+ "notes": "electron 二进制约 200MB，npm install 时需用国内镜像（ELECTRON_MIRROR）；真机 UI 断言需 browser.py 接 _electron.launch，当前未接，故只判构建级。"
+}

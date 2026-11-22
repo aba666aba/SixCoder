@@ -423,6 +423,7 @@ def wire(ws, bp=None, *, route_funcs: dict | None = None, emit=None) -> list[str
     # 写错文件不会报错，只会静默把路由挂到别的前缀下（→ 404，最难查）。
     per_app: dict[str, list[dict]] = {}
     skipped: list[str] = []
+    already = 0          # 路由已存在的端点数（无需接线，静默跳过）
     for ep in eps:
         urls_rel = next((rm for rm, pf in prefixes.items()
                          if _rel_pattern(ep["path"], pf) is not None), "")
@@ -431,6 +432,10 @@ def wire(ws, bp=None, *, route_funcs: dict | None = None, emit=None) -> list[str
             continue
         app = _app_of(urls_rel)
         rel = _rel_pattern(ep["path"], prefixes[urls_rel])
+        # 路由已在该 app 的 urls 文件里 → 接线层无事可做，静默跳过（不产噪声）
+        if _route_exists(ws, urls_rel, rel or ""):
+            already += 1
+            continue
         path_params = set(re.findall(r"<int:(\w+)>", rel or ""))
         prefer = rf.get(_rf.normalize(ep["path"]), "")
         mod, func = _find_handler(ws, modules, prefer, ep["path"], ep["method"],
@@ -457,6 +462,10 @@ def wire(ws, bp=None, *, route_funcs: dict | None = None, emit=None) -> list[str
         })
 
     if not per_app:
+        if already:
+            _emit(emit, "django_wire",
+                  {"routes": 0, "apps": {}, "touched": 0,
+                   "skipped": len(skipped), "already": already})
         for s in skipped:
             _emit(emit, "notice", {"message": "Django 接线跳过：" + s})
         return []
@@ -479,10 +488,60 @@ def wire(ws, bp=None, *, route_funcs: dict | None = None, emit=None) -> list[str
           {"routes": routes,
            "apps": {rm.split("/")[1] if rm.startswith("apps/") else rm: len(v)
                     for rm, v in per_app.items()},
-           "touched": touched, "skipped": len(skipped)})
+           "touched": touched, "skipped": len(skipped), "already": already})
     for s in skipped:
         _emit(emit, "notice", {"message": "Django 接线跳过：" + s})
     return touched
+
+
+def _route_exists(ws, urls_rel: str, rel: str) -> bool:
+    """这个相对路径**已经在该 app 的 urls 文件里注册**了吗？
+
+    2026-11-19 实测：本项目的作者区把视图**直接写在** `apps/<app>/urls.py`
+    （`path("generate/", _author_generate, ...)`），而 `candidate_modules()` 只搜
+    `apps/*/views.py` / `apps/*/services.py` / `matching_core/*.py` → `_find_handler`
+    找不到 → 报「X 里没有可用的处理函数」。**这条提示是假的**：处理函数就在
+    urls.py 里、路由也是通的。69 个端点全报这条 → 远端被引去改本来正确的产物代码
+    （典型的"反馈被包错语义框 = 没到"）。
+
+    **段级比对**（不是字面包含）：探针里的 `${tid}` 是**模板占位符**，真实路由是
+    `<int:pk>`；两者必须互相当通配，否则带参数的端点永远匹配不上（94 条里 26 条
+    是这种）。规则：段数相同，且每一段「字面相等」或「双方任一是占位/参数段」。
+
+    路由已存在时**静默跳过**：接线层的职责是「缺什么补什么」，已经有了就什么都不做。
+    """
+    key = str(rel or "").strip().strip("/")
+
+    def _segs(text: str) -> list[str]:
+        return [s for s in text.strip("/").split("/") if s != ""]
+
+    want = _segs(key)
+    if not want:
+        # 根路径：urls.py 里出现 `path("")` / `path("/")` 才算已挂
+        try:
+            src = (Path(ws) / urls_rel).read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            return False
+        return bool(re.search(r'path\(\s*["\']\s*/?\s*["\']', src))
+
+    try:
+        src = (Path(ws) / urls_rel).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return False
+
+    # 抓出所有 path("...") / re_path("...") 的路径字面量
+    pats = re.findall(r'(?:re_)?path\(\s*["\']([^"\']*)["\']', src)
+
+    def _wild(seg: str) -> bool:
+        return seg.startswith("${") or seg.startswith("<") or seg.startswith(":")
+
+    for pat in pats:
+        have = _segs(pat)
+        if len(have) != len(want):
+            continue
+        if all((a == b) or _wild(a) or _wild(b) for a, b in zip(want, have)):
+            return True
+    return False
 
 
 def _find_handler(ws, modules, prefer: str, path: str, method: str,

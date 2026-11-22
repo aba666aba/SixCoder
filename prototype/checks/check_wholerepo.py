@@ -468,6 +468,35 @@ def extra() -> int:
         ck("brief 真调用 render_rollback(load_rollback(ws))",
            "render_rollback(load_rollback(ws))" in src)
 
+        print("[9] 项目方诊断通道（2026-11-19：人工已定位的结论要能送进简报）")
+        _adv_path = ws / W.ADVICE_FILE
+        ck("没有 advice.md 时读回空串（不硬造段落）",
+           W.load_advice(ws) == "" and W.render_advice("") == "")
+        _adv_path.parent.mkdir(parents=True, exist_ok=True)
+        _adv_path.write_text("## ① 键优先级写反\n`_TOPIC_ID_KEYS` 把 id 排在 code 前面。\n",
+                             encoding="utf-8")
+        ck("有 advice.md 时能读回正文",
+           "键优先级写反" in W.load_advice(ws), W.load_advice(ws)[:80])
+        _r = W.render_advice(W.load_advice(ws))
+        ck("渲染出独立段落 + 明确'优先采信/要求反证'",
+           "项目方诊断" in _r and "优先采信" in _r and "反证" in _r, _r[:200])
+        _adv_path.write_text("x" * (W.ADVICE_MAX_CHARS + 500), encoding="utf-8")
+        ck("超长诊断被截断到上限（不撑爆简报）",
+           len(W.load_advice(ws)) == W.ADVICE_MAX_CHARS, str(len(W.load_advice(ws))))
+        _adv_path.write_text("## 结论：id 应排在 code 之后\n", encoding="utf-8")
+        _brief_adv = W.brief(ws, W.SimpleReport("x", "x"),
+                             files={"apps/rules/providers/local.py": "# x\n"},
+                             stats={"order": ["apps/rules/providers/local.py"]})
+        ck("brief 里真的带上了诊断段落",
+           "项目方诊断" in _brief_adv and "id 应排在 code 之后" in _brief_adv,
+           _brief_adv[-400:])
+        ck("诊断段落排在源码之后（不毁前缀缓存）",
+           _brief_adv.find("=== FILE: apps/rules/providers/local.py ===")
+           < _brief_adv.find("项目方诊断"), "顺序错了")
+        ck("brief 真调用 render_advice(load_advice(ws))",
+           "render_advice(load_advice(ws))" in (PROTO / "core" / "wholerepo.py")
+           .read_text(encoding="utf-8"))
+
     print()
     if FAILS:
         print("FAILED: %d 项 —— %s" % (len(FAILS), "；".join(FAILS)))

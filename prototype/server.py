@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,7 +28,20 @@ sys.path.insert(0, str(ROOT))
 from core import agent, approval, db, gitops, model_policy, ollama, permissions, probe, recon, review as review_mod, tools  # noqa: E402
 from core import company, policy  # noqa: E402
 from core import budget_estimate as _be  # noqa: E402
+from core import paths as _paths  # noqa: E402
+from core import pathbind as _pathbind  # noqa: E402
+from core import clarify as _clarify  # noqa: E402
+from core import coderun as _coderun  # noqa: E402
+from core import codelocate as _codelocate  # noqa: E402
+from core import runtimes as _runtimes  # noqa: E402
 from core.demo import DEMO, ensure_demo  # noqa: E402
+
+# 自带 Git（安装器勾选 MinGit）不在系统 PATH 里：临时加进当前进程，
+# 让 tools/isolate/arch 里的 ["git", ...] 真能用；不写系统 PATH。
+try:
+    _runtimes.ensure_on_path("git")
+except Exception:                                    # noqa: BLE001
+    pass
 
 WEB_DIST = ROOT / "web" / "dist"
 
@@ -279,13 +294,26 @@ def ws_of(task_id: str) -> Path:
 
 @app.get("/v1/health")
 def health():
-    models = ollama.models()
+    """**启动探针必须快**（外壳只等几百毫秒）。
+
+    这里不查 Ollama 模型列表：Ollama 没启动时每次探测都要等超时，health 会拖到
+    10s+，外壳的 800ms 探针全部超时 → 界面永远停在"后端未就绪"。模型列表拆到
+    `/v1/models`，由界面加载后异步补（慢一点不影响启动）。
+    """
+    try:
+        up = ollama.alive(timeout=0.3)
+    except TypeError:                                    # 兼容旧签名
+        up = ollama.alive()
     return {
         "ok": True,
-        "ollama": ollama.alive(),
-        "models": models,
-        "default_model": ollama.pick_default(),
-        "model_policy": _model_policy_view(models),
+        # 桌面外壳靠这个字段确认"端口上跑的真是 SixCoder 后端"，而不是碰巧占用
+        # 该端口的别的程序（否则会把别人的页面当成后端，界面全蓝无按钮）。
+        "app": "sixcoder",
+        "ollama": up,
+        "models": [],
+        "default_model": "",
+        "model_policy": {"min_params_b": model_policy.MIN_PARAMS_B,
+                         "blocked": [], "suggest": "", "message": ""},
         "db": str(db.DB_PATH),
         "workspaces": str(agent.WORKSPACES),
         "python": sys.version.split()[0],
@@ -313,7 +341,25 @@ def models():
 
 @app.get("/v1/toolchains")
 def toolchains():
-    return {"items": recon.toolchains(_load_tc_overrides()), "overrides": _load_tc_overrides()}
+    """常用工具全量清单（含未安装项 + PATH 绑定状态，默认未绑定）。"""
+    ov = _load_tc_overrides()
+    return {"items": _pathbind.state(ov), "overrides": ov}
+
+
+class PathBindReq(BaseModel):
+    id: str
+    bind: bool = True
+
+
+@app.post("/v1/pathbind")
+def set_pathbind(req: PathBindReq):
+    """用户自己决定要不要把工具目录写进当前用户 PATH（默认不写）。"""
+    if not permissions.allows("toolchain.config"):
+        raise HTTPException(403, "当前模式不允许修改 PATH 绑定")
+    r = _pathbind.bind(req.id) if req.bind else _pathbind.unbind(req.id)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("detail", "绑定失败"))
+    return r
 
 
 # ---------------------------------------------------------------- 远端模型设置
@@ -332,10 +378,48 @@ def get_remote_settings(reveal: bool = False):
     # 保证两条读取路径（这个 GET 与 /remote/models）口径完全一致。
     try:
         _rem["providers"] = _public_model_view(settings_store)["providers"]
+        # 平铺 api_key 为空但厂商 key 类里填了 key：状态/掩码要反映真实来源，
+        # 否则界面显示"未配置"红点、下面却能看到已保存的 key（2026-11-21 实测）。
+        if not _rem.get("key_configured"):
+            _provs = _rem["providers"]
+            _cur = next((p for p in _provs if p.get("current")), _provs[0] if _provs else None)
+            if _cur:
+                _k = next((k for k in (_cur.get("keys") or [])
+                           if k.get("key_configured")), None)
+                if _k:
+                    _rem["key_configured"] = True
+                    _rem["key_masked"] = _k.get("key_masked") or ""
+                    _rem["key_source"] = "厂商 key"
     except Exception:                                    # noqa: BLE001
         pass
     return {"remote": _rem, "available": ok, "reason": why,
             "usage": remote_mod.usage_summary()}
+
+
+# ---------------------------------------------------------------- UI 审美样式库
+# 审美判据在人眼里，引擎不自检"好不好看"；这里只提供有限类型让用户挑，
+# 颜色是用户自填插槽。选出来的约定经 uistyles.contract_text() 注入生成链路。
+@app.get("/v1/uistyles")
+def get_uistyles():
+    """全部样式预设 + 类型清单 + 颜色插槽 + 当前选择（颜色无写死值）。"""
+    from core import uistyles
+    return uistyles.public_config()
+
+
+class UIStyleSelectReq(BaseModel):
+    id: str
+    colors: dict[str, str] = {}
+
+
+@app.post("/v1/uistyles/select")
+def select_uistyle(req: UIStyleSelectReq):
+    """用户挑一个预设并自填颜色插槽。非法色值/未知插槽 400，不写坏配置。"""
+    from core import uistyles
+    try:
+        return {"ok": True, "selection": uistyles.select(req.id, req.colors),
+                "contract": uistyles.contract_text()}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
 
 @app.get("/v1/regressions")
@@ -394,6 +478,14 @@ class ModelProfileReq(BaseModel):
     pricing: Optional[dict] = None
 
 
+class RemoteKeyTestReq(BaseModel):
+    """测试某一吧 key（未保存的新 key 可直接放 api_key，不落盘）。"""
+    provider: str
+    key_id: str = ""
+    model: str = ""
+    api_key: str = ""
+
+
 def _public_model_view(settings_store) -> dict:
     """模型档案对外视图的**唯一出口**：api_key 一律剥掉，阶梯只回展示字段。
 
@@ -409,8 +501,12 @@ def _public_model_view(settings_store) -> dict:
                 "id": p["id"], "label": p["label"], "base_url": p["base_url"],
                 "efforts": list(p.get("efforts") or []),
                 "current": bool(p.get("current")),
-                "key_configured": bool(p.get("api_key")),
-                "key_masked": settings_store.mask(p.get("api_key") or ""),
+                # 厂商级 api_key 可能为空，但下面 key 类里有 key；只看厂商级会误报"未配置"
+                "key_configured": bool(p.get("api_key")) or any(
+                    str(k.get("api_key") or "").strip() for k in (p.get("keys") or [])),
+                "key_masked": settings_store.mask(p.get("api_key") or "") or next(
+                    (settings_store.mask(k.get("api_key") or "")
+                     for k in (p.get("keys") or []) if str(k.get("api_key") or "").strip()), ""),
                 "models": [settings_store.sanitize_profile(m)
                            for m in (p.get("models") or [])],
                 # key 类层（2026-11-18 多远端协作）：写作者用「当前」类，
@@ -707,6 +803,57 @@ def test_remote_settings():
     return {"ok": False, "detail": r.get("error") or "调用失败"}
 
 
+@app.post("/v1/settings/remote/key-test")
+def test_remote_key(req: RemoteKeyTestReq):
+    """按「厂商 + 具体 key」真打 1 token，验证这把 key 能不能用。
+
+    和全局 `/remote/test` 的区别：全局测试读的是"当前生效"配置；用户在厂商详情页
+    填的可能是备用 key / 未保存的新 key，必须能单独测。新 key 不落盘。
+    """
+    from core import remote as remote_mod, settings_store
+    provs = settings_store.providers()
+    p = next((x for x in provs if str(x.get("id")) == req.provider), None)
+    if not p:
+        return {"ok": False, "detail": f"没有这个厂商：{req.provider}"}
+    k = next((x for x in (p.get("keys") or []) if str(x.get("id")) == req.key_id), {}) if req.key_id else {}
+    key = (req.api_key or "").strip() or str(k.get("api_key") or "").strip() \
+        or str(p.get("api_key") or "").strip()
+    if not key:
+        return {"ok": False, "detail": "这把 key 还没填"}
+    models = [m for m in (k.get("models") or []) if str(m.get("model") or "").strip()]
+    if not models:
+        models = [m for m in (p.get("models") or []) if str(m.get("model") or "").strip()]
+    model = (req.model or "").strip() or (str(models[0].get("model")) if models else "")
+    if not model:
+        preset = settings_store.PROVIDER_PRESETS.get(req.provider, {})
+        model = str(((preset.get("models") or [{}])[0]).get("model") or "")
+    if not model:
+        return {"ok": False, "detail": "这个厂商还没有配置模型名"}
+    base = str(p.get("base_url") or k.get("base_url") or "").strip()
+    if not base:
+        if req.provider == "deepseek":
+            base = remote_mod.DEEPSEEK_BASE
+        elif req.provider == "glm":
+            base = remote_mod.GLM_BASE
+        else:
+            base = remote_mod.OPENAI_COMPAT_BASE
+    payload = {"model": model, "messages": [{"role": "user", "content": "回复一个字：好"}],
+               "max_tokens": 8, "stream": False}
+    data, err, ms = remote_mod._post_once(payload, base.rstrip("/"), key, timeout=25)
+    if data is None:
+        detail = err or "调用失败"
+        if "401" in detail:
+            detail = ("401 鉴权失败：确认「请求网址 / 模型名 / key」属于同一家厂商。"
+                      + detail)
+        return {"ok": False, "detail": detail, "model": model, "base_url": base, "ms": ms}
+    try:
+        answer = data["choices"][0]["message"].get("content") or ""
+    except Exception:                                    # noqa: BLE001
+        answer = ""
+    return {"ok": True, "detail": f"连通（{ms} ms，{model}）", "answer": answer[:80],
+            "model": model, "base_url": base, "ms": ms}
+
+
 @app.post("/v1/settings/remote")
 def set_remote_settings(req: RemoteSettingsReq):
     """更新远端模型设置（改完下一次请求立即生效，不需要重启）。
@@ -788,6 +935,247 @@ def set_toolchain_override(req: ToolchainOverrideReq):
     return {"ok": True, "item": hit, "overrides": data}
 
 
+# ---------------------------------------------------------------- 受控部署通道（§运行时补短板）
+class DeployTargetsReq(BaseModel):
+    targets: list[dict] = []
+    enabled: bool | None = None
+    reveal: bool = False
+
+
+class DeployExecReq(BaseModel):
+    target: str
+    command: str
+    reason: str = ""
+    workspace: str = ""
+    approval_timeout: float = 600.0   # 等人审秒数；CLI/夜班可调短，界面默认 600
+    # 一次性密码（仅 credential=prompt 的目标用）：只在本次请求的内存里，
+    # 经 secret_fn 注入 ssh 子进程，绝不落盘 / 不进日志 / 不回显 / 不进配置。
+    password: str = ""
+
+
+@app.get("/v1/deploy")
+def get_deploy(reveal: bool = False):
+    """部署通道配置（默认脱敏：私钥路径只给掩码）。GET 本身不执行任何命令。"""
+    from core import deploy as _deploy
+    out = _deploy.public_config(reveal=reveal)
+    out["capability"] = _deploy.describe()
+    return out
+
+
+@app.post("/v1/deploy")
+def set_deploy(req: DeployTargetsReq):
+    """预留/修改部署目标（host/user/认证/命令白名单）。这是人工授权的入口。"""
+    from core import deploy as _deploy
+    if not permissions.allows("deploy.exec"):
+        raise HTTPException(403, "当前模式不允许配置部署通道（readonly 模式禁用）")
+    return _deploy.save_targets(req.targets, enabled=req.enabled)
+
+
+@app.post("/v1/deploy/exec")
+def run_deploy(req: DeployExecReq):
+    """请求执行一次部署命令：命令白名单 + 强制人审 + 审计；失败如实返回 rc/原因。"""
+    from core import deploy as _deploy
+    ws = Path(req.workspace) if req.workspace else _paths.home()
+    # 一次性密码：只在请求体内，包成 secret_fn 闭包传给 prompt 凭据；env:/file: 目标忽略它。
+    # 注意：绝不把 req.password 写日志/审计/响应——execute 内部走 SSH_ASKPASS，用完即焚。
+    secret_fn = (lambda: req.password) if req.password else None
+    return _deploy.execute(req.target, req.command, reason=req.reason, workspace=ws,
+                           approval_timeout=req.approval_timeout, secret_fn=secret_fn)
+
+
+# ---------------------------------------------------------------- 闭环验收（最后落地）
+class VerifyReq(BaseModel):
+    pid: str = ""            # 指定 UI 风格预设（空=用当前选择）
+    adapter: str = ""        # 指定插件桥适配器
+    source: str = ""         # 指定判据开放来源
+    checks: list[str] = []   # 额外真跑的 check_*.py（可选）
+
+
+@app.post("/v1/verify")
+def run_verify(req: VerifyReq):
+    """跑闭环验收单：结构/约定/内存闭环/探针 + 可选真跑自检脚本。审美仍标人在环。"""
+    from core import verify as _v
+    return _v.run_all(pid=req.pid, adapter_id=req.adapter,
+                      source_id=req.source, checks=req.checks)
+
+
+@app.get("/v1/verify/capability")
+def verify_capability():
+    from core import verify as _v
+    return _v.describe()
+
+
+# ---------------------------------------------------------------- 判据开放调研
+@app.get("/v1/judgment-sources")
+def list_judgment_sources():
+    """按公开开发文档整理的'判据开放'清单：哪些外部判据能搬成机判（只读）。"""
+    from core import judgment_sources as _js
+    return {"sources": _js.list_sources(), "capability": _js.describe()}
+
+
+@app.get("/v1/judgment-sources/contract")
+def judgment_source_contract(source: str = ""):
+    """给远端的判据开放说明：原本判不了的现在能机读到什么。"""
+    from core import judgment_sources as _js
+    text = _js.contract_text(source)
+    return {"ok": bool(text), "source": source, "contract": text}
+
+
+# ---------------------------------------------------------------- 闭源宿主插件适配
+@app.get("/v1/host-plugins")
+def list_host_plugins():
+    """按公开文档整理的办公软件插件桥清单：可验判据 + 人在环边界（只读）。"""
+    from core import host_plugins as _hp
+    return {"adapters": _hp.list_adapters(), "capability": _hp.describe()}
+
+
+@app.get("/v1/host-plugins/probe")
+def host_plugin_probe(adapter: str, workspace: str = ""):
+    """给远端的一则插件桥验收约定（含探针建议；不真执行）。"""
+    from core import host_plugins as _hp
+    return _hp.probe_suggestion(adapter, workspace)
+
+
+# ---------------------------------------------------------------- 外部真链路半自动
+# 人填一次 → 会话内缓存（内存）→ 引擎后续自动代跑。凭据不落盘、不进审计/视图。
+class HumanOncePutReq(BaseModel):
+    namespace: str
+    key: str
+    value: str
+    ttl: float = 900.0
+    uses: int = 1
+
+
+class HumanOnceRunReq(BaseModel):
+    steps: list[dict] = []
+    namespace: str = "flow"
+
+
+@app.get("/v1/human-once")
+def human_once_state():
+    """会话内已缓存项 + 能力声明（都不含值）。"""
+    from core import human_once as _h
+    return {"pending": _h.pending(), "capability": _h.describe()}
+
+
+@app.post("/v1/human-once/put")
+def human_once_put(req: HumanOncePutReq):
+    """人填一次：把验证码/OTP/登录态存入会话缓存。值不落盘、不回显。"""
+    from core import human_once as _h
+    try:
+        return {"ok": True, "receipt": _h.put(req.namespace, req.key, req.value,
+                                              ttl=req.ttl, uses=req.uses)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/v1/human-once/clear")
+def human_once_clear(namespace: str = "", key: str = ""):
+    """清除缓存（key 空=清该命名空间，都空=清全部）。"""
+    from core import human_once as _h
+    if namespace and key:
+        return {"ok": True, "cleared": 1 if _h.clear(namespace, key) else 0}
+    if namespace:
+        n = 0
+        for item in _h.pending():
+            if item["namespace"] == namespace:
+                n += 1 if _h.clear(namespace, item["key"]) else 0
+        return {"ok": True, "cleared": n}
+    return {"ok": True, "cleared": _h.clear_all()}
+
+
+@app.post("/v1/human-once/run")
+def human_once_run(req: HumanOnceRunReq):
+    """跑半自动步骤表。缺人填的值就停在那一步并回报 need（UI 据此弹输入框）。
+
+    执行器是**受控占位**：引擎不碰真实第三方；human 值只用于标记"该步人已提供"，
+    真正的外部动作（输入验证码/确认支付）由人或平台插件完成——不谎报全自动。
+    """
+    from core import human_once as _h
+    def executor(step: dict, value: str) -> dict:
+        kind = str(step.get("kind") or "auto")
+        return {"action": step.get("action") or step.get("slot") or kind,
+                "human_provided": bool(value),
+                "note": "占位执行器：外部动作由人/平台插件完成，引擎不自验真链路"}
+    return _h.run_steps(req.steps, executor, namespace=req.namespace)
+
+
+# ---------------------------------------------------------------- 声明式运维单元
+class OpsUnitsReq(BaseModel):
+    units: list[dict] = []
+    enabled: bool | None = None
+
+
+class OpsExecReq(BaseModel):
+    unit: str
+    workspace: str = ""
+    timeout: float = 600.0
+    password: str = ""   # 一次性密码，仅目标 credential=prompt 时用；不落盘/不回显
+
+
+@app.get("/v1/ops")
+def get_ops():
+    """运维单元配置（不含凭据；目标 host 沿用 deploy 的脱敏视图）。"""
+    from core import ops as _ops
+    return _ops.public_config()
+
+
+@app.post("/v1/ops")
+def set_ops(req: OpsUnitsReq):
+    """预留/修改运维单元（人工授权入口）。readonly 模式禁用。"""
+    from core import ops as _ops
+    if not permissions.allows("deploy.exec"):
+        raise HTTPException(403, "当前模式不允许配置运维单元（readonly 模式禁用）")
+    return _ops.save_units(req.units, enabled=req.enabled)
+
+
+@app.post("/v1/ops/exec")
+def run_ops(req: OpsExecReq):
+    """执行一个运维单元：一次协商 + 一次人审覆盖整组，失败自动回滚。"""
+    from core import ops as _ops
+    ws = Path(req.workspace) if req.workspace else _paths.home()
+    secret_fn = (lambda: req.password) if req.password else None
+    return _ops.execute(req.unit, workspace=ws, timeout=req.timeout, secret_fn=secret_fn)
+
+
+# ---------------------------------------------------------------- 多机编排
+class OrchPlansReq(BaseModel):
+    plans: list[dict] = []
+    enabled: bool | None = None
+
+
+class OrchExecReq(BaseModel):
+    plan: str
+    workspace: str = ""
+    timeout: float = 600.0
+    password: str = ""   # 一次性密码，仅目标 credential=prompt 时用；不落盘/不回显
+
+
+@app.get("/v1/orchestration")
+def get_orchestration():
+    """编排计划配置（不含凭据；目标 host 沿用 deploy 的脱敏视图）。"""
+    from core import orchestration as _orch
+    return _orch.public_config()
+
+
+@app.post("/v1/orchestration")
+def set_orchestration(req: OrchPlansReq):
+    """预留/修改编排计划（人工授权入口）。readonly 模式禁用。"""
+    from core import orchestration as _orch
+    if not permissions.allows("deploy.exec"):
+        raise HTTPException(403, "当前模式不允许配置编排计划（readonly 模式禁用）")
+    return _orch.save_plans(req.plans, enabled=req.enabled)
+
+
+@app.post("/v1/orchestration/exec")
+def run_orchestration(req: OrchExecReq):
+    """执行一个编排计划：一次协商 + 一次人审覆盖整批主机，单机失败隔离。"""
+    from core import orchestration as _orch
+    ws = Path(req.workspace) if req.workspace else _paths.home()
+    secret_fn = (lambda: req.password) if req.password else None
+    return _orch.execute(req.plan, workspace=ws, timeout=req.timeout, secret_fn=secret_fn)
+
+
 @app.post("/v1/probe")
 def probe_repo(req: ProbeReq):
     info = recon.classify(Path(req.repo), deep=req.deep)
@@ -802,6 +1190,16 @@ def probe_repo(req: ProbeReq):
 def make_demo():
     p = ensure_demo()
     return {"repo": str(p), "state": recon.classify(p)["state"]}
+
+
+@app.get("/v1/walkthrough")
+def run_walkthrough(verify: bool = False):
+    """端到端链路走查：按用户旅程过一遍新能力（只读/内存态，不改配置、不连真实服务器）。
+
+    `verify=true` 时额外真跑一张验收单（会开浏览器，较慢）。
+    """
+    from core import walkthrough as _w
+    return _w.walkthrough(include_verify=verify)
 
 
 # ---------------------------------------------------------------- 远端工具循环（§13.4 第 3/4 步）
@@ -964,6 +1362,1312 @@ def create_night(req: NightReq):
     threading.Thread(target=_run, daemon=True).start()
     return {"task_id": task_id, "model": model, "mode": pol.mode,
             "policy": policy.describe(pol), "stream": f"/v1/tasks/{task_id}/stream"}
+
+
+# ---------------------------------------------------------------- 文件读写（开发者模式编辑器）
+
+# 噪音目录：编辑器树里一律不显示（这些不是"代码"，列出来只会淹没真正的文件）
+_SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", "env",
+              "dist", "build", "target", ".pytest_cache", ".mypy_cache",
+              ".ruff_cache", ".idea", ".vscode", ".sixcoder"}
+_TEXT_MAX = 1024 * 1024          # 编辑器单文件上限 1MB（再大就不该在浏览器里改）
+
+
+class FsWriteReq(BaseModel):
+    repo: str
+    path: str
+    content: str
+    backup: bool = True
+
+
+def _fs_base(repo: str) -> Path:
+    ws = Path(repo)
+    if not ws.is_dir():
+        raise HTTPException(400, f"仓库不存在：{repo}")
+    return ws
+
+
+@app.get("/v1/fs/tree")
+def fs_tree(repo: str, path: str = "", depth: int = 4, limit: int = 2000):
+    """仓库文件树（扁平列表，前端自己拼树）。
+
+    路径一律过 `tools.safe_path`（沙箱牢笼）——编辑器和引擎改代码走同一道门，
+    不允许"界面能改到仓库外面"。
+    """
+    _guard("file.read")
+    ws = _fs_base(repo)
+    base = tools.safe_path(ws, path or ".")
+    if not base.is_dir():
+        raise HTTPException(400, f"不是目录：{path}")
+    root = ws.resolve()
+    try:
+        base_depth = len(base.resolve().relative_to(root).parts)
+    except ValueError:
+        raise HTTPException(400, "路径越界")
+    items: list[dict] = []
+    truncated = False
+    for cur, dirs, files in os.walk(base):
+        cur_p = Path(cur)
+        try:
+            rel_depth = len(cur_p.resolve().relative_to(root).parts) - base_depth
+        except ValueError:
+            continue
+        dirs[:] = sorted(d for d in dirs
+                         if d not in _SKIP_DIRS and not d.startswith("."))
+        if rel_depth >= max(1, depth):
+            dirs[:] = []
+        for d in dirs:
+            items.append({"path": str((cur_p / d).relative_to(root)).replace("\\", "/"),
+                          "dir": True, "size": 0})
+        for f in sorted(files):
+            p = cur_p / f
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            items.append({"path": str(p.relative_to(root)).replace("\\", "/"),
+                          "dir": False, "size": size})
+        if len(items) >= limit:
+            truncated = True
+            break
+    return {"root": str(root), "items": items[:limit], "truncated": truncated}
+
+
+@app.get("/v1/fs/read")
+def fs_read(repo: str, path: str):
+    """读原始文本（**不带行号前缀**——带前缀的是给模型看的，编辑器要原文）。"""
+    _guard("file.read")
+    ws = _fs_base(repo)
+    p = tools.safe_path(ws, path)
+    if not p.is_file():
+        raise HTTPException(404, f"文件不存在：{path}")
+    size = p.stat().st_size
+    if size > _TEXT_MAX:
+        raise HTTPException(413, f"文件过大（{size // 1024} KB），编辑器只支持 1MB 以内")
+    try:
+        text = p.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:                               # noqa: BLE001
+        raise HTTPException(500, f"读失败：{exc}")
+    return {"path": path, "text": text, "size": size,
+            "binary": "\x00" in text[:2000],
+            "lines": text.count("\n") + (0 if text.endswith("\n") else 1) if text else 0}
+
+
+@app.post("/v1/fs/write")
+def fs_write(req: FsWriteReq):
+    """保存文件：走 `tools.write_file`（沙箱牢笼 + 默认备份），与远端改代码同一条写盘路径。"""
+    _guard("file.write")
+    ws = _fs_base(req.repo)
+    try:
+        tools.write_file(ws, req.path, req.content, backup=req.backup)
+    except Exception as exc:                             # noqa: BLE001
+        raise HTTPException(400, f"写入失败：{type(exc).__name__}: {exc}")
+    return {"ok": True, "path": req.path,
+            "bytes": len(req.content.encode("utf-8")), "backup": bool(req.backup)}
+
+
+# ---------------------------------------------------------------- 编辑器：本地模型自动填充
+
+class EditorFillReq(BaseModel):
+    repo: str = ""
+    path: str = ""
+    before: str = ""          # 光标之前的文本（前端只发尾部，避免把整个文件塞给 7B）
+    after: str = ""           # 光标之后的文本（用于衔接，模型不许重复它）
+    selected: str = ""        # 有选中就改写这段，否则按续写处理
+    model: str = ""           # 空 = 自动挑本地最强
+    instruction: str = ""     # 可选：用户额外要求（例如"补全这个函数的错误处理"）
+    source: str = "local"     # local = 本地 Ollama ｜ remote = 远端（开发者模式自己选）
+
+
+class EditorAssistReq(BaseModel):
+    """选中即改：explain=解释 / edit=改 / test=补测试。"""
+    repo: str = ""
+    path: str = ""
+    action: str = "explain"   # explain | edit | test
+    selected: str = ""
+    before: str = ""          # 选区前文（给模型看上下文）
+    after: str = ""           # 选区后文
+    instruction: str = ""     # edit 的意图，例如"先校验再入库"
+    model: str = ""
+    source: str = "local"
+
+
+_LANG_BY_EXT = {
+    ".py": "python", ".pyi": "python", ".js": "javascript", ".mjs": "javascript",
+    ".cjs": "javascript", ".jsx": "jsx", ".ts": "typescript", ".tsx": "tsx",
+    ".vue": "vue", ".java": "java", ".go": "go", ".rs": "rust", ".c": "c",
+    ".h": "c", ".cpp": "cpp", ".hpp": "cpp", ".cs": "csharp", ".php": "php",
+    ".rb": "ruby", ".kt": "kotlin", ".swift": "swift", ".sql": "sql",
+    ".html": "html", ".css": "css", ".scss": "scss", ".json": "json",
+    ".yml": "yaml", ".yaml": "yaml", ".sh": "bash", ".ps1": "powershell",
+    ".md": "markdown", ".toml": "toml", ".ini": "ini",
+}
+
+
+def _editor_lang(path: str) -> str:
+    return _LANG_BY_EXT.get(Path(path).suffix.lower(), "text")
+
+
+def _strip_fence(text: str) -> str:
+    """去掉模型爱加的 markdown 围栏（7B 几乎每次都想包一层 ```）。"""
+    t = (text or "").strip("\n")
+    lines = t.splitlines()
+    if lines and lines[0].lstrip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    elif lines and lines[-1].strip().startswith("```") and len(lines[-1].strip()) <= 6:
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def _editor_complete(prompt: str, *, source: str, model: str,
+                    node_id: str = "editor_fill") -> dict:
+    """编辑器里的模型调用（fill 与 assist 共用），返回 {ok,text,model,ms,tokens,source}。
+
+    local = 本地 Ollama（快、免费、短续写）；remote = 远端最强档（慢、要钱、能读懂意图）。
+    这里只负责"把 prompt 发出去拿文本"，业务 prompt 由调用方拼。
+    """
+    use_remote = str(source or "local").strip().lower() == "remote"
+    if not use_remote:
+        if not ollama.alive():
+            return {"ok": False, "reason": "本地模型没在运行：请先启动 Ollama（ollama serve）"}
+        model = (model or "").strip() or ollama.pick_default()
+        if not model:
+            return {"ok": False, "reason": "没有可用的本地模型：请先 ollama pull qwen2.5-coder:7b"}
+        if model not in ollama.models():
+            model = ollama.pick_default() or model
+
+    if use_remote:
+        # 远端：走 core.remote 的最强档。开发者模式在这里是"人已经看着代码点了发送"，
+        # 属于明确意图，不需要再走审批闸门（gate_remote_call 在作者链路里负责那件事）。
+        t0 = time.time()
+        try:
+            from core import remote as _remote           # noqa: PLC0415
+            from core import settings_store as _ss       # noqa: PLC0415
+            ok, why = _remote.available()
+            if not ok:
+                return {"ok": False, "reason": f"远端不可用：{why}"}
+            r = _remote.complete(prompt=prompt, node_id=node_id,
+                                 step_index=_ss.strongest_step_index(), max_out=3000)
+        except Exception as exc:                         # noqa: BLE001
+            return {"ok": False, "reason": f"远端调用失败：{type(exc).__name__}: {exc}"}
+        if not r.get("ok"):
+            return {"ok": False, "reason": f"远端拒绝/失败：{r.get('error') or '未知原因'}"}
+        text = _strip_fence(r.get("answer") or "")
+        model = "远端"
+        ms = int((time.time() - t0) * 1000)
+        tokens = (r.get("usage") or {}).get("completion_tokens")
+    else:
+        try:
+            res = ollama.chat([{"role": "user", "content": prompt}], model,
+                              temperature=0.15, num_predict=420, num_ctx=8192)
+        except Exception as exc:                         # noqa: BLE001
+            return {"ok": False, "reason": f"本地模型调用失败：{type(exc).__name__}: {exc}"}
+        text = _strip_fence(res.get("text") or "")
+        ms = res.get("ms")
+        tokens = res.get("eval_count")
+
+    if not text.strip():
+        return {"ok": False, "reason": "模型没有给出内容（可再试一次或换个说法）",
+                "model": model, "ms": ms}
+    return {"ok": True, "text": text, "model": model, "ms": ms,
+            "tokens": tokens, "source": "remote" if use_remote else "local"}
+
+
+@app.post("/v1/editor/fill")
+def editor_fill(req: EditorFillReq):
+    """编辑器里的自动填充：把光标位置交给**本地或远端**模型，返回要插入的代码。
+
+    两条路自己选（`source`）：
+      · local  —— 本地 Ollama。快、免费、离线可用，但只擅长短续写；
+      · remote —— 远端（最强思考档）。慢、要钱，但能读懂"把这个函数改成 X 语义"这种意图。
+    为什么只发光标附近而不是整个文件：本地默认 7B（CPU 上几十 token/s），整文件会拖到
+    几分钟；远端虽然有 200k 上下文，但补全不需要把它塞满（白花钱）。
+    这里**不写盘**：返回文本由前端插进编辑器，不满意 Ctrl+Z。
+    """
+    _guard("file.read")
+    if not (req.before.strip() or req.selected.strip() or req.instruction.strip()):
+        return {"ok": False, "reason": "光标前没有内容，也没写要求，没什么可生成的"}
+
+    lang = _editor_lang(req.path)
+    ctx = req.before[-6000:]
+    tail = req.after[:800]
+    if req.selected.strip():
+        task = ("请**改写**下面这段选中的代码，只输出改写结果（不要重复解释，不要围栏）：\n"
+                f"```{lang}\n{req.selected[:4000]}\n```")
+    else:
+        task = "请只输出**紧接着光标处**应当出现的代码。"
+    extra = f"\n额外要求：{req.instruction.strip()}" if req.instruction.strip() else ""
+    prompt = (
+        "你是代码补全引擎，嵌在一个编辑器里。规则：\n"
+        "1) 只输出要插入的代码本身，不要解释、不要 markdown 围栏、不要重复已有内容；\n"
+        "2) 缩进必须和上文一致（用空格，不用 tab）；\n"
+        "3) 不需要补全时输出空行即可，不要硬编。\n\n"
+        f"文件：{req.path or '(未命名)'}　语言：{lang}\n"
+        f"光标之前的代码：\n```{lang}\n{ctx}\n```\n"
+        + (f"光标之后的代码（供衔接，禁止重复输出）：\n```{lang}\n{tail}\n```\n" if tail.strip() else "")
+        + task + extra
+    )
+    r = _editor_complete(prompt, source=req.source, model=req.model,
+                         node_id="editor_fill")
+    if not r.get("ok"):
+        return r
+    return {"ok": True, "insertion": r["text"], "model": r["model"], "lang": lang,
+            "source": r["source"], "ms": r["ms"], "tokens": r["tokens"]}
+
+
+@app.post("/v1/editor/assist")
+def editor_assist(req: EditorAssistReq):
+    """选中即改：解释 / 改写 / 补测试。**不写盘**，结果交给前端做 diff 预览与接受/拒绝。
+
+    这是「选中一段代码 → 一个动作」的入口，不要求用户先组织一句完整的话：
+      · explain：讲清作用/输入输出/关键分支/边界与风险，不改代码；
+      · edit：按 instruction 给最小改写，保持接口不变（除非明确要求改）；
+      · test：生成 pytest 测试（正常/边界/异常），只输出测试代码。
+    """
+    _guard("file.read")
+    action = str(req.action or "explain").strip().lower()
+    if action not in ("explain", "edit", "test"):
+        return {"ok": False, "reason": f"不认识的 assist 动作：{action}"}
+    if not req.selected.strip():
+        return {"ok": False, "reason": "先选中一段代码"}
+
+    lang = _editor_lang(req.path)
+    ctx = req.before[-6000:]
+    tail = req.after[:800]
+    code = req.selected[:6000]
+    head = (f"文件：{req.path or '(未命名)'}　语言：{lang}\n"
+            f"选区之前的代码：\n```{lang}\n{ctx}\n```\n"
+            + (f"选区之后的代码：\n```{lang}\n{tail}\n```\n" if tail.strip() else "")
+            + f"选中的代码：\n```{lang}\n{code}\n```\n")
+    if action == "explain":
+        prompt = ("你是资深程序员，正在给同事解释一段代码。用中文、按下面四段回答，"
+                  "不要改代码、不要输出围栏：\n"
+                  "1) 这段代码做什么；2) 输入与输出/副作用；3) 关键分支与边界；"
+                  "4) 风险或可疑点（没有就说没有）。\n\n" + head)
+    elif action == "edit":
+        extra = f"\n用户要求：{req.instruction.strip()}" if req.instruction.strip() else ""
+        prompt = ("你是代码编辑引擎。只输出**改写后的完整选区代码**，不要解释、不要围栏；"
+                  "保持原有缩进与接口签名，除非用户明确要求改；不要输出选区之外的内容。"
+                  + extra + "\n\n" + head)
+    else:
+        prompt = ("你是测试工程师。为选中的代码补 pytest 测试，只输出测试代码（不要解释、"
+                  "不要围栏）。要求：覆盖正常路径、边界值和至少一个异常/失败路径；"
+                  "按现有项目风格 import；测试名能看出意图。\n\n" + head)
+
+    r = _editor_complete(prompt, source=req.source, model=req.model,
+                         node_id="editor_assist")
+    if not r.get("ok"):
+        return r
+    return {"ok": True, "action": action, "text": r["text"], "model": r["model"],
+            "lang": lang, "source": r["source"], "ms": r["ms"], "tokens": r["tokens"]}
+
+
+# ---------------------------------------------------------------- 开发者模式：运行与调试
+
+class CodeRunReq(BaseModel):
+    repo: str
+    path: str
+    args: str = ""            # 命令行参数（按空白切分，不解析 shell 语法）
+    timeout: int = 30
+
+
+class DebugStartReq(BaseModel):
+    repo: str
+    path: str
+    breakpoints: list[int] = []
+
+
+class DebugCmdReq(BaseModel):
+    id: str
+    op: str                   # continue | step | next | break | unbreak | locals | quit
+    line: int | None = None
+    exprs: list[str] = []
+
+
+class NavigateReq(BaseModel):
+    repo: str
+    text: str                 # 中文意图，如「打开 payment.py 的 refund 函数并调试」
+
+
+class SymbolReq(BaseModel):
+    repo: str
+    path: str
+    symbol: str
+
+
+class DebugSymbolReq(BaseModel):
+    repo: str
+    path: str
+    symbol: str
+
+
+def _run_ws(repo: str) -> Path:
+    """运行用的仓库根：复用文件接口的同一套牢笼（tools.safe_path 的父目录）。"""
+    ws = _fs_base(repo)
+    if not ws.is_dir():
+        raise HTTPException(400, f"仓库不存在：{repo}")
+    return ws
+
+
+@app.get("/v1/editor/runner")
+def editor_runner(repo: str, path: str):
+    """当前文件用什么语言/工具链/工作目录运行（界面显示 + 开跑前预检）。"""
+    _guard("test.run")
+    ws = _run_ws(repo)
+    built = _coderun.build_command(ws, path)
+    # 工具链健康一览：只返回相关的两项，别把整张探测表塞给界面
+    tools_map = _coderun.available_tools()
+    return {"ok": built["ok"], "lang": built.get("lang"), "tool": built.get("tool"),
+            "cmd": built.get("cmd"), "cwd": built.get("cwd"),
+            "reason": built.get("reason"),
+            "debug": built.get("debug", False),
+            "tool_version": (tools_map.get(built.get("tool") or "") or {}).get("version"),
+            "tool_path": (tools_map.get(built.get("tool") or "") or {}).get("path")}
+
+
+@app.post("/v1/editor/run")
+def editor_run(req: CodeRunReq):
+    """真运行当前文件：捕获 stdout/stderr/退出码/耗时，诊断行可点跳。
+
+    同步接口，但带 30s 超时（用户可调大），超时强杀进程树，不许卡住界面。
+    """
+    _guard("test.run")
+    ws = _run_ws(req.repo)
+    path = tools.safe_path(ws, req.path)
+    rel = str(path.relative_to(ws)).replace("\\", "/")
+    timeout = max(1, min(int(req.timeout or 30), 300))
+    return _coderun.run_program(ws, rel, args=req.args, timeout=timeout)
+
+
+@app.post("/v1/editor/debug/start")
+def editor_debug_start(req: DebugStartReq):
+    """起 Python 断点调试会话（其他语言明确拒绝，不假装能单步）。"""
+    _guard("test.run")
+    ws = _run_ws(req.repo)
+    path = tools.safe_path(ws, req.path)
+    rel = str(path.relative_to(ws)).replace("\\", "/")
+    return _coderun.start_debug(ws, rel, breakpoints=req.breakpoints)
+
+
+@app.post("/v1/editor/debug/cmd")
+def editor_debug_cmd(req: DebugCmdReq):
+    """给调试会话发一条命令（继续/单步/下断点/看变量）。"""
+    _guard("test.run")
+    s = _coderun.get_session(req.id)
+    if not s:
+        raise HTTPException(404, "调试会话不存在或已结束")
+    kw: dict[str, Any] = {}
+    if req.line is not None:
+        kw["line"] = req.line
+    if req.exprs:
+        kw["exprs"] = req.exprs
+    r = s.send(req.op, **kw)
+    r["events"] = s.drain(200)
+    r["status"] = s.status()
+    return r
+
+
+@app.get("/v1/editor/debug/events")
+def editor_debug_events(id: str):
+    """轮询调试事件（暂停/输出/异常/结束）——前端定时拉，界面实时更新。"""
+    _guard("test.run")
+    s = _coderun.get_session(id)
+    if not s:
+        raise HTTPException(404, "调试会话不存在或已结束")
+    return {"events": s.drain(300), "status": s.status()}
+
+
+@app.post("/v1/editor/debug/stop")
+def editor_debug_stop(req: DebugCmdReq):
+    """停止调试会话，杀掉子进程（不留僵尸）。"""
+    _guard("test.run")
+    return _coderun.stop_debug(req.id)
+
+
+# ---------------------------------------------------------------- AI 导航 / 按符号调试
+# 用户口径（2026-11-20）：让 AI 也能「跳到我想去的文件/函数」和「调试指定函数」。
+# 触发两条：① 编辑器选中函数名点按钮 → /symbol/locate；
+#           ② AI 对话里说中文 → /navigate（本地规则解析，不花 token，抠不出就返回候选）。
+
+@app.get("/v1/editor/symbols")
+def editor_symbols(repo: str, q: str, kind: str | None = None, limit: int = 60):
+    """全仓按符号名搜函数/类定义（AI 说「find_symbols 在哪」时用）。"""
+    _guard("file.read")
+    ws = _run_ws(repo)
+    limit = max(1, min(int(limit or 60), 200))
+    return _codelocate.find_symbols(ws, q, kind=kind, limit=limit)
+
+
+@app.post("/v1/editor/symbol/locate")
+def editor_symbol_locate(req: SymbolReq):
+    """在当前文件里精确定位一个符号 → {path, line, name, kind, signature}。"""
+    _guard("file.read")
+    ws = _run_ws(repo=req.repo)
+    target = _codelocate.locate(ws, req.path, req.symbol)
+    if not target:
+        return {"ok": False, "reason": f"没在 {req.path} 里找到符号「{req.symbol}」"}
+    return {"ok": True, **target}
+
+
+@app.post("/v1/editor/navigate")
+def editor_navigate(req: NavigateReq):
+    """解析中文意图并定位目标（本地规则，零 token）。
+
+    返回 {action, targets, reason, ...}：
+      · action=debug/navigate + targets 非空 → 前端直接打开文件、跳到行、按需启动调试；
+      · action=search → targets 是全仓候选列表，前端展示让用户挑；
+      · 抠不出目标 → action=none/空 targets + reason，交回代码填充，不瞎跳。
+    """
+    _guard("file.read")
+    ws = _run_ws(req.repo)
+    intent = _codelocate.parse_intent(req.text)
+    action, symbol, file_hint = intent["action"], intent["symbol"], intent["file_hint"]
+    if action == "none":
+        return {"ok": False, "action": "none", "targets": [],
+                "reason": "这句话没有导航/调试意图（说「打开 X 的 Y 函数」或「调试 Y」）"}
+
+    targets: list[dict] = []
+    reason = ""
+    if action == "search" or not symbol:
+        # 全仓搜（给了符号搜符号；只给了文件名就搜该文件的所有顶层符号）
+        query = symbol or file_hint or req.text
+        found = _codelocate.find_symbols(ws, query, limit=40)
+        targets = found["hits"]
+        if not targets:
+            reason = f"没找到与「{query}」相关的函数/类"
+        return {"ok": bool(targets), "action": "search" if action == "search" else "navigate",
+                "targets": targets, "reason": reason, "files": found.get("files", 0)}
+
+    # 有明确符号名：先单文件（给了 file_hint），否则全仓搜同名定义
+    if file_hint:
+        one = _codelocate.locate(ws, file_hint, symbol)
+        if one:
+            targets = [one]
+    if not targets:
+        found = _codelocate.find_symbols(ws, symbol, limit=40)
+        targets = [h for h in found["hits"] if h["name"] == symbol or h["score"] >= 70]
+        if file_hint:
+            prefer = [h for h in targets if file_hint.split("/")[-1].lower() in h["path"].lower()]
+            if prefer:
+                targets = prefer
+    if not targets:
+        reason = f"没找到函数/类「{symbol}」" + (f"（在 {file_hint}）" if file_hint else "")
+    return {"ok": bool(targets), "action": action, "targets": targets[:40], "reason": reason,
+            "symbol": symbol, "file_hint": file_hint}
+
+
+@app.post("/v1/editor/debug/symbol")
+def editor_debug_symbol(req: DebugSymbolReq):
+    """按符号调试：在该函数定义行自动下断点并启动 Python 调试会话。
+
+    其他语言拒绝单步（和 debug/start 一致，不假装能单步）；走同一套 bdb 会话。
+    """
+    _guard("test.run")
+    ws = _run_ws(req.repo)
+    target = _codelocate.locate(ws, req.path, req.symbol)
+    if not target:
+        return {"ok": False, "reason": f"没在 {req.path} 里找到符号「{req.symbol}」"}
+    built = _coderun.build_command(ws, target["path"])
+    if not built.get("debug"):
+        return {"ok": False, "reason": "断点调试只支持 Python；其他语言请用「运行」看诊断输出",
+                "target": target}
+    # 断点下在函数体首行（signature 行单独 step 会停在 def，body_line 才是第一条可执行语句）
+    bp = target.get("body_line") or target["line"]
+    r = _coderun.start_debug(ws, target["path"], breakpoints=[bp])
+    return {**r, "target": target, "breakpoint": bp}
+
+
+@app.get("/v1/fs/search")
+def fs_search(repo: str, q: str, limit: int = 80, case: bool = False):
+    """全仓关键词搜索（编辑器用）：返回命中文件+行号+整行文本。"""
+    _guard("search.read")
+    ws = _fs_base(repo)
+    key = q if case else q.lower()
+    if not key.strip():
+        return {"q": q, "hits": [], "files": 0}
+    root = ws.resolve()
+    hits: list[dict] = []
+    scanned = 0
+    for cur, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs
+                         if d not in _SKIP_DIRS and not d.startswith("."))
+        for f in sorted(files):
+            p = Path(cur) / f
+            try:
+                if p.stat().st_size > 512 * 1024:
+                    continue
+                raw = p.read_text(encoding="utf-8-sig", errors="replace")
+            except OSError:
+                continue
+            scanned += 1
+            if "\x00" in raw[:2000]:
+                continue
+            for no, line in enumerate(raw.splitlines(), 1):
+                hay = line if case else line.lower()
+                if key in hay:
+                    hits.append({"path": str(p.relative_to(root)).replace("\\", "/"),
+                                 "line": no, "text": line[:240]})
+                    if len(hits) >= max(1, limit):
+                        return {"q": q, "hits": hits, "files": scanned, "truncated": True}
+    return {"q": q, "hits": hits, "files": scanned, "truncated": False}
+
+
+# ---------------------------------------------------------------- 夜班（脱离界面长跑）
+
+# ---------------------------------------------------------------- 需求澄清协商（夜班模式的第一步）
+
+class ClarifyReq(BaseModel):
+    repo: str
+    requirement: str = ""            # 首次必填；之后可空（沿用已存的需求）
+    answers: dict[str, str] = {}     # {待定项 key: 用户选的选项}
+    reset: bool = False              # 重新开始（丢掉已存的协商状态）
+    effort: str = "max"              # 协商用最强档：这一步省钱最不划算
+
+
+def _clarify_file(repo: Path) -> Path:
+    return repo / ".sixcoder" / "clarify.json"
+
+
+def _doc_to_json(doc) -> dict:
+    return {"requirement": doc.requirement, "rounds": doc.rounds,
+            "narrative": doc.narrative, "satisfied": doc.satisfied,
+            "sufficient": doc.sufficient,
+            "choices": [{"key": c.key, "question": c.question,
+                         "options": list(c.options), "picked": c.picked}
+                        for c in doc.choices]}
+
+
+def _doc_from_json(d: dict):
+    doc = _clarify.DesignDoc(requirement=str(d.get("requirement") or ""))
+    doc.rounds = int(d.get("rounds") or 0)
+    doc.narrative = str(d.get("narrative") or "")
+    doc.satisfied = bool(d.get("satisfied"))
+    doc.sufficient = bool(d.get("sufficient"))
+    doc.choices = [_clarify.Choice(key=str(c.get("key") or ""),
+                                   question=str(c.get("question") or ""),
+                                   options=[str(x) for x in (c.get("options") or [])],
+                                   picked=str(c.get("picked") or ""))
+                   for c in (d.get("choices") or [])]
+    return doc
+
+
+@app.post("/v1/night/clarify")
+def night_clarify(req: ClarifyReq):
+    """需求澄清协商：远端先问清楚，确认"能做完"才允许开工。
+
+    为什么必须有这一步（2026-11-20 用户口径）：甲方模式的承诺是"提需求 → 早上看交付
+    报告"，但技术栈/范围/验收口径没定时，远端只能自己猜 —— 猜错的代价是整夜的钱。
+    所以动手前让它把待定项列成多选，人点完、它再自评"这些细节够不够开工"。
+
+    设计成**一轮一次请求**（不是服务端阻塞跑完 8 轮）：
+      · 用户看得见每轮问了什么、自己答了什么，能随时改主意；
+      · 关掉界面再打开，状态从 `.sixcoder/clarify.json` 接着走；
+      · 每轮最多 2 次远端调用（列问题 + 判够不够），待定项还在时不问"够不够"省一次。
+    """
+    _guard("agent.run")
+    repo = Path(req.repo)
+    if not repo.is_dir():
+        raise HTTPException(400, f"仓库不存在：{req.repo}")
+    text = (req.requirement or "").strip()
+    cf = _clarify_file(repo)
+
+    doc = None
+    if not req.reset and cf.is_file():
+        try:
+            doc = _doc_from_json(json.loads(cf.read_text(encoding="utf-8")))
+        except Exception:                                # noqa: BLE001
+            doc = None
+    if doc is None:
+        if not text:
+            raise HTTPException(400, "第一次协商要先给需求（requirement）")
+        doc = _clarify.DesignDoc(requirement=text)
+    elif text:
+        doc.requirement = text
+
+    t0 = time.time()
+    try:
+        if doc.rounds == 0:
+            doc = _clarify.start(doc.requirement, _clarify.default_complete, req.effort)
+        elif req.answers:
+            doc = _clarify.apply_choices(doc, req.answers,
+                                         _clarify.default_complete, req.effort)
+        # 还有待定项 = 明显不够开工，不必再花一次远端调用问"够不够"
+        if not doc.open_choices():
+            doc.sufficient = _clarify.is_sufficient(doc, _clarify.default_complete, req.effort)
+    except Exception as exc:                             # noqa: BLE001
+        raise HTTPException(500, f"协商失败：{type(exc).__name__}: {exc}")
+
+    ready = bool(doc.sufficient and not doc.open_choices())
+    spec_path = ""
+    try:
+        cf.parent.mkdir(parents=True, exist_ok=True)
+        cf.write_text(json.dumps(_doc_to_json(doc), ensure_ascii=False, indent=2),
+                      encoding="utf-8")
+        if ready:
+            sp = cf.parent / "night_spec.md"
+            sp.write_text("# 已确认的实现规格（协商结果，夜班按它开工）\n\n" + doc.render(),
+                          encoding="utf-8")
+            spec_path = str(sp)
+    except OSError:
+        pass
+
+    return {"ok": True, "ready": ready, "round": doc.rounds,
+            "requirement": doc.requirement,
+            "narrative": doc.narrative,
+            "questions": [{"key": c.key, "question": c.question, "options": c.options}
+                          for c in doc.open_choices()],
+            "answered": [{"key": c.key, "question": c.question, "picked": c.picked}
+                         for c in doc.choices if c.picked],
+            "render": doc.render(), "spec_path": spec_path,
+            "ms": int((time.time() - t0) * 1000),
+            "note": ("远端已确认：这些细节足以开工 → 可以点「开始夜班」" if ready
+                     else "远端还有待定项：回答后继续（每轮约 30–90 秒）")}
+
+
+@app.get("/v1/night/clarify/status")
+def night_clarify_status(repo: str):
+    """已存的协商进度（关掉界面再打开时接着看，不重复花钱）。"""
+    cf = _clarify_file(Path(repo))
+    if not cf.is_file():
+        return {"ok": True, "exists": False}
+    try:
+        d = json.loads(cf.read_text(encoding="utf-8"))
+    except Exception:                                    # noqa: BLE001
+        return {"ok": True, "exists": False}
+    doc = _doc_from_json(d)
+    return {"ok": True, "exists": True, "round": doc.rounds,
+            "ready": bool(doc.sufficient and not doc.open_choices()),
+            "requirement": doc.requirement, "narrative": doc.narrative,
+            "questions": [{"key": c.key, "question": c.question, "options": c.options}
+                          for c in doc.open_choices()],
+            "answered": [{"key": c.key, "question": c.question, "picked": c.picked}
+                         for c in doc.choices if c.picked],
+            "render": doc.render()}
+
+def _pythonw_exe() -> str:
+    """同目录的 pythonw.exe（无控制台窗口）；没有就退回当前解释器。"""
+    exe = Path(sys.executable)
+    cand = exe.with_name("pythonw.exe")
+    return str(cand if cand.is_file() else exe)
+
+
+def _spawn_reparented(exe: str, args: list[str], cwd: str,
+                      env_extra: dict[str, str] | None = None,
+                      pid_file: Path | None = None) -> int:
+    """起一个**不在本进程树下**的进程，返回 PID（Windows）。
+
+    为什么不能用裸 subprocess.Popen（2026-11-21 实测）：安装器升级时会
+    `taskkill /F /T /IM SixCoder.exe`，/T 顺着父子关系杀整棵树 —— 后端是
+    SixCoder 的子进程、看门狗又是后端的子进程，于是"关窗也能跑"的夜班在装新版时
+    被一起杀掉，用户看到的就是"明明在跑，装完就没了"。
+
+    做法：`cmd /c start "" /b <exe> ...` —— cmd 启动完立刻退出，子进程的父进程
+    随即消失，不再挂在应用进程树里；安装器/关窗的 /T 都追不到它。
+    PID 由被拉起的进程自己写（看门狗写 watchdog.pid），这里等一小会儿读回来。
+    """
+    env = dict(os.environ)
+    env.update({k: str(v) for k, v in (env_extra or {}).items()})
+    if sys.platform != "win32":
+        proc = subprocess.Popen([exe, *args], cwd=cwd, env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return proc.pid
+    cmdline = subprocess.list2cmdline([exe, *args])
+    comspec = os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    base = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # 能脱离 Job 就脱离：上层（安装器/桌面外壳/测试宿主）常用 job 对象做"关掉就全杀"，
+    # 不 breakaway 的话夜班虽然换了父进程，仍会随 job 关闭被带走。
+    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+    for flags in (base | breakaway, base):
+        try:
+            subprocess.Popen(f'"{comspec}" /c start "" /b {cmdline}', cwd=cwd, env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=flags)
+            break
+        except OSError:
+            if flags == base:
+                raise
+    if pid_file:
+        for _ in range(30):
+            time.sleep(0.1)
+            try:
+                pid = int((pid_file.read_text(encoding="utf-8") or "").strip() or 0)
+                if pid and _pid_alive(pid):
+                    return pid
+            except (OSError, ValueError):
+                pass
+    return 0
+
+
+def _pid_alive(pid: int) -> bool:
+    """进程还活着吗。**绝不能用 os.kill**（在 Windows 上那是真杀进程）。"""
+    try:
+        pid = int(pid or 0)
+    except Exception:                                    # noqa: BLE001
+        return False
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+        if not psutil.pid_exists(pid):
+            return False
+        p = psutil.Process(pid)
+        return p.is_running()
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def _night_procs(repo: str) -> list[dict]:
+    """当前在跑 `cli.py night` 的进程（用来防双开 / 显示状态）。"""
+    out: list[dict] = []
+    try:
+        import psutil
+    except Exception:                                    # noqa: BLE001
+        return out
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            cmd = " ".join(p.info.get("cmdline") or [])
+        except Exception:                                # noqa: BLE001
+            continue
+        if "cli.py" in cmd and "night" in cmd:
+            if not repo or repo.replace("/", "\\").lower() in cmd.replace("/", "\\").lower():
+                out.append({"pid": p.info.get("pid"), "cmd": cmd[-180:]})
+    return out
+
+
+def _resume_interrupted_nights() -> None:
+    """上次夜班被中断（装新版本时安装器会清安装目录下的 python）就自动续跑。
+
+    为什么要有：安装器升级前必须杀掉 `$INSTDIR` 下的所有 python（否则文件被占用，
+    改名/覆盖会失败），夜班跟着死。看门狗在开跑时写 `night_<仓库标签>.want`，
+    正常收工/用户主动停会删掉它；后端启动看到标记、又确认没有夜班在跑，
+    就按原参数重新拉起 —— 不用用户再点一次，也不至于白丢一夜。
+    """
+    if not _paths.is_packaged():
+        return
+    seen: set[str] = set()
+    for f in _paths.logs_dir().glob("night_*.want"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            repo = str(d.get("repo") or "")
+            key = repo.replace("\\", "/").lower()
+            if key and key in seen:
+                f.unlink()                    # 同一仓库的重复标记（旧版标签不一致留下的）
+                continue
+            seen.add(key)
+            args = [str(a) for a in (d.get("args") or [])]
+            ts = float(d.get("ts") or 0)
+            if not repo or not args or time.time() - ts > 12 * 3600:
+                f.unlink()
+                continue
+            if _night_procs(repo):
+                continue                          # 还在跑，不重复起
+            _spawn_reparented(_pythonw_exe(), args, str(ROOT),
+                              {"SIXCODER_REPO": repo, "SIXCODER_HOME": str(_paths.home())},
+                              pid_file=_paths.logs_dir() / "watchdog.pid")
+            print(f"[SixCoder] 检测到夜班被中断，已自动续跑：{repo}", flush=True)
+        except Exception as exc:                             # noqa: BLE001
+            print(f"[SixCoder] 续跑跳过 {f.name}：{type(exc).__name__}: {exc}", flush=True)
+
+
+class DetachedNightReq(BaseModel):
+    repo: str
+    requirement: str = ""          # 甲方需求（写进 .sixcoder/night_requirement.txt）
+    goal: str = ""                 # 全自主目标（写进 .sixcoder/night_goal.txt）    fresh: bool = False
+
+
+@app.post("/v1/night/detached")
+def create_night_detached(req: DetachedNightReq):
+    """**以脱离界面的方式**起夜班：spawn 独立 watchdog 进程。
+
+    为什么必须有（2026-11-20 用户口径："点开始夜班就跑一整夜"）：
+    原来的 `/v1/night` 在 server.py 里起线程跑，而 `shell/main.cjs` 在关窗时
+    会 `backend.kill()` —— 一关界面夜班就死，而且没有看门狗兜底。这里改为：
+      · `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`：不继承本进程生命期
+      · 由 `tools/watchdog_night.py` 托管：崩溃/停机自动重启（上限 20 次）
+      · 输出重定向到文件（**不用 PIPE**：缓冲写满会死锁，本项目踩过这个坑）
+    进度不走 SSE，改由 `/v1/night/detached/status` 从磁盘读（关掉界面也能看）。
+    """
+    _guard("agent.run")
+    pol = policy.current()
+    if pol.code_escalation is policy.OFF:
+        raise HTTPException(403, f"{pol.name}不写文件，不能跑夜班；请切到甲方模式或开发者模式")
+    repo = Path(req.repo)
+    if not repo.is_dir():
+        raise HTTPException(400, f"仓库不存在：{req.repo}")
+
+    # 防双开：已有 cli.py night 在跑就别再起一个（两个进程会同写一个产物仓）
+    running = _night_procs(str(repo))
+    if running:
+        return {"ok": True, "already": True, "procs": running,
+                "note": "已有夜班在跑（同一仓库），没有重复启动",
+                "status": "/v1/night/detached/status?repo=%s" % req.repo}
+
+    log_dir = _paths.logs_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # 用户任务文本要真的被用上：写进仓库 .sixcoder/ 下的目标文件，再把路径传下去
+    # （watchdog 只认 --goal-file / --requirement-file；不传就退回 REQUIREMENTS.md）
+    goal_args: list[str] = []
+    goal_src = ""
+    sd = repo / ".sixcoder"
+    try:
+        sd.mkdir(parents=True, exist_ok=True)
+        if (req.goal or "").strip():
+            gf = sd / "night_goal.txt"
+            gf.write_text(req.goal.strip(), encoding="utf-8")
+            goal_args = ["--goal-file", str(gf)]
+            goal_src = "goal"
+        elif (req.requirement or "").strip():
+            rf = sd / "night_requirement.txt"
+            rf.write_text(req.requirement.strip(), encoding="utf-8")
+            goal_args = ["--requirement-file", str(rf)]
+            goal_src = "requirement"
+    except OSError as exc:
+        raise HTTPException(500, f"写目标文件失败：{exc}")
+    cmd = ([_pythonw_exe(), "-u", "tools/watchdog_night.py", "--now", "--repo", str(repo)]
+           + goal_args)
+    env = dict(os.environ)
+    env["SIXCODER_REPO"] = str(repo)     # 巡检没有 --repo 参数，靠 env 知道盯哪个仓库
+    env["SIXCODER_HOME"] = str(_paths.home())
+    try:
+        wd_pid = _spawn_reparented(_pythonw_exe(), cmd[1:], str(ROOT), env,
+                                   pid_file=log_dir / "watchdog.pid")
+    except Exception as exc:                             # noqa: BLE001
+        raise HTTPException(500, f"起夜班失败：{type(exc).__name__}: {exc}")
+
+    # 巡检（产物质量那一层）：删掉 START_NIGHT.bat 之后这里必须补回来，否则
+    # "编译/冒烟/覆盖回退/烧钱速率"没人看 —— 看门狗只管进程活着，看不见产物坏了。
+    # 它自带单实例守卫（pid 文件里的还活着就自己退出），重复起是安全的。
+    patrol = {"started": False}
+    try:
+        pp_pid = _spawn_reparented(_pythonw_exe(), ["-u", "tools/patrol.py", "--persist"],
+                                   str(ROOT), env)
+        patrol = {"started": True, "pid": pp_pid,
+                  "log": str(log_dir / "patrol_detached.out")}
+    except Exception as exc:                             # noqa: BLE001
+        patrol = {"started": False, "why": f"{type(exc).__name__}: {exc}"}
+
+    return {"ok": True, "already": False, "pid": wd_pid,
+            "cmd": " ".join(cmd), "log": str(log_dir / "watchdog.log"),
+            "goal_source": goal_src or "REQUIREMENTS.md",
+            "watchdog_log": str(log_dir / "watchdog.log"),
+            "patrol": patrol,
+            "note": "已脱离界面启动：关掉这个窗口、装新版本都不会中断（进程不在应用进程树里）；"
+                    "崩溃由看门狗重启，巡检并行盯着产物质量",
+            "status": "/v1/night/detached/status?repo=%s" % req.repo}
+
+
+class PackReq(BaseModel):
+    repo: str
+
+
+def _pack_procs(repo: str) -> list[dict]:
+    out: list[dict] = []
+    try:
+        import psutil
+    except Exception:                                    # noqa: BLE001
+        return out
+    for p in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmd = " ".join(p.info.get("cmdline") or [])
+        except Exception:                                # noqa: BLE001
+            continue
+        if "core.exepack" in cmd and repo.lower() in cmd.lower():
+            out.append({"pid": p.info.get("pid")})
+    return out
+
+
+@app.post("/v1/night/package")
+def night_package(req: PackReq):
+    """把产物仓打成 exe（甲方模式交付的最后一步）。
+
+    为什么单开一条 detached 路径：PyInstaller 要 1-3 分钟，塞进请求线程会占住后端，
+    关窗还会被杀；按既有的「独立进程 + 状态文件轮询」模型走。
+    """
+    _guard("agent.run")
+    repo = Path(req.repo)
+    if not repo.is_dir():
+        raise HTTPException(400, f"仓库不存在：{req.repo}")
+    from core import exepack as _exepack
+    if _pack_procs(str(repo)):
+        return {"ok": True, "already": True, "note": "已经在打包了，等它跑完"}
+    info = _exepack.detect(repo)
+    if not info.get("exists"):
+        return {"ok": False, "reason": "仓库里没有可打包的入口（app/main.py / main.py / cli.py…）",
+                "entry": "", "kind": "none"}
+    logs = _paths.logs_dir()
+    try:
+        (logs / f"pack_{repo.name}.log").unlink()
+    except OSError:
+        pass
+    try:
+        pid = _spawn_reparented(sys.executable,
+                                ["-u", "-m", "core.exepack", "--repo", str(repo),
+                                 "--logs", str(logs)],
+                                str(ROOT),
+                                {"SIXCODER_HOME": str(_paths.home())})
+    except Exception as exc:                             # noqa: BLE001
+        raise HTTPException(500, f"起打包进程失败：{type(exc).__name__}: {exc}")
+    return {"ok": True, "already": False, "pid": pid, "entry": info["entry"],
+            "kind": info["kind"],
+            "note": "已开始打包（1-3 分钟）：装 PyInstaller → 编译 → dist/<名字>.exe"}
+
+
+@app.get("/v1/night/package/status")
+def night_package_status(repo: str):
+    from core import exepack as _exepack
+    ws = Path(repo)
+    st = _exepack.read_status(_paths.logs_dir(), ws)
+    tail = ""
+    for cand in (_paths.logs_dir() / f"pack_{ws.name}.log",
+                 Path(st.get("log") or "")):
+        try:
+            if cand.is_file():
+                tail = "\n".join(cand.read_text(encoding="utf-8", errors="replace")
+                                 .splitlines()[-25:])
+                break
+        except OSError:
+            continue
+    return {"ok": True, **st, "log_tail": tail,
+            "running": bool(_pack_procs(str(ws)))}
+
+
+@app.get("/v1/night/detached/log")
+def night_detached_log(repo: str, offset: int = 0):
+    """后台夜班的**增量日志**：界面用它把"执行时间线"喂起来。
+
+    为什么需要（2026-11-21 用户报"执行时间线不显示远端的回复了"）：
+    夜班默认走后台长跑（detached），不发 SSE；时间线原来只由
+    `/v1/tasks/{id}/stream` 填充，这条路在 detached 下根本不存在，于是整晚空白。
+    这里按字节 offset 只回新行，前端 2 秒轮询，既不重复也不漏。
+    """
+    ws = Path(repo)
+    lg = _paths.night_log(str(ws))
+    if not lg or not lg.is_file():
+        return {"ok": True, "lines": [], "offset": offset, "running": False, "log": ""}
+    try:
+        size = lg.stat().st_size
+        if offset < 0 or offset > size:
+            offset = 0                       # 换了一夜（日志被替换/截断）→ 从头读
+        with lg.open("rb") as f:
+            f.seek(offset)
+            raw = f.read(400_000)
+    except OSError as exc:                                   # noqa: BLE001
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}",
+                "lines": [], "offset": offset, "running": False, "log": str(lg)}
+    parts = raw.split(b"\n")
+    if parts and not raw.endswith(b"\n"):
+        parts.pop()                          # 最后半行不返回，等下次写完再读
+    consumed = sum(len(p) + 1 for p in parts)
+    lines = [p.decode("utf-8", "replace").rstrip("\r") for p in parts if p.strip()]
+    return {"ok": True, "lines": lines[-400:], "offset": offset + consumed,
+            "running": bool(_night_procs(str(ws))), "log": str(lg)}
+
+
+@app.get("/v1/night/detached/status")
+def night_detached_status(repo: str):
+    """脱离模式的状态：看门狗/夜班进程 + 端到端进度 + 预算 + 日志尾巴。
+
+    全部从磁盘读（coverage.jsonl / budget.json / watchdog.log），不依赖 SSE ——
+    这样关掉界面再打开也能看到刚才那一夜跑到哪了。
+    """
+    ws = Path(repo)
+    pid_file = _paths.logs_dir() / "watchdog.pid"
+    wd_pid = 0
+    try:
+        wd_pid = int((pid_file.read_text(encoding="utf-8") or "").strip() or 0)
+    except Exception:                                    # noqa: BLE001
+        wd_pid = 0
+    procs = _night_procs(str(ws))
+    cov: dict[str, Any] = {}
+    try:
+        lines = [ln for ln in (ws / ".sixcoder" / "coverage.jsonl")
+                 .read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+        if lines:
+            last = json.loads(lines[-1])
+            st = last.get("statuses") or {}
+            if st:
+                from collections import Counter
+                c = Counter(st.values())
+                cov = {"done": c.get("done", 0), "absent": c.get("absent", 0),
+                       "descoped": c.get("descoped", 0), "total": len(st),
+                       "pct": round(100.0 * c.get("done", 0) / len(st), 1)}
+            cov["ts"] = last.get("ts") or 0
+    except Exception:                                    # noqa: BLE001
+        cov = {}
+    budget: dict[str, Any] = {}
+    try:
+        snap = _be.budget_snapshot(str(ws))
+        spent = _be.project_spent_cny(str(ws))
+        budget = {"spent": round(spent, 2),
+                  "threshold": snap.get("stop_threshold_cny"),
+                  "remaining": round((snap.get("stop_threshold_cny") or 0) - spent, 2),
+                  "stop_level": snap.get("stop_level")}
+    except Exception:                                    # noqa: BLE001
+        budget = {}
+    tail = ""
+    try:
+        lg = (_paths.logs_dir() / "watchdog.log")
+        raw = lg.read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = "\n".join(raw[-12:])
+    except Exception:                                    # noqa: BLE001
+        tail = ""
+    # 夜班自己的日志（cli.py night 每轮一个 night_*.log）：看门狗日志只说"第几次启动"，
+    # 真正"跑到哪一步"在这个文件里。界面重开时没有 SSE，只能靠它显示进度。
+    night_tail = ""
+    try:
+        lg = _paths.night_log(str(ws))
+        if lg:
+            raw = lg.read_text(encoding="utf-8", errors="replace").splitlines()
+            night_tail = "\n".join(raw[-30:])
+    except Exception:                                    # noqa: BLE001
+        night_tail = ""
+    # 最近产物：让用户不用翻目录就知道"它到底写了没有"
+    recent: list[dict[str, Any]] = []
+    try:
+        now = time.time()
+        for p in ws.rglob("*"):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(ws).as_posix()
+            if rel.startswith((".git/", ".sixcoder/")) or "__pycache__" in rel:
+                continue
+            mt = p.stat().st_mtime
+            if now - mt <= 3600:
+                recent.append({"path": rel, "size": p.stat().st_size,
+                               "mtime": time.strftime("%H:%M:%S", time.localtime(mt))})
+        recent.sort(key=lambda x: x["mtime"], reverse=True)
+        recent = recent[:12]
+    except Exception:                                    # noqa: BLE001
+        recent = []
+    return {"repo": str(ws),
+            "watchdog": {"pid": wd_pid, "alive": _pid_alive(wd_pid)},
+            "night": {"running": bool(procs), "procs": procs},
+            "coverage": cov, "budget": budget, "log_tail": tail,
+            "night_log_tail": night_tail, "recent_files": recent}
+
+
+class StopNightReq(BaseModel):
+    repo: str = ""            # 空 = 停掉所有本引擎的夜班进程
+
+def _kill_tree(proc) -> list[int]:
+    """杀掉一个进程连同它的子进程（先子后父），返回被杀的 pid。
+
+    为什么要连子一起杀：`cli.py night` 是 watchdog 的子进程，只杀父进程会留下
+    一个"孤儿夜班"继续写产物仓 —— 用户以为已经停了，实际还在花钱。
+    """
+    killed: list[int] = []
+    try:
+        kids = proc.children(recursive=True)
+    except Exception:                                    # noqa: BLE001
+        kids = []
+    for k in kids:
+        try:
+            k.kill()
+            killed.append(k.pid)
+        except Exception:                                # noqa: BLE001
+            pass
+    try:
+        proc.kill()
+        killed.append(proc.pid)
+    except Exception:                                    # noqa: BLE001
+        pass
+    return killed
+
+
+def _engine_proc_kind(cmd: str) -> str:
+    """cmdline → watchdog / patrol / night / ''（只认本引擎自己的进程名）。"""
+    c = cmd.replace("\\", "/")
+    if "watchdog_night.py" in c:
+        return "watchdog"
+    if "patrol.py" in c:
+        return "patrol"
+    if "cli.py" in c and "night" in c:
+        return "night"
+    return ""
+
+
+@app.post("/v1/night/stop")
+def stop_night(req: StopNightReq):
+    """停夜班（替代 STOP_NIGHT.bat，2026-11-20 用户口径："功能全进源码"）。
+
+    顺序是硬约束：**先 watchdog → 再 patrol → 最后 cli.py night**。
+    watchdog 会重启夜班，先杀它才不会出现"杀了又自己起来"。
+    安全性：只杀 (a) 本引擎 pid 文件里记录的进程树，或 (b) cmdline 命中本引擎脚本
+    且 cwd 在引擎目录内的进程。用户自己的其它 python 项目绝不动。
+    """
+    _guard("agent.run")
+    want_repo = (req.repo or "").replace("/", "\\").lower()
+    killed: list[dict] = []
+    notes: list[str] = []
+
+    # 1) pid 文件（watchdog / patrol）→ 连子树一起杀
+    try:
+        import psutil
+    except Exception as exc:                             # noqa: BLE001
+        raise HTTPException(500, f"缺少 psutil，无法安全停夜班：{exc}")
+    order = ("watchdog.pid", "patrol.pid", "ops.pid")
+    for name in order:
+        pf = _paths.logs_dir() / name
+        pid = 0
+        try:
+            pid = int((pf.read_text(encoding="utf-8") or "").strip() or 0)
+        except Exception:                                # noqa: BLE001
+            pid = 0
+        if not pid:
+            continue
+        try:
+            p = psutil.Process(pid)
+            got = _kill_tree(p)
+            killed.extend({"pid": x, "from": name} for x in got)
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            pf.unlink()
+        except OSError:
+            pass
+
+    # 2) 兜底扫描：cmdline 命中 + cwd 在引擎目录内（拿不到 cwd 就保守跳过，绝不误杀）
+    engine_dir = str(ROOT).replace("\\", "/").lower()
+    try:
+        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                cmd = " ".join(p.info.get("cmdline") or [])
+            except Exception:                            # noqa: BLE001
+                continue
+            kind = _engine_proc_kind(cmd)
+            if not kind or p.pid == os.getpid():
+                continue
+            if want_repo and kind == "night" and want_repo not in cmd.replace("/", "\\").lower():
+                continue                                 # 指定了仓库 → 只停这个仓库的夜班
+            inside = False
+            try:
+                inside = str(p.cwd()).replace("\\", "/").lower().startswith(engine_dir)
+            except Exception:                            # noqa: BLE001
+                inside = engine_dir in cmd.replace("\\", "/").lower()
+            if not inside:
+                notes.append(f"跳过 pid={p.pid}（不在本引擎目录，避免误杀）")
+                continue
+            try:
+                got = _kill_tree(p)
+                killed.extend({"pid": x, "from": kind} for x in got)
+            except Exception:                            # noqa: BLE001
+                pass
+    except Exception as exc:                             # noqa: BLE001
+        notes.append(f"扫描进程失败：{type(exc).__name__}: {exc}")
+
+    # 3) 清掉 ops 状态，避免界面一直显示"运行中"
+    try:
+        (_paths.logs_dir() / "ops.json").unlink()
+    except OSError:
+        pass
+    # 4) 用户主动停 = 这一夜收工：删掉"被中断就续跑"的标记，别下次启动又自己跑起来
+    for f in _paths.logs_dir().glob("night_*.want"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            d = {}
+        if not want_repo or want_repo in str(d.get("repo") or "").replace("/", "\\").lower():
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    return {"ok": True, "killed": killed, "count": len(killed), "notes": notes,
+            "note": "已停止夜班与运维任务" if killed else "没有在跑的夜班进程"}
+
+
+# ---------------------------------------------------------------- 运维任务（原 START_NIGHT.bat 的 full/report/contract）
+
+class OpsReq(BaseModel):
+    repo: str
+    op: str = "report"        # report（只检测，零 token）/ repair（检测+修）/ contract（生成全项目契约）
+
+
+_OPS_DEFS = {
+    "report": {"args": [], "desc": "检测并出错误报告（零 token，不改代码）"},
+    "repair": {"args": ["--repair"], "desc": "检测 + 只改有错处（会花 token）"},
+    "contract": {"args": ["--gen-contract-only"], "desc": "生成全项目契约（慢，可续跑）"},
+}
+
+
+def _ops_state_file():
+    return _paths.logs_dir() / "ops.json"
+
+
+def _read_ops_state() -> dict:
+    try:
+        return json.loads(_ops_state_file().read_text(encoding="utf-8")) or {}
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
+@app.post("/v1/ops/start")
+def ops_start(req: OpsReq):
+    """起一个运维任务（脱离界面跑，日志落文件，界面轮询 status）。
+
+    为什么脱离：`full --repair` 实测 10-15 分钟、契约生成 1-3 分钟/域，
+    在请求线程里跑会占住 SSE 且关窗即死 —— 和夜班踩的是同一个坑。
+    """
+    _guard("agent.run")
+    op = (req.op or "").strip().lower()
+    if op not in _OPS_DEFS:
+        raise HTTPException(400, f"未知运维任务：{req.op}（可选 {', '.join(_OPS_DEFS)}）")
+    repo = Path(req.repo)
+    if not repo.is_dir():
+        raise HTTPException(400, f"仓库不存在：{req.repo}")
+
+    st = _read_ops_state()
+    if st and _pid_alive(int(st.get("pid") or 0)):
+        return {"ok": True, "already": True, "op": st.get("op"), "pid": st.get("pid"),
+                "note": "已有运维任务在跑，等它结束再起下一个"}
+
+    out_path = _paths.logs_dir() / f"ops_{op}.out"
+    cmd = ([_pythonw_exe(), "-u", "cli.py", "full", "--repo", str(repo)]
+           + _OPS_DEFS[op]["args"])
+    flags = 0
+    if sys.platform == "win32":
+        flags = (getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+    try:
+        with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(f"# {op} @ {repo}\n# {' '.join(cmd)}\n")
+            fh.flush()
+            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=fh,
+                                    stderr=subprocess.STDOUT, creationflags=flags)
+    except Exception as exc:                             # noqa: BLE001
+        raise HTTPException(500, f"起运维任务失败：{type(exc).__name__}: {exc}")
+    state = {"op": op, "repo": str(repo), "pid": proc.pid, "log": str(out_path),
+             "started": int(time.time()), "desc": _OPS_DEFS[op]["desc"]}
+    try:
+        _ops_state_file().write_text(json.dumps(state, ensure_ascii=False, indent=2),
+                                     encoding="utf-8")
+        (_paths.logs_dir() / "ops.pid").write_text(str(proc.pid), encoding="utf-8")
+    except OSError:
+        pass
+    return {"ok": True, "already": False, **state}
+
+
+@app.get("/v1/ops/status")
+def ops_status():
+    """运维任务状态：是否在跑、跑了多久、日志尾巴（全部从磁盘读，关窗也能看）。"""
+    st = _read_ops_state()
+    if not st:
+        return {"running": False, "op": "", "log_tail": ""}
+    pid = int(st.get("pid") or 0)
+    alive = _pid_alive(pid)
+    tail = ""
+    try:
+        raw = Path(st.get("log", "")).read_text(encoding="utf-8", errors="replace").splitlines()
+        tail = "\n".join(raw[-40:])
+    except Exception:                                    # noqa: BLE001
+        tail = ""
+    elapsed = 0
+    if alive:
+        elapsed = max(0, int(time.time()) - int(st.get("started") or 0))
+    return {"running": alive, "pid": pid, "op": st.get("op"), "repo": st.get("repo"),
+            "desc": st.get("desc"), "elapsed_s": elapsed, "log": st.get("log"),
+            "log_tail": tail}
 
 
 @app.post("/v1/night/estimate")
@@ -1161,7 +2865,7 @@ def delete_all_tasks(confirm: str = "", with_workspace: bool = False):
             400,
             "清空全部历史需要显式确认：DELETE /v1/tasks?confirm=all"
             "（单条删除请用 DELETE /v1/tasks/{task_id}）")
-    rows = db.query("SELECT id,workspace,state FROM tasks")
+    rows = db.query("SELECT id,repo,workspace,state FROM tasks")
     res = db.delete_all_tasks(with_finished_only=True)
     removed = 0
     if with_workspace:
@@ -1174,8 +2878,20 @@ def delete_all_tasks(confirm: str = "", with_workspace: bool = False):
             if str(ws) and ws.exists() and str(ws.resolve()).startswith(str(root)):
                 shutil.rmtree(ws, ignore_errors=True)
                 removed += 1
+    # 引擎本地临时区归档：只清**确实删干净了的**那些仓库（还在跑的要留着备用）
+    purged = 0
+    try:
+        from core import scratch_store as _scratch
+        done_repos = {r["repo"] for r in rows if r["id"] not in res["kept_running"]
+                      and r.get("repo")}
+        for repo in done_repos:
+            if (_scratch.purge_repo(repo) or {}).get("purged"):
+                purged += 1
+    except BaseException:                 # noqa: BLE001
+        pass
     return {"ok": True, "deleted_count": len(res["deleted"]), "rows": res["counts"],
-            "kept_running": res["kept_running"], "workspace_removed": removed}
+            "kept_running": res["kept_running"], "workspace_removed": removed,
+            "scratch_purged_repos": purged}
 
 
 class NodeResolveReq(BaseModel):
@@ -1228,9 +2944,13 @@ def retry_task(task_id: str):
 
 @app.delete("/v1/tasks/{task_id}")
 def delete_task(task_id: str, with_workspace: bool = False):
-    """删除历史任务。默认只删记录；with_workspace=true 时连带删除工作区副本。"""
+    """删除历史任务。默认只删记录；with_workspace=true 时连带删除工作区副本。
+
+    另外**一定**会清掉该仓库在引擎本地的临时区归档
+    （`prototype/data/scratch/<指纹>/`，2026-11-19 用户口径：删记录就顺手删备份）。
+    """
     _guard("agent.run")
-    rows = db.query("SELECT id,workspace,state FROM tasks WHERE id=?", (task_id,))
+    rows = db.query("SELECT id,repo,workspace,state FROM tasks WHERE id=?", (task_id,))
     if not rows:
         raise HTTPException(404, f"任务不存在：{task_id}")
     if rows[0]["state"] == "running":
@@ -1249,7 +2969,15 @@ def delete_task(task_id: str, with_workspace: bool = False):
             import shutil
             shutil.rmtree(ws, ignore_errors=True)
             removed = True
-    return {"ok": True, "deleted": task_id, "rows": counts, "workspace_removed": removed}
+    # 引擎本地该仓库的临时区归档：记录都没了就没人看，一并清掉（不留暗账）
+    purged = {}
+    try:
+        from core import scratch_store as _scratch
+        purged = _scratch.purge_repo(rows[0]["repo"])
+    except BaseException:                 # noqa: BLE001
+        purged = {"purged": False, "error": "purge 跳过"}
+    return {"ok": True, "deleted": task_id, "rows": counts,
+            "workspace_removed": removed, "scratch_purged": purged}
 
 
 @app.get("/v1/tasks/{task_id}")
@@ -1431,7 +3159,18 @@ else:
 if __name__ == "__main__":
     db.init()
     stale = db.recover_stale()
-    ensure_demo()
+    try:
+        ensure_demo()
+    except Exception as exc:                             # noqa: BLE001
+        # 演示仓库只是"示例入口"，初始化失败（没 Git / 目录只读 / 杀软）不许
+        # 阻断整个后端；否则用户只会看到"后端未就绪"，真正原因被埋掉。
+        print(f"[SixCoder] demo 初始化跳过：{type(exc).__name__}: {exc}", flush=True)
+    # 装新版本会把夜班杀掉（安装器要清安装目录下的 python）：开后端先看有没有
+    # "被中断还没收工"的标记，有就原地续跑，别等用户重新点一次。
+    try:
+        _resume_interrupted_nights()
+    except Exception as exc:                             # noqa: BLE001
+        print(f"[SixCoder] 续跑检查跳过：{type(exc).__name__}: {exc}", flush=True)
     import uvicorn
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 8760
     print(f"[SixCoder] http://127.0.0.1:{port}   前端构建产物：{WEB_DIST.exists()}   清理僵尸任务：{stale}")

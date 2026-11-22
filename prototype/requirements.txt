@@ -1,8 +1,9 @@
 # SixCoder 后端运行时依赖（版本已锁定，保证"换台机器装出同样的东西"）
 # 校验：python prototype/tools/release.py verify 会跑 gates.gate_deps
 #
-# 注意：mypy / pytest 只用于自检（类型咨询闸门、引擎判据），不参与线上运行，
-# 因此放在 requirements-dev.txt；CI 两个都装。
+# 注意：mypy 只用于自检（类型咨询闸门），不参与线上运行，放在 requirements-dev.txt。
+# pytest 必须留在运行时：仓库探测（core/recon.py）要跑 `python -m pytest --collect-only`
+# 才能建立基线；缺了它，任何带测试的仓库都会被误判成"用例收集失败"。
 
 fastapi==0.141.1
 uvicorn==0.53.0
@@ -14,3 +15,14 @@ httpx==0.28.1
 tokenizers==0.22.2
 # 覆盖率地板（core/arch.py::gate_coverage，M 级起是真测量；缺了只能如实写"测不了"）
 coverage==7.17.1
+# 进程识别（停夜班/防双开必须精确：缺了只能看 tasklist，杀不准也不敢杀）
+psutil==7.2.2
+# 仓库基线收集（recon.classify 会跑 --collect-only；见文件头说明）
+pytest==9.0.3
+
+# 甲方模式「打包 exe」：项目 venv 里没有也能退回引擎解释器打（离线可用）
+pyinstaller==6.20.0
+# 前端 SPA / Electron 的 UI 验收探针（core/browser.py）：优先驱动系统自带的
+# Edge/Chrome（channel=msedge/chrome），不下载浏览器二进制；没浏览器时 available()
+# 如实返回原因并跳过 UI 检测，绝不崩。生态包 frontend_spa/electron 依赖它做验收闭环。
+playwright==1.65.2

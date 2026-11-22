@@ -120,8 +120,12 @@ def main() -> int:
     print("[7] 源码钉子")
     root = Path(__file__).resolve().parents[1]
     src = (root / "core" / "remote.py").read_text(encoding="utf-8")
+    # 2026-11-19：不再钉死 `project_id)` 的列名位置（后来加了 cap_id 列，
+    # INSERT 变成 `project_id, cap_id)`，文本钉子假红，但第 [6] 段运行断言全绿）。
+    # 钉"函数体内确实带 project_id 且从 workspace 派生"这个语义，不钉列顺序。
+    _rec_seg = src.split("def _record_locked(")[1].split("\ndef ")[0]
     check("_record_locked 写入 project_id",
-          "project_id)" in src and "kw.get(\"workspace\")" in src)
+          "project_id" in _rec_seg and "kw.get(\"workspace\")" in _rec_seg)
     _ask_seg = src.split("def ask(")[1].split("\ndef ")[0]
     check("ask() 里不引用不存在的 workspace 变量（曾差点 NameError）",
           "workspace" not in _ask_seg)

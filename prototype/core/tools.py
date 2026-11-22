@@ -170,6 +170,18 @@ def _git_sub(args: tuple[str, ...]) -> str:
     return ""
 
 
+def _git_run(ws: Path, args: list[str], timeout: int) -> tuple[int, str]:
+    """跑 git；没装 Git 时返回可读原因，别让 API 抛 500。"""
+    try:
+        p = subprocess.run(["git", *args], cwd=str(ws), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    except FileNotFoundError:
+        return 127, "找不到 git：请安装 Git，或重新运行安装器勾选「安装 Git（MinGit）」"
+    except subprocess.TimeoutExpired:
+        return 124, f"git {args[0] if args else ''} 超时（{timeout}s）"
+
+
 def git(ws: Path, *args: str, timeout: int = 60) -> tuple[int, str]:
     """【模型通道】引擎内部 git：只允许只读 + 快照提交。
 
@@ -179,9 +191,7 @@ def git(ws: Path, *args: str, timeout: int = 60) -> tuple[int, str]:
     sub = _git_sub(args)
     if sub and sub not in _ENGINE_GIT:
         return 1, f"git 子命令 `{sub}` 未被引擎允许（模型通道只允许 {sorted(_ENGINE_GIT)}）"
-    p = subprocess.run(["git", *args], cwd=str(ws), capture_output=True,
-                       text=True, encoding="utf-8", errors="replace", timeout=timeout)
-    return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    return _git_run(ws, list(args), timeout)
 
 
 def git_human(ws: Path, *args: str, timeout: int = 240) -> tuple[int, str]:
@@ -195,6 +205,4 @@ def git_human(ws: Path, *args: str, timeout: int = 240) -> tuple[int, str]:
         return 1, f"git 子命令 `{sub}` 属于历史改写类，本工具不提供"
     if sub == "reset" and any("--hard" in a for a in args):
         return 1, "`git reset --hard` 不可用：请用「撤销该文件」或「沙箱撤销」"
-    p = subprocess.run(["git", *args], cwd=str(ws), capture_output=True,
-                       text=True, encoding="utf-8", errors="replace", timeout=timeout)
-    return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    return _git_run(ws, list(args), timeout)

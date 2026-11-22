@@ -20,7 +20,7 @@ from core import author  # noqa: E402
 
 PRODUCTS = [
     r'F:\WorkSpace\biyeshejishuangxuan',
-    r'E:\AAATOM\NewLai\SixCoder\_workout',
+    # 旧盘符下的产物仓已随项目迁移移除；保留失效路径只会让守护误报。
 ]
 
 FAILS: list[str] = []

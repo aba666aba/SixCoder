@@ -84,11 +84,78 @@ def main() -> int:
     check("账本累计仍可跨续跑读回（报总消费用）",
           abs(auto._load_spent(ws, goal) - 58.0) < 1e-6)
 
+    print("[5] 夜班开局：项目账本真值同步回镜像（2026-11-19 卡死误导修复）")
+    from core import project_ledger as _pl
+    import tempfile as _tf
+    # 新仓库，账本 seed 一个真值，镜像用另一个 goal 且卡在旧值
+    ws5 = Path(_tf.mkdtemp(prefix="sixcoder-syncspent-"))
+    g5a, g5b = "第一版需求", "拼了契约文本的第二版需求（goal 漂移）"
+    try:
+        _pl.seed(ws5, 123.9, "test", count_run=False)
+    except Exception:
+        pass
+    auto._save_spent(ws5, g5a, 50.92)          # 镜像卡在旧值
+    check("同步前：漂移的 goal 读到 0（卡死根因复现）", auto._load_spent(ws5, g5b) == 0.0)
+    got = auto.sync_spent_from_ledger(ws5, g5b)
+    check("同步后：漂移 goal 读到账本真值", abs(got - 123.9) < 1e-6, str(got))
+    check("同步后：镜像文件确实写回真值",
+          abs(auto._load_spent(ws5, g5b) - 123.9) < 1e-6)
+    # 只升不降：真值比镜像小时不回退
+    auto._save_spent(ws5, g5b, 200.0)
+    got2 = auto.sync_spent_from_ledger(ws5, g5b)
+    check("只升不降：镜像高于真值时不回退", abs(got2 - 200.0) < 1e-6, str(got2))
+    # 真值取不到（无账本行）时不动镜像
+    ws6 = Path(_tf.mkdtemp(prefix="sixcoder-syncspent-empty-"))
+    auto._save_spent(ws6, g5a, 33.3)
+    got3 = auto.sync_spent_from_ledger(ws6, g5a)
+    check("账本无记录时保留镜像原值（不误清）", abs(got3 - 33.3) < 1e-6, str(got3))
+    # 接线：company 开局真的调用了同步（AST 钉调用路径）
+    csrc = (ROOT / "core" / "company.py").read_text(encoding="utf-8")
+    check("company 开局接线 sync_spent_from_ledger",
+          "sync_spent_from_ledger(Path(repo), requirement)" in csrc)
+
+    print("[6] 阶梯停机（2026-11-19 用户口径：**以总预算为基数**，每档 +20% 等差）")
+    import json as _json
+    import tempfile as _tf
+    from core import budget_estimate as _be
+    _w = Path(_tf.mkdtemp(prefix="budget_step_"))
+    (_w / ".sixcoder").mkdir()
+    (_w / ".sixcoder" / "budget.json").write_text(
+        _json.dumps({"system_budget_cny": 100.0}), encoding="utf-8")
+    check("第 1 档阈值 = cap×1.05（105）",
+          abs(_be.stop_threshold(_w) - 105.0) < 0.01,
+          str(_be.stop_threshold(_w)))
+    # 账本 126.93 超过第 2 档 126 → 升档要一步到"能跑"（147），否则重启即停
+    _lvl = _be.bump_stop_level(_w, spent=126.93)
+    check("跨档时升到能跑的档位（level=2）", _lvl == 2, str(_lvl))
+    check("升档后阈值 = 105×(1+0.2×2) = 147（等差）",
+          abs(_be.stop_threshold(_w) - 147.0) < 0.01,
+          str(_be.stop_threshold(_w)))
+    check("升档后 spent 低于阈值（重启能跑）", 126.93 < _be.stop_threshold(_w))
+    # 小花费只升一档
+    (_w / ".sixcoder" / "budget.json").write_text(
+        _json.dumps({"system_budget_cny": 100.0, "stop_level": 0}), encoding="utf-8")
+    _lvl2 = _be.bump_stop_level(_w, spent=110)
+    check("小花费只升一档（level=1，阈值126）",
+          _lvl2 == 1 and abs(_be.stop_threshold(_w) - 126.0) < 0.01,
+          "%s/%s" % (_lvl2, _be.stop_threshold(_w)))
+    check("展示快照带的阈值随档位走",
+          _be.budget_snapshot(_w)["stop_threshold_cny"] == round(_be.stop_threshold(_w), 2),
+          str(_be.budget_snapshot(_w).get("stop_threshold_cny")))
+    # 接线：company 预算闸触发时升档，余额闸不升
+    _csrc2 = (ROOT / "core" / "company.py").read_text(encoding="utf-8")
+    check("company 预算闸触发时调 bump_stop_level",
+          "bump_stop_level(ws)" in _csrc2)
+    check("余额耗尽不升档（_by_balance 守卫）", "_by_balance" in _csrc2)
+    import shutil as _sh2
+    _sh2.rmtree(_w, ignore_errors=True)
+
     print()
     if FAILS:
         print("有失败项：" + ", ".join(FAILS))
         return 1
-    print("全部通过（跨中断累计 / 按 goal 隔离 / 容错 / 主链路接入 / 唯一停机线=系统预算×1.05）")
+    print("全部通过（跨中断累计 / 按 goal 隔离 / 容错 / 主链路接入 / "
+          "阶梯停机：以总预算105为基数、每档+20%等差(105/126/147/168)、停一次能重启）")
     return 0
 
 

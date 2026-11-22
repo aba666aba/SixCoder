@@ -144,10 +144,81 @@ def from_workspace(ws, repo, *, since: str, price_offpeak: float | None = None,
 # 基线 token/条：稳定段实测的历史均值（2026-11-10 夜班稳定段约 499k tok/条）。
 # 属可调参数：改这一个常量即可，不写死进任何估算公式。
 BASELINE_TOK_PER_CAP = 499_000
-# 唯一停机阈值：总花费超过系统总预算的 5% 即自动收工。
+# 第 1 档停机线：总花费超过系统总预算的 5% 自动收工（"总预算"= cap × 1.05）。
 OVER_CAP_RATIO = 1.05
+# **阶梯递进**（2026-11-19 用户口径，**一直以"总预算"为基数**）：
+# 停一次之后允许正常重启；之后每档在**总预算**基础上加 20%（等差，不是等比）。
+#   总预算 = cap×1.05（如 100→105）；第 n 档 = 总预算 × (1 + 0.2n)
+#   105 → 126 → 147 → 168 → 189 …（每档 +21，固定以 105 为基数）
+STOP_STEP_ADD = 0.2
 # 系统预算配置文件（产品仓内，由系统/运维填写，用户改不了）
 _BUDGET_CFG = ".sixcoder/budget.json"
+
+
+def _load_budget_cfg(ws) -> dict:
+    try:
+        p = Path(ws) / _BUDGET_CFG
+        if not p.exists():
+            return {}
+        d = json.loads(p.read_text(encoding="utf-8-sig"))
+        return d if isinstance(d, dict) else {}
+    except Exception:                                # noqa: BLE001
+        return {}
+
+
+def _save_budget_cfg(ws, d: dict) -> None:
+    try:
+        p = Path(ws) / _BUDGET_CFG
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:                                # noqa: BLE001
+        pass
+
+
+def load_stop_level(ws) -> int:
+    """已经"停过几次"（budget.json 的 `stop_level`）。默认 0。"""
+    try:
+        return max(0, int(_load_budget_cfg(ws).get("stop_level") or 0))
+    except Exception:                                # noqa: BLE001
+        return 0
+
+
+def stop_threshold(ws) -> float:
+    """当前档位的停机线（¥）。cap ≤ 0 时返回 0（不设线）。
+
+    **以总预算为基数**的等差：总预算 × (1 + 0.2 × 已停次数)。
+    105 → 126 → 147 → 168 …（每档固定 +21，不滚雪球）。
+    """
+    cap = load_system_budget(ws)
+    if cap <= 0:
+        return 0.0
+    total = cap * OVER_CAP_RATIO
+    return total * (1.0 + STOP_STEP_ADD * load_stop_level(ws))
+
+
+def bump_stop_level(ws, spent: float | None = None) -> int:
+    """停机发生后把档位升到"重启能正常跑"的位置，返回新 level。
+
+    为什么要循环升档（而不是只 +1）：账本可能一次跨过多档（如 126.35 已超过
+    第 2 档 126）——只 +1 会让"重启即停"，违背用户"停一次后能正常启动"的口径。
+    这里升到 `spent < 阈值` 为止，保证下一次启动是能跑的。
+    """
+    d = _load_budget_cfg(ws)
+    cap = float(d.get("system_budget_cny") or 0.0)
+    total = cap * OVER_CAP_RATIO
+    level = load_stop_level(ws) + 1
+    if spent is None:
+        spent = project_spent_cny(ws)
+    guard = 0
+    while (cap > 0 and guard < 200
+           and spent >= total * (1.0 + STOP_STEP_ADD * level)):
+        level += 1
+        guard += 1
+    d["stop_level"] = level
+    if cap > 0:
+        d["stop_threshold_cny"] = round(total * (1.0 + STOP_STEP_ADD * level), 2)
+    _save_budget_cfg(ws, d)
+    return level
 
 
 def load_system_budget(ws) -> float:
@@ -197,15 +268,17 @@ def load_prices(ws) -> dict:
 
 
 def budget_snapshot(ws) -> dict:
-    """给 UI 展示的预算配置快照：系统预算、用户单价、停机阈值（系统预算 × 1.05）。
+    """给 UI 展示的预算配置快照：系统预算、用户单价、**当前档位**停机阈值。
 
-    只读 .sixcoder/budget.json，不写任何东西。
+    只读 .sixcoder/budget.json，不写任何东西。阈值随 stop_level 阶梯递增
+    （第1档 cap×1.05，之后每档 ×1.2，见 STOP_STEP_RATIO）。
     """
     cap = load_system_budget(ws)
     prices = load_prices(ws)
     return {
         "system_budget_cny": cap,
-        "stop_threshold_cny": round(cap * OVER_CAP_RATIO, 2) if cap > 0 else 0.0,
+        "stop_threshold_cny": round(stop_threshold(ws), 2) if cap > 0 else 0.0,
+        "stop_level": load_stop_level(ws),
         "price_offpeak_cny_per_mtok": prices.get("offpeak"),
         "price_peak_cny_per_mtok": prices.get("peak"),
         "has_stop_line": cap > 0,
@@ -297,7 +370,8 @@ def system_budget_stopped(ws, task_id: str) -> bool:
                 return False
     except Exception:                             # noqa: BLE001
         return False
-    return spent >= cap * OVER_CAP_RATIO
+    # **按当前档位判**：第1档 cap×1.05，停过 n 次后 ×1.2^n（停一次能重启、再停再升）。
+    return spent >= stop_threshold(ws)
 
 
 def estimate_from_blueprint(ws, *, price_offpeak: float | None = None,

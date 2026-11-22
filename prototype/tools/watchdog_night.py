@@ -19,11 +19,21 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-PY = r"D:/Python/python.exe"
-PROTOTYPE = r"E:/AAATOM/NewLai/SixCoder/prototype"
+# 路径全部运行时推导，绝不写死本机绝对路径（否则别人装上夜班起不来）。
+#   · PY：当前解释器的同目录 python.exe（有控制台）；没有就退回当前解释器。
+#         注意本看门狗由 pythonw（无控制台）拉起，所以 sys.executable 可能是 pythonw.exe，
+#         必须换成 python.exe 再配合 CREATE_NO_WINDOW，避免子进程反复闪黑窗。
+#   · PROTOTYPE：本文件 tools/ 的父目录，就是 prototype。
+def _python_exe() -> str:
+    exe = Path(sys.executable)
+    cand = exe.with_name("python.exe")
+    return str(cand if cand.is_file() else exe)
+
+PY = _python_exe()
+_ENGINE = Path(__file__).resolve().parents[1]
+PROTOTYPE = str(_ENGINE)
 # **引擎不含项目身份**（2026-11-19）：路径来自 --repo / SIXCODER_REPO /
 # _logs/engine.json，三级都没有就明确报错（见 core/runtime_cfg.py）。
-_ENGINE = Path(__file__).resolve().parents[1]
 if str(_ENGINE) not in sys.path:
     sys.path.insert(0, str(_ENGINE))
 from core.runtime_cfg import require_repo as _require_repo  # noqa: E402
@@ -36,10 +46,58 @@ def _cli_repo() -> str:
             return a.split("=", 1)[1]
     return ""
 
+def _cli_opt(name: str) -> str:
+    """读 `--x value` 或 `--x=value`（只透传需要的几个，不做完整参数解析）。"""
+    for i, a in enumerate(sys.argv):
+        if a == name and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if a.startswith(name + "="):
+            return a.split("=", 1)[1]
+    return ""
+
+
 REPO = str(_require_repo(_cli_repo()))
-GOAL = REPO + r"/REQUIREMENTS.md"
-LOG = Path(r"E:/AAATOM/NewLai/SixCoder/_logs/night_20261108_run19.log")
-WLOG = Path(r"E:/AAATOM/NewLai/SixCoder/_logs/watchdog.log")
+# 目标来源（2026-11-20）：桌面界面起夜班时，用户的任务文本不能丢。
+#   · `--goal-file`        → 全自主（一句话/一段目标）
+#   · `--requirement-file` → 甲方需求
+#   · 都没给 → 沿用仓库里的 REQUIREMENTS.md（双击 START_NIGHT.bat 的老行为，不能变）
+GOAL = _cli_opt("--goal-file") or (REPO + r"/REQUIREMENTS.md")
+REQ_FILE = _cli_opt("--requirement-file")
+# 日志走运行期数据目录（安装版是 SIXCODER_HOME），绝不写死本机绝对路径。
+try:
+    from core import paths as _paths                      # noqa: E402
+    _LOG_DIR = _paths.logs_dir()
+except Exception:                                        # noqa: BLE001
+    _LOG_DIR = _ENGINE.parent / "_logs"                   # 退回引擎同级 _logs（相对本文件）
+
+# 每个仓库一份日志 + 一个指针（2026-11-21）：原来所有仓库共用
+# `night_20261108_run19.log` 并 append，界面按"最新文件"读尾巴，切仓库时会显示成
+# 别的项目的进度；文件也会无限长。现在 = night_<repo标签>_<启动时间>.log，
+# 并把路径写进 night_<标签>.current，状态接口按仓库精确取。
+try:
+    _REPO_TAG = _paths.night_tag(REPO)
+except Exception:                                        # noqa: BLE001
+    _REPO_TAG = "repo"
+LOG = _LOG_DIR / f"night_{_REPO_TAG}_{time.strftime('%Y%m%d_%H%M%S')}.log"
+try:
+    (_LOG_DIR / f"night_{_REPO_TAG}.current").write_text(str(LOG), encoding="utf-8")
+except OSError:
+    pass
+WLOG = _LOG_DIR / "watchdog.log"
+# 「这一夜还没收工」标记：安装器升级时会杀掉安装目录下的 python（夜班跟着死），
+# 正常停/跑完时删掉它；后端下次启动看到标记且没有夜班在跑，就自动续跑
+# （2026-11-21：用户装一次新版本夜班就没了，反复踩）。
+WANT = _LOG_DIR / f"night_{_REPO_TAG}.want"
+try:
+    WANT.write_text(json.dumps({
+        "repo": REPO,
+        "args": ["-u", "tools/watchdog_night.py", "--now", "--repo", REPO]
+                + (["--requirement-file", REQ_FILE] if REQ_FILE else ["--goal-file", GOAL]),
+        "ts": time.time(),
+        "log": str(LOG),
+    }, ensure_ascii=False), encoding="utf-8")
+except OSError:
+    pass
 SPENT = Path(REPO) / ".sixcoder" / "night_spent.json"
 BP = Path(REPO) / ".sixcoder" / "blueprint.json"
 
@@ -224,7 +282,11 @@ def existing_night_pid() -> int:
 
 
 def watchdog_pid_file() -> Path:
-    return Path(__file__).resolve().parents[2] / "_logs" / "watchdog.pid"
+    try:
+        from core import paths as _paths                  # noqa: E402
+        return _paths.logs_dir() / "watchdog.pid"
+    except Exception:                                    # noqa: BLE001
+        return Path(__file__).resolve().parents[2] / "_logs" / "watchdog.pid"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -306,9 +368,10 @@ def main() -> int:
         # 复用/不创建控制台；stdout 仍重定向到 LOG 文件，日志一条不丢。
         _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # Windows only
         with LOG.open("a", encoding="utf-8") as lf:
+            _goal_args = (["--requirement-file", REQ_FILE] if REQ_FILE
+                          else ["--goal-file", GOAL])
             proc = subprocess.Popen(
-                [PY, "-u", "cli.py", "night", "--repo", REPO,
-                 "--goal-file", GOAL],
+                [PY, "-u", "cli.py", "night", "--repo", REPO] + _goal_args,
                 cwd=PROTOTYPE, stdout=lf, stderr=subprocess.STDOUT,
                 creationflags=_no_window)
             try:
@@ -337,6 +400,10 @@ def main() -> int:
     wlog(f"看门狗结束：重启 {restarts} 次，本次实跑 "
          f"{(time.time() - run_started) / 3600:.2f} 小时，"
          f"最终花费 ¥{spent_cny():.2f}，覆盖 {caps_done()}/76")
+    try:
+        WANT.unlink()          # 正常收工：不再需要"被中断后续跑"的标记
+    except OSError:
+        pass
     return 0
 
 

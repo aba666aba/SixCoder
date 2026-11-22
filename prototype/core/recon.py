@@ -62,6 +62,25 @@ def _walk(repo: Path, limit: int = 4000) -> list[Path]:
 FULL_RUN_LIMIT = 120        # 用例数 <= 此值才在探测阶段跑全量
 
 
+def project_python(repo: Path) -> str:
+    """仓库自带虚拟环境优先，否则用当前引擎解释器。
+
+    真实项目（Django/Flask/ML）的依赖装在项目自己的 .venv 里，不是引擎解释器里；
+    固定用 sys.executable 会让所有这类仓库的 pytest 收集都报 ModuleNotFoundError。
+    只认约定目录，不猜 conda；找到就用它的 python，找不到退回 sys.executable。
+    """
+    root = Path(repo).resolve()
+    cands = (
+        ".venv/Scripts/python.exe", "venv/Scripts/python.exe", "env/Scripts/python.exe",
+        ".venv/bin/python", "venv/bin/python", "env/bin/python",
+    )
+    for rel in cands:
+        p = root / rel
+        if p.is_file():
+            return str(p.resolve())
+    return sys.executable
+
+
 def classify(repo: Path, deep: bool = False) -> dict:
     """输出信号 + 判定状态（docs/10 §1、§2）。"""
     repo = Path(repo)
@@ -115,9 +134,12 @@ def classify(repo: Path, deep: bool = False) -> dict:
     collect_ok = None
     test_count = None
     baseline = "no-tests"
+    pyexe = project_python(repo)
+    signals["python"] = pyexe
+    signals["project_venv"] = pyexe != sys.executable
     if signals["has_tests"]:
-        # 用当前解释器而不是裸 "python"：CI/虚拟环境里 PATH 上的 python 未必是同一个
-        rc, out = _run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+        # 用项目自己的 venv（有的话）：真实依赖装在项目里，不在引擎解释器里
+        rc, out = _run([pyexe, "-m", "pytest", "--collect-only", "-q",
                         "-p", "no:cacheprovider"], repo, 90)
         collect_ok = rc in (0, 5)
         m = re.search(r"(\d+)\s+tests?\s+collected", out)
@@ -126,17 +148,25 @@ def classify(repo: Path, deep: bool = False) -> dict:
         elif rc == 5:
             test_count = 0
         signals["collect_tail"] = "\n".join(out.strip().splitlines()[-3:])
+        if not collect_ok and "No module named pytest" in out:
+            # 安装包/虚拟环境漏装 pytest 时，所有带测试的仓库都会误判成"用例收集失败"。
+            # 单独给一句人话，避免用户对着 "No module named pytest" 猜。
+            if pyexe != sys.executable:
+                signals["collect_reason"] = (
+                    f"项目 .venv 里没装 pytest：{pyexe} -m pip install pytest")
+            else:
+                signals["collect_reason"] = "当前 Python 没装 pytest，无法收集用例（pip install pytest）"
 
         if not collect_ok:
             baseline = "collect-failed"          # 连用例都收集不起来 → 基线不可信
         elif test_count is not None and test_count <= FULL_RUN_LIMIT:
-            rc2, out2 = _run([sys.executable, "-m", "pytest", "-q", "--tb=no",
+            rc2, out2 = _run([pyexe, "-m", "pytest", "-q", "--tb=no",
                               "-p", "no:cacheprovider"], repo, 600)
             tests_green = rc2 in (0, 5)
             baseline = "verified" if tests_green else "failing"
             signals["pytest_tail"] = "\n".join(out2.strip().splitlines()[-3:])
         elif deep:
-            rc2, out2 = _run([sys.executable, "-m", "pytest", "-q", "--tb=no",
+            rc2, out2 = _run([pyexe, "-m", "pytest", "-q", "--tb=no",
                               "-p", "no:cacheprovider"], repo, 1800)
             tests_green = rc2 in (0, 5)
             baseline = "verified" if tests_green else "failing"
@@ -175,13 +205,39 @@ TC_SPEC = [
     ("node",   ["node", "-v"],        r"v([\d.]+)", 20, None),
     ("npm",    ["npm", "-v"],         r"([\d.]+)", 9, None),
     ("python", ["python", "--version"], r"Python ([\d.]+)", 3, None),
-    ("git",    ["git", "--version"],  r"git version ([\d.]+)", 2, None),
+    ("git",    ["git", "--version"],  r"git version (\d+(?:\.\d+)*)", 2, None),
     ("docker", ["docker", "--version"], r"([\d.]+)", 20, None),
+    # 自带运行时（安装器按需下载）之后新增的两项：不探测等于装了也用不上
+    ("go",     ["go", "version"],     r"go version go([\d.]+)", 1, "GOROOT"),
+    # MinGW 首行是 "gcc.exe (x86_64-... project) 15.2.0"：旧正则 gcc[^\d]* 会把
+    # x86_64 里的 "86" 当版本（实测 15.2.0 被读成 86），必须只认带点的版本串。
+    ("gcc",    ["gcc", "--version"],  r"\b(\d+\.\d+(?:\.\d+)?)\b", 8, None),
 ]
 
 COMMON_DIRS = {
     "java": ["C:/Program Files/Eclipse Adoptium/*", "C:/Program Files/Java/*", "D:/Java/*", "D:/jdk*"],
 }
+
+
+def _bundled_dirs(tid: str) -> list[str]:
+    """SixCoder 自带的运行时目录（安装器勾选后下载到 <data>/runtimes/<id>-<ver>）。
+
+    为什么放在"常见目录"这一层而不是塞进 PATH：用户自己装的环境优先，
+    自带运行时是**兜底**；把 bin 目录永久写进 PATH 会污染用户整台机器，卸载也不干净。
+    """
+    try:
+        from . import paths as _paths, runtimes as _rt
+        base = _paths.home() / "runtimes"
+        if not base.is_dir():
+            return []
+        # 探测 ID 与安装器 rid 不总是同名：C/C++ 探测叫 gcc，下载的运行时叫 mingw。
+        # 不做这层映射，用户勾了 MinGW 也认不出来（"装了等于没装"）。
+        rid = {"gcc": "mingw"}.get(tid, tid)
+        # 返回运行时的 home 目录（不是 bin）：下面的查找逻辑会自己补 bin/
+        # Python 的 python.exe 就在根目录，所以查找时两个位置都要试。
+        return [str(p) for p in sorted(base.glob(f"{rid}-*"))]
+    except Exception:                                    # noqa: BLE001
+        return []
 
 
 def _major(v: str) -> int:
@@ -226,11 +282,21 @@ def toolchains(overrides: dict | None = None) -> list[dict]:
                 entry.update(path=which, source="PATH")
         if not entry["path"]:
             import glob
-            for pat in COMMON_DIRS.get(tid, []):
+            # 顺序：系统常见安装位置 → 安装器按需下载的 runtimes（自带运行时算兜底）
+            homes = list(COMMON_DIRS.get(tid, [])) + _bundled_dirs(tid)
+            for pat in homes:
                 for hit in glob.glob(pat):
-                    cand = Path(hit, "bin", cmd[0] + ".exe")
-                    if cand.exists():
-                        entry.update(path=str(cand), source="常见目录")
+                    cands = [Path(hit, "bin", cmd[0] + ".exe"), Path(hit, cmd[0] + ".exe")]
+                    if tid == "git":
+                        # MinGit 便携版把 git.exe 放在 cmd/（真实二进制在 mingw64/bin/）；
+                        # 只找 bin/ 会"装了等于没装"。
+                        cands += [Path(hit, "cmd", "git.exe"), Path(hit, "mingw64", "bin", "git.exe")]
+                    for cand in cands:
+                        if cand.exists():
+                            entry.update(path=str(cand),
+                                         source="自带运行时" if "runtimes" in str(hit) else "常见目录")
+                            break
+                    if entry["path"]:
                         break
                 if entry["path"]:
                     break

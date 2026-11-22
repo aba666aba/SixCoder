@@ -27,11 +27,12 @@ D1–D6 全绿，但交付物用户根本用不了（任务书要求 ECharts 可
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["PageVisit", "available", "visit", "axe_scan", "render_evidence",
+__all__ = ["PageVisit", "available", "visit", "visit_electron", "axe_scan", "render_evidence",
            "CHANNELS", "DEFAULT_TIMEOUT"]
 
 # 通道优先级：系统浏览器优先（不用下载），最后才是 google-chrome-stable 兜底
@@ -216,6 +217,22 @@ def _check_dom(page, exp: dict, timeout: int) -> dict:
             res["ok"] = ok
             res["desc"] = "%s 属性 %s" % (sel, ", ".join(detail))
             return res
+        # 计算样式断言（2026-11-23）：{style: {"--ui-bg": "#fff", "color": "..."}}
+        # 自定义属性用 getPropertyValue 读到的是**声明值原样**（不经 rgb 归一化），
+        # 所以可以直接和用户填的色值做字符串比对；常规属性则是计算值。
+        if "style" in exp and isinstance(exp["style"], dict):
+            ok2 = True
+            detail2 = []
+            for prop, want in exp["style"].items():
+                got = loc.first.evaluate(
+                    "(el, p) => getComputedStyle(el).getPropertyValue(p)", str(prop))
+                got = str(got if got is not None else "").strip()
+                detail2.append("%s=%r" % (prop, got))
+                if got.lower() != str(want).strip().lower():
+                    ok2 = False
+            res["ok"] = ok2
+            res["desc"] = "%s 计算样式 %s" % (sel, ", ".join(detail2))
+            return res
         # 只要求存在
         res["ok"] = True
         res["desc"] = "%s 存在（%d 个）" % (sel, cnt)
@@ -363,6 +380,178 @@ def visit(url: str, *, actions=None, expect_dom=None, expect_url: str = "",
     visit_res.elapsed_ms = int((time.time() - t0) * 1000)
     visit_res.ok = not visit_res.problems()
     return visit_res
+
+
+def visit_electron(exe: str, *, app_dir: str, actions=None, expect_dom=None,
+                   expect_title: str = "", timeout: int = DEFAULT_TIMEOUT,
+                   ready_timeout: float = 45.0, with_a11y: bool = True) -> PageVisit:
+    """真机 Electron UI 验收（2026-11-23，甜区收尾）。
+
+    Playwright 的 Python 版没有 `_electron.launch`，但 Chromium 驱动支持
+    `connect_over_cdp`。做法：以 `--remote-debugging-port=<port>` 启动 electron
+    应用 → 轮询 CDP 端口就绪 → `connect_over_cdp` 连上第一个窗口 → 复用
+    `visit()` 同款 DOM 断言 / 动作 / console+pageerror 收集 → 杀进程树。
+
+    铁律（同 visit，**默认红**）：
+    - electron 二进制不存在 / CDP 端口起不来 / 连不上 → 如实报"测不了"，绝不假装通过；
+    - 没有实质断言（expect_dom / actions / expect_title 全空）→ 由 probe.validate 拒收；
+    - 进程树无论成败都在 finally 里清掉，不留僵尸窗口。
+
+    `exe`：electron 可执行文件绝对路径（由调用方从仓库 node_modules 或系统找）。
+    `app_dir`：electron 应用的入口目录（含 package.json 的 main）。
+    """
+    import socket
+    import subprocess as _sp
+    import tempfile
+
+    t0 = time.time()
+    res = PageVisit(url=f"electron://{exe}")
+    exe = str(exe or "")
+    if not exe or not Path(exe).is_file():
+        res.error = "electron 可执行文件不存在（如实说测不了）：%s" % (exe or "(空)")
+        return res
+    # 找一个空闲端口（bind 0 让 OS 分配，随即释放给 electron 用）
+    try:
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+    except OSError as exc:                               # noqa: BLE001
+        res.error = "分配调试端口失败：%s" % exc
+        return res
+
+    logf = None
+    log_path = ""
+    proc = None
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:                             # noqa: BLE001
+        res.error = "playwright 未安装：%s" % exc
+        return res
+
+    try:
+        _fd, log_path = tempfile.mkstemp(prefix="electron_", suffix=".log")
+        os.close(_fd)
+        logf = open(log_path, "w", encoding="utf-8", errors="replace")
+        cmd = [exe, f"--remote-debugging-port={port}", "--no-sandbox", str(app_dir or ".")]
+        try:
+            proc = _sp.Popen(cmd, cwd=str(app_dir or "."), stdout=logf,
+                             stderr=_sp.STDOUT)
+        except Exception as exc:                          # noqa: BLE001
+            res.error = "启动 electron 失败：%s: %s" % (type(exc).__name__, exc)
+            return res
+
+        # 轮询 CDP 端口就绪（electron 起窗口要几秒）
+        deadline = time.time() + max(1.0, ready_timeout)
+        ready = False
+        while time.time() < deadline:
+            try:
+                ck = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                ck.close()
+                ready = True
+                break
+            except OSError:
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.3)
+        if not ready:
+            tail = ""
+            try:
+                tail = Path(log_path).read_text(encoding="utf-8", errors="replace")[-400:]
+            except OSError:
+                pass
+            res.error = "electron %.0fs 内没起来 CDP 端口 %d：%s" % (ready_timeout, port, tail)
+            return res
+
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            page = None
+            # 找第一个可用窗口（electron 首个 BrowserWindow）
+            for cand in ctx.pages:
+                if not cand.url.startswith("devtools://"):
+                    page = cand
+                    break
+            if page is None and ctx.pages:
+                page = ctx.pages[0]
+            if page is None:
+                res.error = "electron 已连上但没有可验收的窗口（BrowserWindow 未创建？）"
+                browser.close()
+                return res
+
+            def _on_console(msg):
+                try:
+                    if msg.type == "error" and "Failed to load resource" not in str(msg.text or ""):
+                        res.console_errors.append(str(msg.text)[:300])
+                except Exception:                        # noqa: BLE001
+                    pass
+
+            def _on_pageerror(err):
+                try:
+                    res.page_errors.append(str(err)[:300])
+                except Exception:                        # noqa: BLE001
+                    pass
+
+            page.on("console", _on_console)
+            page.on("pageerror", _on_pageerror)
+
+            for act in (actions or []):
+                try:
+                    _run_action(page, act, timeout)
+                except Exception as exc:                 # noqa: BLE001
+                    res.dom.append({"desc": "动作 %s 失败：%s" % (act.get("do"),
+                                                               type(exc).__name__), "ok": False})
+                    break
+            try:
+                page.wait_for_timeout(600)
+            except Exception:                            # noqa: BLE001
+                pass
+            res.final_url = page.url
+            for exp in (expect_dom or []):
+                res.dom.append(_check_dom(page, exp, timeout))
+            if expect_title:
+                try:
+                    actual = page.title()
+                except Exception:                        # noqa: BLE001
+                    actual = ""
+                res.dom.append({"desc": "窗口标题 %r（期望含 %r）" % (actual, expect_title),
+                                "ok": expect_title in actual})
+            if with_a11y:
+                res.a11y_violations = axe_scan(page)
+                res.a11y_tree = _aria_compact(page)
+            browser.close()
+    except Exception as exc:                             # noqa: BLE001
+        res.error = "%s: %s" % (type(exc).__name__, str(exc)[:300])
+        res.elapsed_ms = int((time.time() - t0) * 1000)
+        return res
+    finally:
+        # 无论成败都清进程树 + 日志文件，不留僵尸窗口
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:                            # noqa: BLE001
+                pass
+            try:
+                proc.wait(timeout=3)
+            except Exception:                            # noqa: BLE001
+                try:
+                    proc.kill()
+                except Exception:                        # noqa: BLE001
+                    pass
+        if logf is not None:
+            try:
+                logf.close()
+            except Exception:                            # noqa: BLE001
+                pass
+        if log_path:
+            try:
+                os.unlink(log_path)
+            except OSError:
+                pass
+
+    res.elapsed_ms = int((time.time() - t0) * 1000)
+    res.ok = not res.problems()
+    return res
 
 
 def render_evidence(v: PageVisit, limit: int = 6) -> str:

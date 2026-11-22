@@ -14,7 +14,8 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, r"E:\AAATOM\NewLai\SixCoder\prototype")
+ROOT = Path(__file__).resolve().parents[1]   # checks/ 的上一级 = prototype/（换盘符不失效）
+sys.path.insert(0, str(ROOT))
 
 from core import remotetools, toolschema  # noqa: E402
 
@@ -70,8 +71,7 @@ def main() -> int:
     check("每个工具的 description 都说明了做什么", not no_desc, str(no_desc))
 
     print("[3] 分发器与实现一致（schema 里有 → 分发器里也得有）")
-    src = Path(r"E:\AAATOM\NewLai\SixCoder\prototype\core\remotetools.py").read_text(
-        encoding="utf-8")
+    src = (ROOT / "core" / "remotetools.py").read_text(encoding="utf-8")
     missing = [n for n in names if f'name == "{n}"' not in src]
     check("所有工具都在分发器里有分支", not missing, str(missing))
     # 三种实现形态都算合法：

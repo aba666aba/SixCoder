@@ -112,6 +112,15 @@ class Sandbox:
         return base
 
     # -------------------------------------------------------------- 备份 / 撤销
+    # 备份保留策略（2026-11-20 用户口径，两轮定稿）：
+    #   第一次问"会不会爆炸"→ 实测同一文件存 30 次 = 29 个完整副本，且**原来没有清理**；
+    #   第二次定策略 → **只留 3 份**（能撤销三次），第 4 次起循环覆盖最老的那份。
+    # 为什么不留更多：撤销只需要"我刚才那几步"，再老的历史该由 git 负责；
+    # 而每个副本都是**整文件拷贝**，80KB 的文件每天存 50 次就是 4MB/天、约 1GB/年。
+    KEEP_PER_FILE = 3
+    MAX_TOTAL_FILES = 200        # 多文件仓库的兜底上限（每文件 3 份 × 几十个文件）
+    MAX_TOTAL_MB = 100           # 总量兜底
+
     def backup(self, path: Path, action: str = "write") -> str | None:
         if not path.exists():
             return None
@@ -123,7 +132,70 @@ class Sandbox:
                              backup=f"{token}__{path.name}", action=action)
         with self.journal_file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry.__dict__, ensure_ascii=False) + "\n")
+        self.prune_journal()
         return token
+
+    def prune_journal(self) -> dict:
+        """按保留策略清理旧备份（每个文件留最近 KEEP_PER_FILE 份，循环覆盖最老的）。
+
+        返回 {removed, kept, freed_bytes}（自检与界面用）。
+        只删备份文件与对应 journal 条目，**不动工作区里的源码**。
+        undo 只回放最近几步（用户口径：能撤销三次），所以砍掉更老的副本不影响撤销。
+        """
+        entries = self.journal()
+        if len(entries) <= self.KEEP_PER_FILE:
+            return {"removed": 0, "kept": len(entries), "freed_bytes": 0}
+
+        # 1) 每个文件只留最近 KEEP_PER_FILE 份（token 前缀是时分秒，字符串序 = 时间序）
+        by_rel: dict[str, list[dict]] = {}
+        for e in entries:
+            by_rel.setdefault(str(e.get("rel") or ""), []).append(e)
+        survivors: list[dict] = []
+        for es in by_rel.values():
+            es.sort(key=lambda x: str(x.get("token") or ""))
+            survivors.extend(es[-self.KEEP_PER_FILE:])
+
+        # 2) 全局数量 / 体积上限：从最新往回数，超额的老副本淘汰
+        survivors.sort(key=lambda x: str(x.get("token") or ""))
+        limit_bytes = self.MAX_TOTAL_MB * 1024 * 1024
+        kept: list[dict] = []
+        total = 0
+        for e in reversed(survivors):
+            f = self.journal_dir / str(e.get("backup") or "")
+            try:
+                sz = f.stat().st_size
+            except OSError:
+                continue                                  # 文件已不在，条目顺手丢掉
+            if len(kept) >= self.MAX_TOTAL_FILES or total + sz > limit_bytes:
+                break
+            kept.append(e)
+            total += sz
+        keep_names = {str(e.get("backup") or "") for e in kept}
+
+        # 3) 删多余副本（先删文件，再重写 journal，保证条目不会指向不存在的文件）
+        removed = 0
+        freed = 0
+        try:
+            for f in self.journal_dir.iterdir():
+                if f.is_file() and f.name not in keep_names:
+                    try:
+                        freed += f.stat().st_size
+                        f.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        try:
+            kept.sort(key=lambda x: str(x.get("token") or ""))
+            tmp = self.journal_file.with_suffix(".jsonl.tmp")
+            with tmp.open("w", encoding="utf-8") as fh:
+                for e in kept:
+                    fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+            tmp.replace(self.journal_file)
+        except OSError:
+            pass
+        return {"removed": removed, "kept": len(kept), "freed_bytes": freed}
 
     def journal(self) -> list[dict]:
         if not self.journal_file.exists():
@@ -138,16 +210,44 @@ class Sandbox:
         return out
 
     def undo(self, steps: int = 1) -> list[str]:
-        """按时间倒序恢复文件（沙箱级撤销，独立于 git）。"""
-        entries = self.journal()[-steps:][::-1]
-        done = []
-        for e in entries:
-            src = self.journal_dir / e["backup"]
-            dst = self.ws / e["rel"]
-            if src.exists():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-                done.append(e["rel"])
+        """按时间倒序恢复文件（沙箱级撤销，独立于 git）。
+
+        **撤一次就消耗一份备份**（2026-11-20 用户口径："只能撤销三次，循环覆盖原有备份"）：
+        原来只回放不消费，连按 4 次 Ctrl+Z 都会回到同一个版本，第 2 次起等于没撤；
+        现在恢复后把用掉的那份备份连同 journal 条目一起删掉，连撤三次就依次回到
+        三个历史点，第 4 次如实返回空（而不是假装又撤了一步）。
+        """
+        entries = self.journal()
+        if not entries:
+            return []
+        take = entries[-max(1, steps):][::-1]
+        done: list[str] = []
+        used: set[str] = set()
+        for e in take:
+            name = str(e.get("backup") or "")
+            src = self.journal_dir / name
+            dst = self.ws / str(e.get("rel") or "")
+            if not name or not src.exists():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            done.append(str(e.get("rel") or ""))
+            used.add(name)
+        if used:
+            for name in used:
+                try:
+                    (self.journal_dir / name).unlink()
+                except OSError:
+                    pass
+            keep = [e for e in entries if str(e.get("backup") or "") not in used]
+            try:
+                tmp = self.journal_file.with_suffix(".jsonl.tmp")
+                with tmp.open("w", encoding="utf-8") as fh:
+                    for e in keep:
+                        fh.write(json.dumps(e, ensure_ascii=False) + "\n")
+                tmp.replace(self.journal_file)
+            except OSError:
+                pass
         return done
 
     # -------------------------------------------------------------- 审计

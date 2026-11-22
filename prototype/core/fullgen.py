@@ -56,6 +56,19 @@ def _layer_targets(ws, bp, name: str, fixed) -> list[str]:
     except Exception:                                    # noqa: BLE001
         _ad = None
     is_django = getattr(_ad, "name", "") == "django"
+    # **组件类栈**（前端 SPA / Electron …）判定不写死栈名：看适配器的落点模板
+    # 是不是组件后缀。这样以后再加 Vue/Native 生态包不用再改这里（2026-11-19）。
+    is_frontend = str(getattr(_ad, "module_file_fmt", "") or "").endswith(
+        (".jsx", ".tsx", ".vue"))
+
+    # **前端 SPA / Electron**（2026-11-19 生态包）：落点按蓝图 modules 里声明的
+    # .jsx/.tsx/.vue 文件写，不碰 Python 分层（app/models.py 那套对前端不存在）。
+    if is_frontend:
+        mods = sorted({m for c in ((bp.caps if bp is not None else []))
+                       if getattr(c, "status", "") != "descoped"
+                       for m in (getattr(c, "modules", None) or [])})
+        return [m for m in mods
+                if m.endswith((".jsx", ".tsx", ".vue", ".js", ".ts"))]
 
     if is_django:
         # 数据层已建好（19 张表）；重生成会把已有模型和迁移冲掉
@@ -94,7 +107,12 @@ def _ensure_module_files(ws, rels: list[str]) -> list[str]:
             continue
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text('"""%s"""\n' % rel, encoding="utf-8")
+            # 注释符按语言选：前端（jsx/tsx/vue/js/ts）用 `//`，Python 用 """。
+            # 用错会让骨架文件成语法错误 → 后续检测全红（假红）。
+            if rel.endswith((".jsx", ".tsx", ".js", ".ts", ".vue")):
+                p.write_text("// %s\n" % rel, encoding="utf-8")
+            else:
+                p.write_text('"""%s"""\n' % rel, encoding="utf-8")
             made.append(rel)
         except OSError:
             continue

@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-PROBE_KINDS = ("cli", "py_call", "pytest", "http")
+PROBE_KINDS = ("cli", "py_call", "pytest", "http", "browser", "sql", "electron")
 PROBE_TIMEOUT = 60
 _SCRATCH_SEQ = 0
 
@@ -173,6 +173,18 @@ def fill(v):
     if isinstance(v, str):
         for k, val in VAR.items():
             v = v.replace("${%s}" % k, str(val))
+        # 2026-11-19：蓝图里部分 register/login 的 json 被写成 JSON **字符串**
+        # `"{\"username\":...}"`，fill 只替换不解析 → 原样发给 Django →
+        # 422「用户名不能为空」→ 后续 403/404 连锁假 bug。这里运行时兜底：
+        # 先把字符串解析成对象再递归 fill（占位符也能正确替换）。纯文本/表单串
+        # 解析失败就保持原样，不当 JSON 对象处理。
+        if v.lstrip().startswith("{"):
+            try:
+                parsed = json.loads(v)
+            except Exception:                                # noqa: BLE001
+                parsed = None
+            if isinstance(parsed, dict):
+                return fill(parsed)
         return v
     if isinstance(v, list):
         return [fill(x) for x in v]
@@ -292,7 +304,21 @@ for i, st in enumerate(steps, 1):
     body = resp.text or ""
     trace.append({"step": i, "method": method, "path": path,
                   "status": resp.status_code, "body": preview(body)})
-    for name, src in (st.get("save") or {}).items():
+    _save_spec = st.get("save")
+    if isinstance(_save_spec, str):
+        # **save 也可能被写成字符串**（2026-11-19 实测）：`"{\"token\": \"token\"}"`。
+        # 旧代码直接 `st.get("save").items()` → AttributeError → 该步整体抛异常
+        # → token 从未写进 VAR → 后续步骤发 `Bearer ${token}` 字面量 → 403。
+        # （cap.inv.topic.guard_pending_1751 就是这么红的。）
+        try:
+            _parsed_save = json.loads(_save_spec)
+        except Exception:                                # noqa: BLE001
+            _parsed_save = None
+        _save_spec = _parsed_save
+    if not isinstance(_save_spec, dict):
+        _save_spec = {}
+    _fb = {"n": 0}          # 本步 save 兜底序号（每步重置：多 save 才递增 1/2/3）
+    for name, src in _save_spec.items():
         # src 可以是字符串或**候选列表**：产物返回的 id 字段名不统一（id / ticket_id / pk），
         # 只认一个名字会拿到 None，后面路径就变成 /tickets/None（实测 2026-11-07）。
         cands = src if isinstance(src, list) else [src]
@@ -307,7 +333,20 @@ for i, st in enumerate(steps, 1):
             if val is not None:
                 break
         if val is None and payload is not None:
-            val = 1                       # 自建种子数据的自增 id 通常就是 1，给个确定值比 None 强
+            # 兜底：自建种子数据的自增 id 通常从 1 起。
+            # **但同一步有多个 save 时必须给不同值**（2026-11-19 实测事故）：
+            # cap.llm.generate_validate_review 第 3 步 save c1/c2/c3 指向
+            # first/second/third_candidate_id —— 产物响应里根本没有这三个键，
+            # 旧逻辑把三个变量**全兜底成 1** → 三次评审打在**同一个候选**上
+            # （采纳→改写→驳回），stats 恒 adopted=0/rewritten=0，判据永远红。
+            # 远端为此对着本来正确的产物改了 5 轮 —— 典型的"判据夹具 bug 制造假 bug"。
+            _fb["n"] = _fb["n"] + 1
+            val = _fb["n"] if len(_save_spec) > 1 else 1
+            # **不许静默**：把兜底记进 trace，失败证据里能看出"这个变量是猜的"
+            try:
+                trace[-1].setdefault("save_fallback", []).append(str(name))
+            except Exception:
+                pass
         VAR[str(name)] = val
     want = st.get("expect_status")
     _route_miss = False
@@ -714,6 +753,40 @@ def validate(probe: dict) -> list[str]:
                     or probe.get("expect_status") is not None):
                 out.append("http 探针只有状态码 2xx 一个判据太弱："
                            "必须给 expect_json / body_has / dom_has / openapi_has / expect_status 之一")
+    elif kind == "sql":
+        # 数据层：直连 sqlite 查库（2026-11-19 中间件生态包）。
+        if not str(probe.get("db") or "").strip():
+            out.append("sql 探针缺 db（产物仓里的 sqlite 文件路径，如 app.db）")
+        steps = probe.get("steps")
+        if not isinstance(steps, list) or not steps:
+            out.append("sql 探针缺 steps（至少一条 SELECT 断言）")
+        else:
+            judged = [s for s in steps if isinstance(s, dict)
+                      and ("expect_rows" in s or "expect_first" in s
+                           or "expect_contains" in s)]
+            if not judged:
+                out.append("sql 探针没有判据：必须给 expect_rows / expect_first / "
+                           "expect_contains 之一（只执行不比对等于没判）")
+    elif kind == "browser":
+        # 前端 SPA：真起服务、真用浏览器访问、真断 DOM（2026-11-19 生态包配套）。
+        if not str(probe.get("start_cmd") or "").strip():
+            out.append("browser 探针缺 start_cmd（怎么起前端服务，如 npm run dev）")
+        if not (probe.get("url") or probe.get("port")):
+            out.append("browser 探针要有 url 或 port（访问哪个地址）")
+        # **必须有实质断言**：只判"能打开"= 空壳 page 也能过（同 cli 只看退出码的病）。
+        if not (probe.get("expect_dom") or probe.get("expect_dom_has")
+                or probe.get("expect_url") or probe.get("actions")):
+            out.append("browser 探针只有『能访问』太弱：必须给 "
+                       "expect_dom / expect_url / actions 之一（空页面也能『能访问』）")
+    elif kind == "electron":
+        # 真机 Electron UI：CDP 连真窗口、真断 DOM（2026-11-23 生态包补完）。
+        if not str(probe.get("exe") or "").strip():
+            out.append("electron 探针缺 exe（electron 可执行文件，如 node_modules/electron/dist/electron.exe）")
+        # **必须有实质断言**：只判"窗口开了"= 空壳应用也能过（同 browser 的病）。
+        if not (probe.get("expect_dom") or probe.get("expect_dom_has")
+                or probe.get("expect_title") or probe.get("actions")):
+            out.append("electron 探针只有『能启动』太弱：必须给 "
+                       "expect_dom / expect_title / actions 之一（空窗口也能『能启动』）")
     else:
         if not str(probe.get("module") or "").strip():
             out.append("py_call 探针缺 module")
@@ -796,6 +869,16 @@ def describe(probe: dict) -> str:
             tail += "｜OpenAPI 暴露 " + (oa if isinstance(oa, str)
                                           else "/".join(map(str, list(oa)[:3])))
         return f"{m} {p}{tail}"
+    if kind == "electron":
+        asserts = []
+        if probe.get("expect_title"):
+            asserts.append("标题含 %r" % probe["expect_title"])
+        dom = probe.get("expect_dom") or probe.get("expect_dom_has") or []
+        if dom:
+            asserts.append("DOM %d 条" % (len(dom) if isinstance(dom, list) else 1))
+        if probe.get("actions"):
+            asserts.append("动作 %d 步" % len(probe["actions"]))
+        return f"electron CDP 真窗口 → {'、'.join(asserts) or '(缺断言)'}"
     return f"（未支持的探针种类：{kind or '空'}）"
 
 
@@ -1239,6 +1322,70 @@ def gc_engine_tmp(root: Path | None = None, max_age_hours: float = 48.0,
     return out
 
 
+def sweep_on_finish(ws: Path, scratch_age_hours: float = 1.0,
+                    engine_age_hours: float = 6.0,
+                    max_dirs: int = 5000) -> dict:
+    """夜班**收工**清理：任务结束时不该留一地临时目录（2026-11-19 用户口径）。
+
+    与 `gc_scratch` 的分工（两者不能混用同一个强度）：
+      · `gc_scratch`：**开跑**时小批量回收（默认只 50 个）—— 夜班正在等，
+        绝不能让它卡在删除上；
+      · 本函数：**收工**时一次扫干净 —— 此时没有轮循环在跑，多花十几秒
+        换"交付时目录是干净的"值得。
+
+    安全边界与 gc_scratch 完全一致（这些是**不能动**的硬约束）：
+      · 只删引擎自己的命名空间（`probe-*` / `run-*` / `work*`）；
+      · 只删**超龄**的（默认 1 小时前；正在跑的进程会持续写文件刷新 mtime）；
+      · rename 归集后按**条目预算** rmtree（绕过宿主的"单轮删除 ≥50 条要确认"）。
+
+    额外清掉两类无争议垃圾：`__pycache__` / `*.pyc`、上一轮没删成的 `.gc-*` 批次。
+    `*.broken_*` / `_*_run.py` / `.coverage` **在这里不删**——它们由
+    `core/scratch_store.archive_scratch` 先**搬到引擎本地归档**（留作备用），
+    搬完这里就只剩空壳可清了。顺序必须"先归档、后清理"。
+
+    返回 {"scratch": {...}, "engine_tmp": {...}, "removed": 总数, "freed_bytes": 总额}
+    供交付报告如实写明"收尾清了多少"。
+    """
+    import time as _time
+    out: dict = {"scratch": {}, "engine_tmp": {}, "removed": 0, "freed_bytes": 0,
+                 "errors": []}
+    tmp = Path(ws) / ".sixcoder" / "tmp"
+
+    # ① 先清上一轮没删掉的批次残留与字节码（这两类没有"超龄"顾虑）
+    if tmp.is_dir():
+        for child in list(tmp.iterdir()):
+            nm = child.name
+            if not (nm.startswith(".gc-") or nm == "__pycache__"
+                    or nm.endswith(".pyc")):
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+            except BaseException as exc:                # noqa: BLE001
+                out["errors"].append("%s: %s" % (nm, type(exc).__name__))
+        # ② 探针沙箱：白名单 + 超龄，一次性扫（上限放宽到 max_dirs）
+        try:
+            out["scratch"] = gc_scratch(ws, max_age_hours=scratch_age_hours,
+                                        max_dirs=max_dirs)
+        except BaseException as exc:                    # noqa: BLE001
+            out["errors"].append("gc_scratch: %s" % type(exc).__name__)
+
+    # ③ 引擎自己的 .tmp（自检/http 流测试残留）同样收一遍
+    try:
+        out["engine_tmp"] = gc_engine_tmp(max_age_hours=engine_age_hours,
+                                          max_entries=20000)
+    except BaseException as exc:                        # noqa: BLE001
+        out["errors"].append("gc_engine_tmp: %s" % type(exc).__name__)
+
+    out["removed"] = int((out["scratch"] or {}).get("removed") or 0) \
+        + int((out["engine_tmp"] or {}).get("removed") or 0)
+    out["freed_bytes"] = int((out["scratch"] or {}).get("freed_bytes") or 0) \
+        + int((out["engine_tmp"] or {}).get("freed_bytes") or 0)
+    return out
+
+
 def _count_entries(p: Path) -> int:
     """这个目录树大概有多少条（文件 + 子目录），用来把每批的删除条目数压在阈值下。
 
@@ -1305,6 +1452,15 @@ def _env(ws: Path) -> dict:
     path = str(ws)
     old = env.get("PYTHONPATH") or ""
     env["PYTHONPATH"] = path + (os.pathsep + old if old else "")
+    # 协商 3/3 装上、且复验通过的隔离包目录也加进 PYTHONPATH —— 让产物真能
+    # import 到它们（否则装完只是摆着，等于没装）。失败不影响探针（best-effort）。
+    try:
+        from . import envinstall as _ei
+        for _d in _ei.installed_paths():
+            if _d and _d not in env.get("PYTHONPATH", ""):
+                env["PYTHONPATH"] = _d + os.pathsep + env.get("PYTHONPATH", "")
+    except Exception:                                    # noqa: BLE001
+        pass
     return env
 
 
@@ -1640,6 +1796,341 @@ def _dedupe_http_probe(probe: dict) -> dict:
     return out
 
 
+def _expects_2xx(st) -> bool:
+    if not isinstance(st, dict):
+        return False
+    es = st.get("expect_status")
+    if isinstance(es, list):
+        return any(str(x).strip().isdigit() and 200 <= int(str(x).strip()) < 300 for x in es)
+    s = str(es if es is not None else "").strip()
+    return s.isdigit() and 200 <= int(s) < 300
+
+
+def _has_auth(st) -> bool:
+    h = (st or {}).get("headers")
+    return isinstance(h, dict) and any(str(k).lower() == "authorization" for k in h)
+
+
+def _is_login_step(st) -> bool:
+    p = str((st or {}).get("path") or "").lower().rstrip("/")
+    return p.endswith("/login")
+
+
+def _is_auth_step(st) -> bool:
+    """注册/登录这类"建立身份"的步骤本身不需要（也不该有）Authorization。"""
+    p = str((st or {}).get("path") or "").lower()
+    return "/auth/" in p or p.rstrip("/").endswith("/login") \
+        or p.rstrip("/").endswith("/register")
+
+
+def _repair_auth_order(probe: dict) -> dict:
+    """把**唯一一条 login** 提到"期望 2xx、却没有鉴权头、且排在它前面"的步骤之前，
+    并给那些步骤补上 `Authorization: Bearer ${token}`。
+
+    为什么必须修（2026-11-19 实测）：`cap.inv.topic.guard_pending_1751` 的探针顺序是
+        register → POST /topics/（期望 201、**没有 Authorization**）→ login → approve
+    建题排在登录之前，产物只能回 403「权限不足」，第 4 步再连带 404。这种探针
+    **结构上不可能通过**——不是产物的问题，是判据自己把顺序写错了。远端为此反复
+    去改**本来正确**的权限逻辑（改了多轮）。
+
+    安全性：只影响"排在唯一 login 之前、期望 2xx、且无鉴权头"的步骤。**能通过的能力
+    不可能存在这种步骤**（它必然 401/403），所以对已绿能力零影响；多条 login 时角色
+    不确定，宁可不动。
+    """
+    steps = (probe or {}).get("steps")
+    if not isinstance(steps, list) or len(steps) < 2:
+        return probe
+    logins = [i for i, s in enumerate(steps) if _is_login_step(s)]
+    if len(logins) != 1:
+        return probe
+    li = logins[0]
+    # 只认"业务步骤"：注册/登录本身不该带 token（否则会把 login 提到 register 前面）
+    need = [i for i in range(li)
+            if _expects_2xx(steps[i]) and not _has_auth(steps[i])
+            and not _is_auth_step(steps[i])]
+    if not need:
+        return probe
+    save = steps[li].get("save")
+    if isinstance(save, str):
+        # save 也可能被写成字符串（同一类病，见 _HTTP_RUNNER 里的 save 归一）
+        try:
+            import json as _json
+            save = _json.loads(save)
+        except Exception:                            # noqa: BLE001
+            save = None
+    if not isinstance(save, dict) or not save:
+        return probe                      # 拿不到 token 变量名，注入也没意义
+    var = str(next(iter(save.keys())))
+    m = min(need)
+    new_steps = [dict(s) for s in steps]
+    login = new_steps.pop(li)
+    new_steps.insert(m, login)
+    # 被落下的那些步骤：补鉴权头（按 method+path 回填，pop/insert 后索引会漂）
+    for i in need:
+        tgt = steps[i]
+        for s2 in new_steps:
+            if (s2.get("method") == tgt.get("method")
+                    and s2.get("path") == tgt.get("path")
+                    and not _has_auth(s2)):
+                hdr = dict(s2.get("headers") or {})
+                hdr["Authorization"] = "Bearer ${%s}" % var
+                s2["headers"] = hdr
+                break
+    out = dict(probe)
+    out["steps"] = new_steps
+    return out
+
+
+# sql 探针：只禁**破坏性/逃逸**语句，允许 SELECT 与 INSERT/UPDATE/DELETE（用于造数据）。
+# 作用对象是产物仓里的 sqlite 文件（隔离），不是系统库。
+_BANNED_SQL = ("drop ", "drop table", "attach ", "detach ", "vacuum into",
+               "load_extension", "pragma writable_schema", "pragma journal_mode")
+
+
+def _run_sql(ws, probe: dict, timeout: int = 30, out_cap: int = 240) -> dict:
+    """SQL 探针：直连产物仓的 sqlite 文件，逐条执行并比对结果。
+
+    为什么需要（2026-11-19 中间件生态包）：http 探针只能验"接口返回什么"，
+    验不了"数据真落库了没有"（接口可以返回假数据）。sql 探针直接查库，是最硬的
+    数据层判据。用 Python 内置 sqlite3，**零依赖**（不需要 Docker/Postgres）。
+    """
+    import sqlite3
+    db = str(probe.get("db") or "").strip()
+    steps = probe.get("steps")
+    if not db:
+        return {"ok": False, "invalid": True, "detail": "sql 探针缺 db（sqlite 文件路径）"}
+    if not isinstance(steps, list) or not steps:
+        return {"ok": False, "invalid": True, "detail": "sql 探针缺 steps"}
+    path = Path(ws) / db
+    if not path.is_file():
+        return {"ok": False, "kind": "sql",
+                "detail": "数据库文件不存在：%s（产物没建库/没迁移？）" % db}
+    bits, trace = [], []
+    try:
+        conn = sqlite3.connect(str(path), timeout=max(1, min(timeout, 30)))
+        conn.row_factory = sqlite3.Row
+    except Exception as exc:                             # noqa: BLE001
+        return {"ok": False, "kind": "sql",
+                "detail": "打不开数据库 %s：%s: %s" % (db, type(exc).__name__, exc)}
+    try:
+        for i, st in enumerate(steps, 1):
+            if not isinstance(st, dict):
+                continue
+            sql = str(st.get("sql") or "").strip()
+            if not sql:
+                bits.append("第%d步 缺 sql" % i)
+                continue
+            low = sql.lower()
+            if any(b in low for b in _BANNED_SQL):
+                bits.append("第%d步 SQL 含禁用语句（drop/attach/load_extension 等）：%s"
+                            % (i, sql[:80]))
+                continue
+            try:
+                cur = conn.execute(sql)
+                rows = [dict(r) for r in cur.fetchall()]
+            except Exception as exc:                     # noqa: BLE001
+                bits.append("第%d步 SQL 执行失败：%s: %s（SQL=%s）"
+                            % (i, type(exc).__name__, exc, sql[:100]))
+                continue
+            trace.append({"step": i, "sql": sql[:200],
+                          "rows": rows[:10], "count": len(rows)})
+            if "expect_rows" in st and len(rows) != int(st["expect_rows"]):
+                bits.append("第%d步 期望 %s 行，实际 %d 行（SQL=%s）"
+                            % (i, st["expect_rows"], len(rows), sql[:80]))
+            if "expect_first" in st and isinstance(st["expect_first"], dict):
+                first = rows[0] if rows else {}
+                for k, v in st["expect_first"].items():
+                    got = first.get(k)
+                    if str(got) != str(v):
+                        bits.append("第%d步 首行 %s 实际 %r，期望 %r"
+                                    % (i, k, got, v))
+            if "expect_contains" in st and isinstance(st["expect_contains"], dict):
+                for k, v in st["expect_contains"].items():
+                    if not any(str(r.get(k)) == str(v) for r in rows):
+                        bits.append("第%d步 结果里没有 %s=%r" % (i, k, v))
+    finally:
+        try:
+            conn.close()
+        except Exception:                                # noqa: BLE001
+            pass
+    if bits:
+        return {"ok": False, "kind": "sql", "detail": "；".join(bits),
+                "evidence": {"db": db, "steps": trace}}
+    return {"ok": True, "kind": "sql",
+            "detail": "SQL 验收通过（%d 条语句）" % len(trace),
+            "evidence": {"db": db, "steps": trace}}
+
+
+def _wait_port(host: str, port: int, timeout: float = 60.0) -> tuple[bool, float]:
+    """等端口可连（前端 dev server 就绪）。返回 (就绪, 已等待秒数)。"""
+    import socket
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            with socket.create_connection((host, port), timeout=1.0):
+                return True, time.time() - t0
+        except OSError:
+            time.sleep(0.3)
+    return False, time.time() - t0
+
+
+def _read_log(path: str, cap: int = 1200) -> str:
+    """读 dev server 日志尾巴（失败诊断用）。读不到就空串，不抛。"""
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            data = f.read(cap)
+        return data
+    except OSError:
+        return ""
+
+
+def _kill_tree(proc) -> None:
+    """杀前端服务整棵进程树（Windows 上 shell=True 起的是 cmd → node 子进程）。"""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=15)
+        else:
+            proc.terminate()
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+def _run_browser(ws, probe: dict, timeout: int, out_cap: int = 240) -> dict:
+    """前端 SPA 探针：起服务 → 等就绪 → Playwright 访问 + DOM 断言 → 杀服务。
+
+    铁律：默认红。浏览器不可用 / 服务起不来 / 断言不通过 一律算没通过，
+    且**如实说"测不了"**（不假装通过）。
+    """
+    from . import browser as _br
+    okb, whyb = _br.available()
+    if not okb:
+        return {"ok": False, "kind": "browser",
+                "detail": "浏览器不可用（如实说测不了）：%s" % whyb}
+    start_cmd = str(probe.get("start_cmd") or "").strip()
+    port = int(probe.get("port") or 5173)
+    url = str(probe.get("url") or "http://127.0.0.1:%d/" % port)
+    expect_dom = probe.get("expect_dom") or probe.get("expect_dom_has") or []
+    if isinstance(expect_dom, str):
+        expect_dom = [expect_dom]
+    actions = probe.get("actions") or []
+    expect_url = str(probe.get("expect_url") or "")
+    wait_s = float(probe.get("ready_timeout") or 60)
+    # **输出重定向到文件，不用管道**（2026-11-19 check_probe_timeout 抓到的真问题）：
+    # dev server 输出超过管道缓冲会死锁（同 _http_exec 的教训）。写文件没有这个问题。
+    import tempfile
+    logf = None
+    log_path = ""
+    try:
+        _fd, log_path = tempfile.mkstemp(prefix="browser_", suffix=".log")
+        os.close(_fd)
+        logf = open(log_path, "w", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(start_cmd, shell=True, cwd=str(ws),
+                                stdout=logf, stderr=subprocess.STDOUT)
+    except Exception as exc:                             # noqa: BLE001
+        if logf is not None:
+            try:
+                logf.close()
+            except Exception:                            # noqa: BLE001
+                pass
+        return {"ok": False, "kind": "browser",
+                "detail": "起前端服务失败：%s: %s" % (type(exc).__name__, exc)}
+    try:
+        ready, waited = _wait_port("127.0.0.1", port, timeout=min(wait_s, timeout))
+        if not ready:
+            return {"ok": False, "kind": "browser",
+                    "detail": "服务 %.0fs 内没在端口 %d 就绪：%s"
+                              % (waited, port, _tail(_read_log(log_path), 400))}
+        pv = _br.visit(url, actions=actions, expect_dom=expect_dom,
+                       expect_url=expect_url,
+                       timeout=min(int(timeout), 40) * 1000)
+    finally:
+        _kill_tree(proc)
+        if logf is not None:
+            try:
+                logf.close()
+            except Exception:                            # noqa: BLE001
+                pass
+        if log_path:
+            try:
+                os.unlink(log_path)
+            except OSError:
+                pass
+    ev = {"url": pv.url, "final_url": pv.final_url, "status": pv.status,
+          "dom": pv.dom[:20], "console_errors": pv.console_errors[:10],
+          "a11y_violations": (pv.a11y_violations or [])[:10]}
+    if pv.ok:
+        return {"ok": True, "kind": "browser",
+                "detail": "浏览器验收通过（DOM 断言 %d 条，%dms）"
+                          % (len(expect_dom), pv.elapsed_ms), "evidence": ev}
+    bits = []
+    if pv.error:
+        bits.append(pv.error)
+    for d in (pv.dom or []):
+        if isinstance(d, dict) and not d.get("ok", True):
+            bits.append("DOM 不符：%s" % str(d)[:160])
+    if pv.console_errors:
+        bits.append("console 错误 %d 条：%s"
+                    % (len(pv.console_errors),
+                       "; ".join(map(str, pv.console_errors[:3]))[:200]))
+    if pv.page_errors:
+        bits.append("页面 JS 异常 %d 条：%s"
+                    % (len(pv.page_errors),
+                       "; ".join(map(str, pv.page_errors[:3]))[:200]))
+    if expect_url and expect_url not in (pv.final_url or ""):
+        bits.append("最终 URL 不含 %r（实际 %r）" % (expect_url, pv.final_url))
+    return {"ok": False, "kind": "browser",
+            "detail": "；".join(bits) or "浏览器断言不通过", "evidence": ev}
+
+
+def _find_electron_exe(ws: Path, probe: dict) -> str:
+    """解析 electron 可执行文件：探针给的相对路径按仓库根解析，绝对路径直接用。"""
+    exe = str(probe.get("exe") or "").strip()
+    if not exe:
+        return ""
+    p = Path(exe).expanduser()
+    if p.is_absolute():
+        return str(p) if p.is_file() else ""
+    # 相对路径：相对仓库根（ws），并按常见 node_modules 位置兜底
+    for cand in (ws / p, ws / "node_modules" / p.name if p.name == "electron" else ws / p):
+        if cand.is_file():
+            return str(cand)
+    return ""
+
+
+def _run_electron(ws, probe: dict, timeout: int, out_cap: int = 240) -> dict:
+    """真机 Electron UI 探针：CDP 连真窗口 → DOM/标题断言 → 杀进程。默认红。"""
+    from . import browser as _br
+    exe = _find_electron_exe(ws, probe)
+    if not exe and str(probe.get("exe") or "").strip():
+        return {"ok": False, "kind": "electron",
+                "detail": "electron 可执行文件不存在（如实说测不了）：%s" % probe.get("exe")}
+    app_dir = str(probe.get("app_dir") or "").strip()
+    app_path = ws / app_dir if app_dir and not Path(app_dir).is_absolute() else (app_dir or str(ws))
+    expect_dom = probe.get("expect_dom") or probe.get("expect_dom_has") or []
+    if isinstance(expect_dom, str):
+        expect_dom = [expect_dom]
+    pv = _br.visit_electron(
+        exe, app_dir=str(app_path), actions=probe.get("actions") or [],
+        expect_dom=expect_dom, expect_title=str(probe.get("expect_title") or ""),
+        timeout=min(int(timeout), 40) * 1000,
+        ready_timeout=float(probe.get("ready_timeout") or 45))
+    ev = {"url": pv.url, "final_url": pv.final_url, "status": pv.status,
+          "dom": pv.dom[:20], "console_errors": pv.console_errors[:10],
+          "page_errors": pv.page_errors[:10],
+          "a11y_violations": (pv.a11y_violations or [])[:10]}
+    if pv.ok:
+        return {"ok": True, "kind": "electron",
+                "detail": "真机 Electron UI 验收通过（DOM 断言 %d 条，%dms）"
+                          % (len(expect_dom), pv.elapsed_ms), "evidence": ev}
+    bits = ([pv.error] if pv.error else []) + pv.problems()
+    return {"ok": False, "kind": "electron",
+            "detail": "；".join(bits)[:600] or "真机 Electron UI 断言不通过", "evidence": ev}
+
+
 def run(ws, probe: dict, timeout: int = PROBE_TIMEOUT, out_cap: int = 240) -> dict:
     """执行一次探针。返回 {ok, detail, evidence?, engine_error?, invalid?}。
 
@@ -1661,7 +2152,13 @@ def run(ws, probe: dict, timeout: int = PROBE_TIMEOUT, out_cap: int = 240) -> di
             r = _run_pytest(ws, probe, timeout, out_cap)
         elif kind == "http":
             # 角色串味修补（判据层，零 token）：存量蓝图不必迁移，执行时也按独立账号跑
-            r = _run_http(ws, _dedupe_http_probe(probe), timeout, out_cap)
+            r = _run_http(ws, _repair_auth_order(_dedupe_http_probe(probe)), timeout, out_cap)
+        elif kind == "browser":
+            r = _run_browser(ws, probe, timeout, out_cap)
+        elif kind == "sql":
+            r = _run_sql(ws, probe, timeout, out_cap)
+        elif kind == "electron":
+            r = _run_electron(ws, probe, timeout, out_cap)
         else:
             r = _run_cli(ws, probe, timeout, out_cap)
     except Exception as exc:                             # noqa: BLE001

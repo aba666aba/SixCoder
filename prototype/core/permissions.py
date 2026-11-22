@@ -44,6 +44,7 @@ CAPS: dict[str, str] = {
     "review.run":   "静态代码审查（改进意见）",
     "review.model": "审查时调用模型做语义比对",
     "toolchain.config": "修改工具链配置（指定 JDK 等目录）",
+    "deploy.exec": "在预留的服务器上执行白名单命令（独立通道，强制人审）",
 }
 
 # 关键节点：开发者模式下这些动作**必须有人点头**
@@ -53,6 +54,9 @@ KEY_NODES: dict[str, str] = {
     "git.push":     "即将推送/合并到远端",
     "remote.call":  "即将把代码发往远端模型（DeepSeek）",
     "deliver":      "即将把成果标记为可交付（收尾）",
+    # 2026-11-23 部署通道：外联生产服务器是高危操作，**任何模式都强制人审**
+    # （approval.request 的 force=True，绕过甲方 auto_approve）
+    "deploy.exec":  "即将 ssh 到预留服务器执行命令（外联高危，强制人审）",
 }
 
 
@@ -73,14 +77,17 @@ class Mode:
 _READ = {"probe.read", "file.read", "search.read", "git.read", "review.run", "review.model"}
 _WRITE = {"file.write", "exec.run", "test.run", "git.commit", "git.branch", "agent.run",
           "toolchain.config"}
+# 部署通道：client/developer 可用，但**强制人审**（force=True 绕过 auto_approve）；
+# readonly 不开放。单独一组，别混进 _WRITE 让语义变糊。
+_DEPLOY = {"deploy.exec"}
 
 MODES: dict[str, Mode] = {
     "client": Mode(
         id="client", name="甲方模式", color="b-ok", sandbox="write",
         desc="甲方只提需求，不看实现。全部人工处置自动放行，从 0 做到 1，夜里跑完早上看交付报告。",
-        caps=frozenset(_READ | _WRITE | {"git.remote"}),
+        caps=frozenset(_READ | _WRITE | _DEPLOY | {"git.remote"}),
         auto_approve=True,
-        boundary="只能改工作区内的文件，越界（工作区外/系统目录）一律拒绝",
+        boundary="只能改工作区内的文件，越界一律拒绝；部署需预留目标且每次强制人审",
         extras=("需求一句话即可，不需要知道具体实现",
                 "整条流水线自动跑：体检→工作单→开发→机械验收→交付报告",
                 "出问题看 DELIVERY.md 与 TRACE.md，不用读代码"),
@@ -88,9 +95,10 @@ MODES: dict[str, Mode] = {
     "developer": Mode(
         id="developer", name="开发者模式", color="b-acc", sandbox="write",
         desc="给开发者用：细节化版本控制与代码写作。关键节点必须人工审核，不会自动放行。",
-        caps=frozenset(_READ | _WRITE | {"git.remote"}),
+        caps=frozenset(_READ | _WRITE | _DEPLOY | {"git.remote"}),
         auto_approve=False,
-        key_nodes=("file.write", "git.commit", "git.push", "remote.call", "deliver"),
+        key_nodes=("file.write", "git.commit", "git.push", "remote.call", "deliver",
+                   "deploy.exec"),
         boundary="只能改工作区内的文件；关键节点抛 needhuman，等人点通过才继续",
         extras=("关键节点：写文件 / 提交 / 推送 / 上报远端 / 收尾交付",
                 "每次审批都记审计日志（.sixcoder/audit.jsonl）",

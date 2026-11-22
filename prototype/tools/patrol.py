@@ -23,6 +23,12 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # pythonw 没有 stdout —— print 全进黑洞，"异常即报"形同虚设。
 # 持久模式下所有输出必须落文件，用户/助手随时能翻。
 PLOG = Path(__file__).resolve().parents[2] / "_logs" / "patrol.log"
+try:                                                     # 安装版：数据目录与代码目录分离
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from core import paths as _paths                      # noqa: E402
+    PLOG = _paths.logs_dir() / "patrol.log"
+except Exception:                                        # noqa: BLE001
+    pass
 PERSIST = "--persist" in sys.argv
 
 
@@ -38,19 +44,26 @@ def wlog(msg: str) -> None:
     except OSError:
         pass
 
-sys.path.insert(0, r"E:/AAATOM/NewLai/SixCoder/prototype")
-PY = r"D:/Python/python.exe"
+PROTO = Path(__file__).resolve().parents[1]          # prototype/（安装版也在 resources 下）
+sys.path.insert(0, str(PROTO))
+# 解释器用**当前这个**：安装版是 resources\python\python.exe，写死 D:\Python 会指向不存在的路径
+PY = sys.executable
 from core.runtime_cfg import require_repo  # noqa: E402
 REPO = require_repo()
 SPENT = REPO / ".sixcoder" / "night_spent.json"
 BP = REPO / ".sixcoder" / "blueprint.json"
 DEADLINE = time.time() + 30 * 60
-_prev = {"spent": None, "done": None}
+_prev = {"spent": None, "done": None, "reg": None}
+# 连续多少轮看不到本仓库的夜班/看门狗 → 认定这一班已经跑完，巡检退场。
+# 为什么必须有这个出口：看门狗收工（26-11-20 01:17 实测）后巡检 `while True` 还在跑，
+# 每分钟对整个产物仓做一次全量编译 + 冒烟，并报"夜班进程消失"的假异常把日志刷了 8700 行。
+IDLE_EXIT_ROUNDS = 5
 
 
 def smoke() -> str | None:
     # 入口不写死 app/main.py（耦合点修复 2026-11-08）：复用引擎的探测。
-    sys.path.insert(0, r"E:/AAATOM/NewLai/SixCoder/prototype")
+    # 路径用 PROTO（已在文件顶部按 __file__ 算好），不写死仓库绝对路径 —— 否则安装版直接失效。
+    sys.path.insert(0, str(PROTO))
     try:
         from core import entrypoint as _ep
         _erel = _ep.entry_rel(REPO)
@@ -77,13 +90,14 @@ def compile_all() -> list[str]:
     return bad[:3]
 
 
-def state() -> tuple[float, int]:
+def state() -> tuple[float, int, int, int]:
     try:
         s = float(json.loads(SPENT.read_text(encoding="utf-8")).get("total_cny") or 0)
     except Exception:                                    # noqa: BLE001
         s = -1
     try:
         bp = json.loads(BP.read_text(encoding="utf-8"))
+        total = len(bp.get("caps", []))
         d = sum(1 for c in bp.get("caps", []) if c.get("status") == "done")
         # 探针回归计数（2026-11-08 mark 保护 done 后的可见性替身）：done 计数不再
         # 回退，真回归只体现在 why 的"[探针回归待复核 …]"标记里——巡检必须看得见。
@@ -91,30 +105,111 @@ def state() -> tuple[float, int]:
         # 带括号搜永不命中（实测 19:20）。
         g = sum(1 for c in bp.get("caps", [])
                 if "探针回归待复核" in str(c.get("why") or ""))
+        total = len(bp.get("caps", []))
     except Exception:                                    # noqa: BLE001
         d = -1
         g = -1
-    return s, d, g
+        total = 0
+    return s, d, g, total
+
+
+def _pid_alive(pid: int) -> bool:
+    """进程还在不在（不依赖 psutil，Windows 用 OpenProcess 探针）。"""
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+        return psutil.pid_exists(pid) and psutil.Process(pid).is_running()
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:                                                 # Windows 兜底
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)   # QUERY_LIMITED
+        if not h:
+            return False
+        ctypes.windll.kernel32.CloseHandle(h)
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def claim_single_instance() -> bool:
+    """**单实例守卫**（2026-11-19）：patrol 之前每次启动都新起一个、旧的从不退出。
+
+    实测：一天里双击 4 次 START_NIGHT 就留下 4 个常驻 patrol，都在轮询同一个仓库
+    （全量编译 + 状态查询，纯重复劳动）。守卫规则与 watchdog_night 一致：
+    pid 文件里的巡检**还活着** → 本实例退出；死了/没有 → 接管写自己的 pid。
+    """
+    pf = Path(__file__).resolve().parents[2] / "_logs" / "patrol.pid"
+    try:
+        old = int(pf.read_text(encoding="utf-8").strip() or 0)
+    except Exception:                                    # noqa: BLE001
+        old = 0
+    if old and old != os.getpid() and _pid_alive(old):
+        wlog(f"已有巡检实例 PID={old} 在跑（防重复守卫）→ 本实例退出")
+        return False
+    try:
+        pf.parent.mkdir(parents=True, exist_ok=True)
+        pf.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:                                    # noqa: BLE001
+        pass
+    return True
+
+
+def _own_night_alive() -> int:
+    """本仓库自己的夜班/看门狗进程数（**不是**数所有 python.exe）。
+
+    为什么要改（2026-11-20 实测）：原来用 `tasklist | count python.exe`，
+    那是"整台机器上有几个 python"—— 与本班夜班毫无关系。夜班一收工就恒为 0，
+    巡检于是每分钟报一次"夜班进程消失"，判据自己制造了 8700 行假异常。
+    而且夜班实际由 pythonw 拉起（cli.py night / watchdog_night.py），
+    数 python.exe 本来也数不到它 —— 两头都错。
+    """
+    try:
+        import psutil
+    except Exception:                                    # noqa: BLE001
+        return -1                                        # 未知：调用方不当成"已退场"
+    key = str(REPO).replace("\\", "/").lower().rstrip("/")
+    n = 0
+    for p in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmd = " ".join(p.info.get("cmdline") or "").replace("\\", "/")
+        except Exception:                                # noqa: BLE001
+            continue
+        low = cmd.lower()
+        if key and key not in low:
+            continue                                     # 不是本仓库的夜班（别的项目在跑，别算进来）
+        if "watchdog_night.py" in low or ("cli.py" in low and " night" in low):
+            n += 1
+    return n
+
+
+def _clear_own_pid() -> None:
+    """退场时删掉自己的 pid 文件，别留一个指向死进程的残骸。"""
+    try:
+        pf = Path(__file__).resolve().parents[2] / "_logs" / "patrol.pid"
+        if pf.is_file() and pf.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            pf.unlink()
+    except Exception:                                    # noqa: BLE001
+        pass
 
 
 def main() -> int:
-    # 配合 STOP_NIGHT.bat：pythonw 无命令行可查，按 PID 文件精确停止。
-    try:
-        (Path(__file__).resolve().parents[2] / "_logs" / "patrol.pid").write_text(
-            str(os.getpid()), encoding="utf-8")
-    except Exception:                                    # noqa: BLE001
-        pass
+    # 单实例守卫：**必须在写 pid 之前**（否则自己先覆盖了 pid 文件，就查不到别人）
+    if not claim_single_instance():
+        return 0
     wlog(f"主动巡检启动（{'常驻模式' if PERSIST else '30 分钟班'}，异常即报，安静 8 分钟）")
-    _prev["spent"], _prev["done"], _prev["reg"] = state()
+    _prev["spent"], _prev["done"], _prev["reg"], _total = state()
     _reg_streak = 0
     _down_streak = 0
+    _idle = 0                     # 连续多少轮看不到本仓库的夜班
     _round = 0
     # 持久模式下不设 DEADLINE：用户双击启动的巡检要一直跟到夜班收工，
     # 不能 30 分钟就下班（会话回收后没人重挂）。异常只记日志、不退出进程。
     while (True if PERSIST else (time.time() < DEADLINE)):
         _round += 1
         problems: list[str] = []
-        s, d, g = state()
+        s, d, g, total = state()
         # 1) 全仓编译
         bad = compile_all()
         if bad:
@@ -147,13 +242,19 @@ def main() -> int:
         # 4) 烧钱异常（单轮 > ¥3）
         if _prev["spent"] >= 0 and s > _prev["spent"] + 3:
             problems.append(f"烧钱异常 +¥{s - _prev['spent']:.2f} → ¥{s:.2f}")
-        # 5) 夜班进程存活（看门狗会拉起，但巡检要看得见）
-        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq python.exe"],
-                           capture_output=True, text=True, errors="replace",
-                           creationflags=_NO_WINDOW)
-        alive = r.stdout.count("python.exe")
+        # 5) 本仓库夜班是否还在跑：精确匹配 watchdog_night.py / cli.py night
+        alive = _own_night_alive()
         if alive == 0:
-            problems.append("夜班进程消失（看门狗应在 10 秒内拉起）")
+            _idle += 1
+            if PERSIST and _idle >= IDLE_EXIT_ROUNDS:
+                wlog(f"本仓库夜班与看门狗均已退场（连续 {_idle} 轮）"
+                     f" → 巡检收工（spent=¥{s:.2f} done={d}/{total}）")
+                _clear_own_pid()
+                return 0
+            wlog(f"本仓库暂无夜班在跑（{_idle}/{IDLE_EXIT_ROUNDS} 轮），"
+                 f"可能已收工；继续观察")
+        else:
+            _idle = 0
         if problems:
             wlog("ANOMALY: " + " | ".join(problems))
             if PERSIST:
@@ -163,11 +264,11 @@ def main() -> int:
                 _prev["spent"], _prev["done"], _prev["reg"] = s, d, g
                 continue                         # 常驻：不退出进程，继续盯
             return 1
-        wlog(f"巡检正常 spent=¥{s:.2f} done={d}/76 回归={g} python进程={alive}"
+        wlog(f"巡检正常 spent=¥{s:.2f} done={d}/{total} 回归={g} 夜班进程={alive}"
              f" 第{_round}轮")
         _prev["spent"], _prev["done"], _prev["reg"] = s, d, g
         time.sleep(60)
-    wlog(f"30 分钟安静期结束（spent=¥{_prev['spent']:.2f} done={_prev['done']}/76），"
+    wlog(f"30 分钟安静期结束（spent=¥{_prev['spent']:.2f} done={_prev['done']}/{_total}），"
          "重新挂下一班")
     return 0
 

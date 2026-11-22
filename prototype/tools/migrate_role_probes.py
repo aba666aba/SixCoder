@@ -9,8 +9,8 @@ blueprint.normalize_http（新蓝图源头修）。本脚本把**已生成的存
 铁律：写盘前备份 → 写盘 → 复验（判据字段逐字不变、串味账号已清零）→ 失败可回滚。
 幂等：已是独立账号的蓝图跑一次零改动。
 
-跑法（用与夜班同一个解释器）：
-    D:/Python/python.exe tools/migrate_role_probes.py <repo> [--dry]
+跑法（用与夜班同一个解释器，即引擎自带 Python）：
+    python tools/migrate_role_probes.py <repo> [--dry]
 """
 from __future__ import annotations
 

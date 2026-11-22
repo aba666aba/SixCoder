@@ -95,6 +95,22 @@ def main() -> int:
         r2 = uiwatch.watch(w, _mk_bp(["cap.ui.a"]), base_url="")
         check("没 base_url → no_base", r2["action"] == "no_base", str(r2))
 
+    print("[2b] watch() 用的 _emit 必须存在且安全（2026-11-19 真 bug）")
+    # 曾有 watch() 在 162/180 行调 _emit 但模块没定义 → 走 D7 异常/每轮上报就 NameError。
+    check("uiwatch 有 _emit 定义", hasattr(uiwatch, "_emit"))
+    if hasattr(uiwatch, "_emit"):
+        got: list = []
+        uiwatch._emit(lambda k, p: got.append((k, p)), "ui_round", {"round": 1})
+        check("emit 存在时真转发", got == [("ui_round", {"round": 1})], str(got))
+        uiwatch._emit(None, "ui_round", {})  # 不炸
+        def _boom(k, p):
+            raise RuntimeError("emit 自己炸了")
+        uiwatch._emit(_boom, "ui_round", {})  # emit 抛异常不外溢
+        check("emit 为 None / 抛异常都不外溢", True)
+    src_uw = (ROOT / "core" / "uiwatch.py").read_text(encoding="utf-8")
+    check("watch() 的 _emit 调用有定义兜底",
+          "def _emit(" in src_uw and "_emit(emit, \"ui_round\"" in src_uw)
+
     ok_env, why = browser.available()
     if not ok_env:
         print("\n[3] 跳过真跑：浏览器不可用（%s）" % (why or "?"))

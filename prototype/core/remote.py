@@ -229,8 +229,15 @@ def available() -> tuple[bool, str]:
     # 2026-11-10 实测：这里传了 compat0 → 自检 dispatch 时 `TypeError: <lambda>() takes 0
     # positional arguments but 1 was given`，整条远端可用性判定直接崩。
     if not _key():
-        return False, (f"未配置 API key（设置 → 远端模型 → 厂商卡片填 apikey，"
-                       f"或环境变量 {'/'.join(ENV_KEYS.get(compat0, ('DEEPSEEK_API_KEY',)))}）")
+        # 只在厂商卡片里填了 key 也算已配置（2026-11-21：状态红点误报"未配置"）
+        try:
+            from . import settings_store as _ss       # noqa: PLC0415
+            if not _ss.any_configured_key():
+                return False, (f"未配置 API key（设置 → 远端模型 → 厂商卡片填 apikey，"
+                               f"或环境变量 {'/'.join(ENV_KEYS.get(compat0, ('DEEPSEEK_API_KEY',)))}）")
+        except Exception:                                # noqa: BLE001
+            return False, (f"未配置 API key（设置 → 远端模型 → 厂商卡片填 apikey，"
+                           f"或环境变量 {'/'.join(ENV_KEYS.get(compat0, ('DEEPSEEK_API_KEY',)))}）")
     compat = compat_of(r=r)
     if compat not in ("deepseek", "glm", "openai"):
         return False, f"不支持的远端协议 compat={compat}（可选 deepseek / glm / openai）"

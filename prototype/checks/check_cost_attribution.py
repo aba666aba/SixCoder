@@ -149,8 +149,16 @@ def main() -> int:
     ck("红灯后做了分诊", "triage_round(" in co)
     ck("派单有分诊闸门（只派 dispatch）",
        "_allow = set(triage.get(\"dispatch\")" in co, "没闸门 = 废单照旧")
-    ck("派单循环里跳过非 dispatch 的模块",
-       "_allow is not None and _m not in _allow" in co)
+    # 2026-11-19：派单过滤逻辑已从内联循环抽到纯函数 _cap_orders_from_red。
+    # 旧断言钉 `_allow is not None and _m not in _allow`（内联变量名），
+    # 重构后写做 `allow is not None and m not in allow` → 文本假红。
+    # 钉两处真实语义：调用点把 _allow 传进去 + 纯函数里确实按 allow 过滤。
+    ck("派单调用点把分诊闸门传进纯函数",
+       "_cap_orders_from_red(" in co and "_allow)" in co)
+    _cof = (PROTO / "core" / "company.py").read_text(encoding="utf-8")
+    _co_fn = _cof.split("def _cap_orders_from_red(")[1].split("\ndef ")[0]
+    ck("纯函数里跳过非 dispatch 的模块",
+       "allow is not None and m not in allow" in _co_fn)
     ck("bp 加载后登记归因映射", "set_blueprint(bp)" in co)
     au = (PROTO / "core" / "author.py").read_text(encoding="utf-8")
     ck("写码入口被归因包裹",

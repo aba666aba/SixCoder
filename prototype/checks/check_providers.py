@@ -14,7 +14,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, r"E:\AAATOM\NewLai\SixCoder\prototype")
+ROOT = Path(__file__).resolve().parents[1]   # checks/ 的上一级 = prototype/（换盘符不失效）
+sys.path.insert(0, str(ROOT))
 
 FAILS: list[str] = []
 
@@ -131,7 +132,7 @@ def main() -> int:
           by["deepseek"]["api_key"] == "sk-old", str(by["deepseek"]["api_key"]))
 
     print("[8] API 层：厂商的增删改接口都在")
-    src = Path(r"E:\AAATOM\NewLai\SixCoder\prototype\server.py").read_text(encoding="utf-8")
+    src = (ROOT / "server.py").read_text(encoding="utf-8")
     check("有保存厂商的接口", "/v1/settings/remote/providers" in src)
     check("有删除厂商模型的接口", "delete_provider_model" in src)
     check("对外视图带 providers", '"providers"' in src)

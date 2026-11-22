@@ -1,6 +1,6 @@
 {
   "name": "sixcoder-shell",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "SixCoder 桌面外壳：拉起内置 Python 后端 + 原生目录选择",
   "author": "SixCoder contributors",

@@ -29,9 +29,9 @@ def _get(path: str, timeout: float = 5.0) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def alive() -> bool:
+def alive(timeout: float = 2.0) -> bool:
     try:
-        _get("/api/tags", timeout=2.0)
+        _get("/api/tags", timeout=timeout)
         return True
     except Exception:
         return False

@@ -1,0 +1,79 @@
+{
+ "pip": {
+  "order": [
+   "https://mirrors.ustc.edu.cn/pypi/simple",
+   "https://mirrors.aliyun.com/pypi/simple/",
+   "https://pypi.tuna.tsinghua.edu.cn/simple",
+   "https://mirrors.cloud.tencent.com/pypi/simple",
+   "https://repo.huaweicloud.com/repository/pypi/simple",
+   "https://mirrors.163.com/pypi/simple/",
+   "https://pypi.org/simple"
+  ],
+  "lat": {
+   "https://mirrors.aliyun.com/pypi/simple/": 0.5976,
+   "https://mirrors.ustc.edu.cn/pypi/simple": 0.4596,
+   "https://pypi.tuna.tsinghua.edu.cn/simple": 1.0016,
+   "https://mirrors.cloud.tencent.com/pypi/simple": 1.1149,
+   "https://pypi.org/simple": 1.1217,
+   "https://repo.huaweicloud.com/repository/pypi/simple": null,
+   "https://mirrors.163.com/pypi/simple/": null
+  },
+  "at": 1795367215.1512692
+ },
+ "hf": {
+  "order": [
+   "https://www.modelscope.cn",
+   "https://hf-mirror.com",
+   "https://huggingface.co"
+  ],
+  "lat": {
+   "https://huggingface.co": null,
+   "https://www.modelscope.cn": 0.3956,
+   "https://hf-mirror.com": 0.894
+  },
+  "at": 1795367216.056265
+ },
+ "go": {
+  "order": [
+   "https://goproxy.cn",
+   "https://goproxy.io",
+   "https://mirrors.aliyun.com/goproxy/",
+   "https://proxy.golang.org"
+  ],
+  "lat": {
+   "https://goproxy.cn": 0.0538,
+   "https://mirrors.aliyun.com/goproxy/": null,
+   "https://proxy.golang.org": 0.4897,
+   "https://goproxy.io": 2.3501
+  },
+  "at": 1795367218.4103594
+ },
+ "cargo": {
+  "order": [
+   "https://rsproxy.cn/index/",
+   "https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/",
+   "https://index.crates.io/"
+  ],
+  "lat": {
+   "https://rsproxy.cn/index/": 0.2195,
+   "https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/": 0.3434,
+   "https://index.crates.io/": 0.3524
+  },
+  "at": 1795085244.953474
+ },
+ "npm": {
+  "order": [
+   "https://registry.npmmirror.com",
+   "https://repo.huaweicloud.com/repository/npm/",
+   "https://mirrors.cloud.tencent.com/npm/",
+   "https://registry.npmjs.org"
+  ],
+  "lat": {
+   "https://registry.npmmirror.com": 0.1342,
+   "https://mirrors.cloud.tencent.com/npm/": null,
+   "https://registry.npmjs.org": 0.7955,
+   "https://repo.huaweicloud.com/repository/npm/": 1.1019
+  },
+  "at": 1795367219.5175524
+ }
+}

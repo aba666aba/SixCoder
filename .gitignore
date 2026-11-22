@@ -136,3 +136,15 @@ projects/*
 # 本地阶段性备份（.bak-时间戳）一律不入库
 /prototype/checks/*.bak-*
 /*.bak-*
+
+# 引擎本地的临时区归档（2026-11-19）：产物仓 .sixcoder/tmp 收尾时搬到这里备用。
+# 按仓库指纹分目录，删任务/仓库记录时一并清；**绝不入库**（随时可能上百 MB）。
+/prototype/data/scratch/
+
+# 打包时生成的空白设置模板（不含 key，但每次构建都重新生成）
+/packaging/settings.template.json
+
+# 运行期数据库与临时工作区（不入库）
+/data/
+/.tmp_home3/
+/.tmp_scgit/

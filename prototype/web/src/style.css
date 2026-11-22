@@ -20,7 +20,12 @@ body {
   font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
 }
 
-.app { display: flex; flex-direction: column; height: 100vh; }
+/* 四周留一圈页边距（用户：整个页面显示少了 5mm 左右，边缘别贴死）。
+   box-sizing 是 border-box，100vh 含 padding，内容整体缩小一圈而不是溢出屏幕。 */
+.app {
+  display: flex; flex-direction: column; height: 100vh;
+  padding: 18px; gap: 8px;
+}
 
 /* ---------- top bar ---------- */
 .topbar {
@@ -424,7 +429,12 @@ button.ghost.sel { border-color: var(--accent); color: var(--accent); }
 }
 
 .repo-pop-git { max-height: 70vh; overflow: auto; }
-.repo-pop-tc { max-height: 60vh; overflow: auto; }
+.repo-pop-tc { max-height: 74vh; overflow: auto; width: 690px; }
+.repo-pop-tc table { table-layout: fixed; width: 100%; }
+.repo-pop-tc td { vertical-align: middle; }
+.repo-pop-tc td.wrap, .repo-pop-tc .wrap {
+  overflow-wrap: anywhere; word-break: break-all;
+}
 .alert-inline {
   padding: 5px 8px; margin-bottom: 7px; border-radius: 6px;
   background: rgba(248,81,73,.12); border: 1px solid rgba(248,81,73,.35);
@@ -448,6 +458,8 @@ button.ghost.sel { border-color: var(--accent); color: var(--accent); }
 .tree-caret { width: 10px; flex: 0 0 auto; color: var(--dim); font-size: 9px; }
 .tree-icon { flex: 0 0 auto; font-size: 11px; }
 .tree-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 当前正在编辑的那个文件：和 VSCode 一样给个高亮，避免"我改的是哪个文件" */
+.tree-row.is-editing { background: rgba(79,140,255,.22); box-shadow: inset 2px 0 0 var(--accent); }
 
 /* ---------- VSCode 式侧栏开合 ----------
    收起后从屏幕边缘滑出一条窄把手条（像 Activity Bar），点它侧栏滑出。 */
@@ -483,3 +495,293 @@ button.ghost.sel { border-color: var(--accent); color: var(--accent); }
 .topbar > .rail-toggle:first-child { margin-right: 6px; }
 .topbar > .rail-toggle:last-of-type { margin-left: 8px; }
 .rail-toggle.active { border-color: var(--accent); color: var(--accent); }
+
+
+/* ---------- 内置编辑器（直接嵌在中栏，与工作台共用同一栏） ----------
+   用户口径："左右栏都能收缩，把中栏变成 IDE 就有很大页面"。
+   所以不再 fixed 全屏：它是 .col-mid 的最后一个 flex 子项，
+   左侧文件树常驻、右侧节点栏可收起，中栏宽度就是可用宽度。 */
+.editor-overlay {
+  position: relative; flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--bg); border-top: 1px solid var(--line);
+}
+.editor-tabs {
+  display: flex; align-items: stretch; gap: 2px; flex: 0 0 auto;
+  padding: 4px 8px 0; background: var(--panel2);
+  border-bottom: 1px solid var(--line); overflow-x: auto;
+}
+.editor-tab {
+  display: flex; align-items: center; gap: 6px; flex: 0 0 auto;
+  max-width: 220px; padding: 5px 8px; cursor: pointer;
+  color: var(--dim); font-size: 11px; border: 1px solid transparent;
+  border-bottom: 0; border-radius: 6px 6px 0 0;
+}
+.editor-tab:hover { color: var(--text); background: rgba(79,140,255,.08); }
+.editor-tab.active {
+  color: var(--text); background: var(--bg);
+  border-color: var(--line); margin-bottom: -1px; padding-bottom: 6px;
+}
+.editor-tab .tab-name {
+  max-width: 156px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-family: var(--mono);
+}
+.editor-tab .tab-dirty { color: var(--warn, #e0a30a); font-size: 9px; }
+.editor-tab .tab-close {
+  background: transparent; border: 0; color: var(--dim);
+  font-size: 10px; padding: 0 2px; cursor: pointer;
+}
+.editor-tab .tab-close:hover { color: var(--fail); }
+.editor-tabs > .ghost.tiny { align-self: center; margin-bottom: 3px; }
+
+/* ---------- 选中即改：动作条 + 结果面板 ---------- */
+.assist-bar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 4px 10px; flex: 0 0 auto;
+  background: rgba(79,140,255,.08); border-bottom: 1px solid var(--line);
+}
+.assist-panel {
+  flex: 0 0 auto; max-height: 42vh; overflow: auto;
+  background: var(--panel); border-bottom: 1px solid var(--accent);
+}
+.assist-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 5px 10px; background: var(--panel2); border-bottom: 1px solid var(--line);
+}
+.assist-prompt { display: flex; gap: 8px; align-items: center; padding: 8px 10px; }
+.assist-input {
+  flex: 1 1 auto; min-width: 180px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 9px; font-size: 11.5px;
+}
+.assist-err { padding: 6px 10px; color: #ffb4ae; font-size: 11.5px; }
+.assist-refs { padding: 4px 0 6px; }
+.assist-text {
+  margin: 0; padding: 8px 12px; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.65; color: var(--text);
+}
+.assist-diff {
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+  padding: 4px 0 8px; white-space: pre-wrap; word-break: break-word;
+}
+.assist-diff > div { padding: 0 12px; }
+.assist-diff .d-sign { display: inline-block; width: 14px; color: var(--dim); user-select: none; }
+.assist-diff .d-add { background: rgba(63,185,80,.12); color: #9be9a8; }
+.assist-diff .d-del { background: rgba(248,81,73,.12); color: #ffb4ae; }
+.assist-diff .d-same { color: var(--dim); }
+.editor-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.editor-body {
+  flex: 1 1 auto; min-height: 0; display: flex;
+  background: #0b0e14; overflow: hidden;
+}
+.editor-gutter {
+  flex: 0 0 auto; min-width: 62px; padding: 8px 10px 8px 8px;
+  text-align: right; overflow: hidden;
+  color: #4a5468; font-family: var(--mono); font-size: 12px; line-height: 18px;
+  background: #0a0d12; border-right: 1px solid var(--line); user-select: none;
+}
+/* 断点点行号（VSCode 手感）：左边红点，当前暂停行整行高亮 */
+.gutter-line {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  height: 18px; padding-right: 2px; cursor: pointer;
+}
+.gutter-line:hover { color: var(--text); background: rgba(79,140,255,.10); }
+.gutter-line .bp-dot {
+  flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+  background: transparent;
+}
+.gutter-line.bp .bp-dot { background: #e51400; box-shadow: 0 0 5px rgba(229,20,0,.65); }
+.gutter-line.paused { background: rgba(210,153,34,.18); color: var(--warn); }
+.gutter-line.paused .bp-dot { background: var(--warn); box-shadow: 0 0 5px rgba(210,153,34,.6); }
+.sym-select {
+  max-width: 156px; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 5px; padding: 2px 4px;
+  font-size: 10.5px; font-family: var(--mono);
+}
+/* 仓库探测：收集失败的具体原因（别只给一个红 badge） */
+.probe-diag {
+  margin-top: 6px; padding: 6px 8px; border: 1px solid rgba(248,81,73,.35);
+  border-radius: 6px; background: rgba(248,81,73,.06);
+}
+.probe-reason { font-size: 11px; color: #ffb4ae; margin-bottom: 4px; }
+.probe-tail {
+  margin: 0 0 5px; padding: 5px 7px; max-height: 96px; overflow: auto;
+  background: #0b0e14; border: 1px solid var(--line); border-radius: 5px;
+  font-family: var(--mono); font-size: 10px; line-height: 1.55;
+  color: #d7dee9; white-space: pre-wrap; word-break: break-word;
+}
+.editor-area {
+  flex: 1 1 auto; min-width: 0; padding: 8px 12px;
+  border: 0; outline: 0; resize: none;
+  background: transparent; color: var(--text);
+  font-family: var(--mono); font-size: 12px; line-height: 18px;
+  tab-size: 2; white-space: pre; overflow: auto;
+}
+.editor-area.wrap { white-space: pre-wrap; word-break: break-word; }
+.editor-foot {
+  flex: 0 0 auto; padding: 5px 12px; display: flex; gap: 8px; align-items: center;
+  background: var(--panel); border-top: 1px solid var(--line);
+  color: var(--dim); font-size: 10.5px;
+}
+
+
+/* ---------- 夜班模式：需求协商对话框 ---------- */
+.chat-flow {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 320px; overflow: auto; padding: 4px 2px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: rgba(255,255,255,.012); margin-bottom: 8px;
+}
+.chat-msg { display: flex; gap: 8px; padding: 8px 10px; border-radius: 8px; }
+.chat-msg.user { background: rgba(79,140,255,.10); }
+.chat-msg.assistant { background: var(--panel2); }
+.chat-msg.system { background: rgba(248,81,73,.10); }
+.chat-role {
+  flex: 0 0 auto; font-size: 10px; color: var(--dim); min-width: 26px;
+  padding-top: 2px; text-align: right;
+}
+.chat-text { flex: 1 1 auto; min-width: 0; font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
+.chat-empty {
+  border: 1px dashed var(--line); border-radius: 8px; padding: 14px;
+  color: var(--dim); font-size: 11.5px; line-height: 1.75; margin-bottom: 8px;
+}
+.chat-wait {
+  display: flex; gap: 8px; align-items: center; font-size: 11.5px;
+  color: var(--accent); padding: 6px 2px;
+}
+.qbox {
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  background: rgba(79,140,255,.05); margin-top: 8px;
+}
+.qbox-head { font-size: 11.5px; font-weight: 600; margin-bottom: 8px; }
+.qitem { margin-bottom: 10px; }
+.qtitle { font-size: 11.5px; margin-bottom: 4px; color: var(--text); }
+.qopt {
+  display: flex; align-items: flex-start; gap: 6px;
+  font-size: 11.5px; color: var(--dim); padding: 3px 2px; cursor: pointer;
+  line-height: 1.5;
+}
+.qopt input { margin-top: 3px; width: auto; }
+.qopt:hover { color: var(--text); }
+.clarify-input { min-height: 96px; margin-top: 8px; }
+button.primary-lg {
+  min-width: 132px; padding: 8px 18px; font-size: 13px; font-weight: 600;
+  background: var(--accent); border: 1px solid var(--accent); color: #fff; border-radius: 7px;
+}
+button.primary-lg:disabled { opacity: .45; }
+details.adv { margin-top: 10px; }
+details.adv > summary {
+  cursor: pointer; font-size: 10.5px; color: var(--dim); padding: 3px 0;
+}
+details.adv > summary:hover { color: var(--text); }
+
+/* ---------- 开发者模式：主界面提示（输入在编辑器里） ---------- */
+.dev-hint {
+  border: 1px solid var(--line); border-radius: 8px; padding: 14px;
+  background: rgba(255,255,255,.012);
+}
+.dev-hint-title { font-size: 12.5px; font-weight: 600; margin-bottom: 6px; }
+.dev-hint-body { font-size: 11.5px; line-height: 1.8; color: var(--dim); }
+
+/* ---------- 编辑器悬浮对话框 ---------- */
+.ed-chat {
+  position: absolute; right: 14px; bottom: 46px; z-index: 80;
+  width: 460px; max-width: calc(100% - 28px);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 12px 36px rgba(0,0,0,.45);
+  padding: 8px 10px;
+}
+.ed-chat-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ed-chat-input {
+  width: 100%; min-height: 76px; margin-top: 8px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  font-size: 11.5px; line-height: 1.6; resize: vertical;
+}
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button {
+  background: var(--panel2); color: var(--dim); border: 0; border-radius: 0;
+  padding: 2px 10px; font-size: 10.5px;
+}
+.seg button.on { background: var(--accent); color: #fff; }
+
+
+/* 编辑器对话框里的"回答显示"（用户口径：不然不知道进度） */
+.ed-chat-answer {
+  margin-top: 8px; border: 1px solid var(--line); border-radius: 8px;
+  background: #0b0e14; padding: 8px 10px; max-height: 220px; overflow: auto;
+}
+.ed-chat-wait { font-size: 11.5px; color: var(--accent); }
+.ed-chat-err { font-size: 11.5px; color: #ffb4ae; white-space: pre-wrap; }
+.ed-chat-code {
+  margin: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.6;
+  color: var(--text); white-space: pre-wrap; word-break: break-word;
+}
+.ed-chat-meta {
+  display: flex; align-items: center; gap: 6px; margin-top: 6px;
+  font-size: 10px; color: var(--dim); flex-wrap: wrap;
+}
+
+/* ---------- 开发者模式：运行 / 调试输出面板 ---------- */
+.run-panel {
+  flex: 0 0 auto; max-height: 40vh; min-height: 150px;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel); border-top: 1px solid var(--accent);
+}
+.run-bar, .run-args, .dbg-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 5px 10px; flex: 0 0 auto;
+}
+.run-bar { background: var(--panel2); border-bottom: 1px solid var(--line); }
+.run-args, .dbg-bar { background: var(--panel); border-bottom: 1px solid var(--line); }
+.run-args-input {
+  flex: 1 1 220px; min-width: 120px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 5px; padding: 4px 8px; font-size: 11px; font-family: var(--mono);
+}
+.run-args-num {
+  width: 62px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; font-size: 11px;
+}
+.run-sec-title {
+  font-size: 10.5px; color: var(--dim); padding: 4px 10px 2px;
+  font-weight: 600; letter-spacing: .3px;
+}
+.run-out { flex: 1 1 auto; overflow: auto; padding-bottom: 6px; }
+.run-pre {
+  margin: 0; padding: 3px 12px 6px; white-space: pre-wrap; word-break: break-all;
+  font-family: var(--mono); font-size: 11px; line-height: 1.55; color: var(--text);
+}
+.run-pre.err { color: var(--fail); }
+.run-diag { flex: 0 0 auto; max-height: 110px; overflow: auto; border-bottom: 1px solid var(--line); }
+.run-diag-line {
+  display: flex; gap: 10px; padding: 3px 12px; cursor: pointer; font-size: 11px;
+}
+.run-diag-line:hover { background: rgba(79,140,255,.12); }
+.run-diag-line .mono { color: var(--accent); flex: 0 0 auto; }
+.dbg-locals { flex: 0 0 auto; max-height: 120px; overflow: auto; border-bottom: 1px solid var(--line); }
+.dbg-vars, .dbg-watch {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 3px 12px 6px; align-items: center;
+}
+.dbg-watch .run-args-input { flex: 0 1 200px; }
+.dbg-var { font-size: 11px; font-family: var(--mono); }
+.dbg-var b { color: var(--accent); font-weight: 600; }
+.dbg-var code { color: var(--ok); }
+
+/* ---------- AI 代码导航候选（对话里说"打开/调试 X 函数"的结果） ---------- */
+.nav-results {
+  border: 1px solid var(--line); border-radius: 6px; margin-top: 8px;
+  max-height: 180px; overflow: auto; background: var(--panel2);
+}
+.nav-result {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 5px 10px; font-size: 11px; border-bottom: 1px solid var(--line);
+}
+.nav-result:last-child { border-bottom: none; }
+.nav-result:hover { background: rgba(79,140,255,.14); }
+.nav-result .mono { font-weight: 600; }
+.nav-result .dim { flex: 1; }

@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "proto.db"
+from . import paths as _paths
+
+DB_PATH = _paths.data_dir() / "proto.db"
 _lock = threading.Lock()
 
 SCHEMA = """

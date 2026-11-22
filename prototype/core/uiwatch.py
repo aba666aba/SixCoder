@@ -54,6 +54,20 @@ STREAK_ALERT = 3
 SLOW_RATIO = 3.0
 
 
+def _emit(emit, kind: str, payload: dict) -> None:
+    """安全emit：emit 回调可能没传，或抛异常（不能因观测把夜班带崩）。
+
+    2026-11-19 补：watch() 早在 162/180 行就调用 _emit，但本模块一直没定义，
+    check_self_undef 实测抓到 —— 一旦 D7 异常或每轮上报走到就是 NameError。
+    实现与 fullgen._emit / django_wire._emit 同款（观测失败静默跳过，不炸主流程）。
+    """
+    if emit:
+        try:
+            emit(kind, payload)
+        except Exception:                                # noqa: BLE001
+            pass
+
+
 def _path(ws) -> Path:
     return Path(ws) / HEALTH_FILE
 

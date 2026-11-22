@@ -215,11 +215,13 @@ def main() -> int:
     check("界面有『设为当前』= 切换当前模型",
           "useProfile" in app_vue and "设为当前" in app_vue)
     # 2026-11-09 厂商一等公民重构：连接参数（请求网址 / API key）的编辑移到了
-    # 厂商弹窗的「连接」区，保存动作是 saveProviderDraft / 「保存这个厂商」
-    # （App.vue:2022-2023、:256、:2094）。等价能力仍在，只是位置/措辞变了。
+    # 厂商弹窗的「连接」区，保存动作是 saveProviderDraft。2026-11-19 按用户口径
+    # 把按钮从「保存这个厂商」改成「保存这个 key」（更准确：这个弹窗存的是 key）。
+    # 钉"有保存动作 + 两种措辞至少在其中"，避免文案微调又假红。
     check("界面点开厂商可改连接参数并保存（网址 / key）",
           "请求网址" in app_vue and "API key" in app_vue
-          and "saveProviderDraft" in app_vue and "保存这个厂商" in app_vue)
+          and "saveProviderDraft" in app_vue
+          and ("保存这个 key" in app_vue or "保存这个厂商" in app_vue))
     check("界面不再出现旧的美元价目表编辑器", "价目表（可编辑" not in app_vue
           and "美元 / 每百万 token" not in app_vue)
 

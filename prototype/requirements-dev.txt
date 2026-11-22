@@ -1,5 +1,6 @@
 # 自检依赖（开发/CI 用，不进运行时）
 #   pip install -r requirements.txt -r requirements-dev.txt
+#
+# pytest 已移到 requirements.txt（core/recon.py 建立仓库基线要用），这里不再重复。
 
-pytest==9.0.3
 mypy==2.4.1

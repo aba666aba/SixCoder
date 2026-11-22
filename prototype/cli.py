@@ -371,6 +371,51 @@ def cmd_full(args) -> None:
 HUMAN_STOP_RC = 42
 
 
+def _night_finish_sweep(repo: str, quiet: bool = False) -> None:
+    """夜班**收尾**清理 + 归档（2026-11-19 用户口径）。
+
+    用户定稿："保存到引擎本地作为备用，不是有删除仓库记录功能，如果删除就顺便
+    删除备份的临时目录。" 所以收尾分两步，顺序不能反：
+
+      ① **归档**（core/scratch_store）：产物仓 `.sixcoder/tmp` 里**有内容**的
+         引擎临时项 **move** 到引擎本地 `prototype/data/scratch/<仓库指纹>/`，
+         留作排查备用；空目录壳直接删（实测 2200+ 个空壳，搬走没意义）。
+      ② **清理**（probe.sweep_on_finish）：把剩下的引擎命名空间超龄项、
+         `__pycache__`、`.gc-*` 批次残留、引擎自身 `.tmp` 一次性收干净。
+
+    删除任务/仓库记录时由 server.py 调 `scratch_store.purge_repo()` 清掉归档
+    （记录都没了，归档就成了孤儿）。
+
+    覆盖所有收工路径（正常跑完 / 振荡收工 / 叫人 / 预算停 / 异常退出），
+    因为调用方把它放在 finally 里。硬约束：任何失败都不许影响收工结果。
+    """
+    # ① 归档：有内容的搬到引擎本地（空壳交给 ② 的 gc_scratch 用 rename 批处理删）
+    try:
+        from core import scratch_store as _ss
+        ar = _ss.archive_scratch(repo)
+        if not quiet:
+            if ar.get("moved"):
+                print(f"  临时区归档：搬 {ar['moved']} 项到引擎本地"
+                      f"（{round((ar.get('moved_bytes') or 0) / 1048576, 1)} MB，备用）")
+            for e in (ar.get("errors") or [])[:3]:
+                print(f"  [WARN] 归档跳过一项：{e}")
+    except BaseException:                              # noqa: BLE001
+        pass
+
+    # ② 清理：剩下的超龄项 + 引擎自身 .tmp
+    try:
+        from core import probe as _probe_fin
+        sw = _probe_fin.sweep_on_finish(repo)
+        if (sw.get("removed") or 0) and not quiet:
+            print(f"  收尾清理：删除 {sw['removed']} 条临时项，"
+                  f"释放 {round((sw.get('freed_bytes') or 0) / 1048576, 1)} MB")
+        for e in (sw.get("errors") or [])[:3]:
+            if not quiet:
+                print(f"  [WARN] 收尾清理跳过一项：{e}")
+    except BaseException:                              # noqa: BLE001
+        pass                                           # 清理失败不许改退出码
+
+
 def cmd_night(args) -> None:
     """夜班（公司制）：甲方模式提需求 → 内部做完所有决策 → 早上读交付报告。
 
@@ -381,6 +426,18 @@ def cmd_night(args) -> None:
     """
     _need("agent.run")
     from core import company, policy
+
+    # 加载生态包（协商补全的前端 SPA / 桌面 / 中间件等栈适配器），注册进栈表。
+    # 失败不阻断夜班（生态包是增量能力，坏了退回原有两栈）。
+    try:
+        from core import ecosystem as _eco
+        _loaded = _eco.load_all()
+        if _loaded.get("loaded"):
+            print("[INFO] 已加载生态包：%s" % ", ".join(_loaded["loaded"]))
+        for _f in _loaded.get("failed") or []:
+            print("[WARN] 生态包加载失败：%s（%s）" % (_f.get("name"), _f.get("why")))
+    except Exception as _exc:                            # noqa: BLE001
+        print("[WARN] 生态包加载异常（继续）：%s" % _exc)
 
     pol = policy.current()
     if pol.code_escalation == policy.OFF:
@@ -533,13 +590,17 @@ def cmd_night(args) -> None:
             sys.exit(0 if res.get("ok") else 1)
 
         from core import night as _night_mod
-        res = _night_mod.run(repo, goal, model=model,
-                             max_rounds=args.max_rounds,
-                             fresh=getattr(args, "fresh", False),
-                             emit=None if args.quiet else printer,
-                             remote_profile=getattr(args, "remote_model", "") or "",
-                             plan=plan,
-                             refresh_contract=bool(getattr(args, "refresh_contract", False)))
+        try:
+            res = _night_mod.run(repo, goal, model=model,
+                                 max_rounds=args.max_rounds,
+                                 fresh=getattr(args, "fresh", False),
+                                 emit=None if args.quiet else printer,
+                                 remote_profile=getattr(args, "remote_model", "") or "",
+                                 plan=plan,
+                                 refresh_contract=bool(getattr(args, "refresh_contract", False)))
+        finally:
+            # 同一套收尾清理（这条是 fullgen scratch/repair 的夜班路径，也要清）
+            _night_finish_sweep(repo, quiet=bool(args.quiet))
         print(f"\n■ 夜班结束（{getattr(res, 'mode', '?')}）："
               f"{res.verified}/{res.total} 验收通过｜{res.spent_s:.0f}s｜{res.reason}")
         if getattr(res, "delivery_path", ""):
@@ -566,12 +627,17 @@ def cmd_night(args) -> None:
     if plan.strip():
         print("> 实现方案（权威）已注入：", plan.strip().splitlines()[0][:60])
 
-    res = company.night(repo, requirement, model,
-                        use_remote=not args.no_remote,
-                        max_rounds=args.max_rounds,
-                        emit=None if args.quiet else printer, plan=plan,
-                        remote_profile=getattr(args, "remote_model", "") or "",
-                        scale_level=(scope.get("level") if args.scale else ""))
+    try:
+        res = company.night(repo, requirement, model,
+                            use_remote=not args.no_remote,
+                            max_rounds=args.max_rounds,
+                            emit=None if args.quiet else printer, plan=plan,
+                            remote_profile=getattr(args, "remote_model", "") or "",
+                            scale_level=(scope.get("level") if args.scale else ""))
+    finally:
+        # 收尾清理放 finally：**所有**收工路径都清（正常/振荡/叫人/预算停/异常）。
+        # 否则"这一夜留下的垃圾"只能等下一次开跑才被收（实测堆到 2583 条 / 8.9MB）。
+        _night_finish_sweep(repo, quiet=bool(args.quiet))
     print(f"\n■ 夜班结束：{res.verified}/{res.total} 验收通过｜{res.spent_s:.0f}s｜{res.reason}")
     if res.delivery_path:
         print(f"  交付报告 {res.delivery_path}")

@@ -1,0 +1,13 @@
+{
+ "name": "microservice",
+ "version": "1",
+ "kind": "stack",
+ "description": "多服务/中间件系统（API + worker + 队列 + 数据库）：识别 celery 配置，分层验收（http 判接口 / sql 判数据落库 / py_call 判任务逻辑），真实 MQ 集成当前不验",
+ "provides": ["stack:microservice", "probe:sql"],
+ "needs": [],
+ "adapter_class": "MicroserviceAdapter",
+ "detect_markers": ["celery_app.py", "app/celery.py", "app/tasks/celery.py",
+                    "docker-compose.worker.yml"],
+ "verify": ["python", "-c", "print('microservice ok')"],
+ "notes": "刻意不用 docker-compose.yml 作 marker（Django/FastAPI 部署也常有，会误判）。真实 Redis/RabbitMQ 集成需 Docker，当前不验、不谎报。"
+}

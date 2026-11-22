@@ -568,6 +568,10 @@ def brief(ws, rep, *, files: dict[str, str], stats: dict,
     _rb_txt = render_rollback(load_rollback(ws))
     if _rb_txt:
         parts.append(_rb_txt)
+    # 项目方诊断：放在源码/拒收/回滚之后（易变区），不毁前缀缓存
+    _adv_txt = render_advice(load_advice(ws))
+    if _adv_txt:
+        parts.append(_adv_txt)
     # 附录：地图/树放这里（导航用，且每轮会变，放前面会毁掉整个前缀缓存）
     if stats.get("signatures_only") or stats.get("dropped"):
         parts.append("\n## 架构地图（附录：完整签名 + 依赖边 + 端点表）\n```\n%s\n```\n"
@@ -1269,6 +1273,42 @@ def save_rollback(ws, info: dict | None) -> None:
         p.write_text(_json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError:
         pass
+
+
+ADVICE_FILE = ".sixcoder/advice.md"
+ADVICE_MAX_CHARS = 8000          # 人工诊断是"结论"，不是文档：超长就是没收敛
+
+
+def load_advice(ws) -> str:
+    """读**项目方诊断**（`.sixcoder/advice.md`，可选）。
+
+    为什么需要这条通道（2026-11-19 实测）：有些失败是"产物里一行键优先级写错"
+    这种**人类一眼能定位、机器推不出来**的问题（例：`_TOPIC_ID_KEYS` 把 `id`
+    排在 `code` 前，而 pairs 用 code 引用 → 规则一条不命中）。远端只能看到
+    `unacceptable_count 0 vs 1`，围着它改 5 轮都不中。
+
+    引擎**不含任何项目知识**：它只负责"项目根有这个文件就渲染进简报"。
+    内容由项目方（人或调度它的助手）写，随项目走，不进引擎仓库。
+    """
+    try:
+        p = Path(ws) / ADVICE_FILE
+        if not p.is_file():
+            return ""
+        txt = p.read_text(encoding="utf-8-sig", errors="replace").strip()
+    except Exception:                                    # noqa: BLE001
+        return ""
+    return txt[:ADVICE_MAX_CHARS]
+
+
+def render_advice(txt: str) -> str:
+    """渲染成独立段落（纯函数，便于 check 钉行为）。空则返回空串。"""
+    t = str(txt or "").strip()
+    if not t:
+        return ""
+    return ("\n## 项目方诊断（人工已定位的结论：**优先采信**，但仍要用证据核对）\n"
+            "> 下面不是猜测，是已经做过对照实验的结论。若你认为它错了，"
+            "在 `<rootcause>` 里写明反证再动手；否则**按它修，不要重新分析**。\n\n"
+            + t + "\n")
 
 
 def load_rollback(ws) -> dict | None:

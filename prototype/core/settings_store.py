@@ -10,15 +10,74 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 
+from . import paths as _paths
+
+# 配置放在引擎自己的 data/ 下。**打包时生成空白模板**（见
+# packaging/build_installer.py::write_settings_template）：安装包只带
+# `settings.template.json`，绝不带开发机的真实 `settings.json`。
 # 允许用环境变量指向另一份配置 —— **自检必须用它**：
 # 用户会在界面上改模型/价格/启用状态（`data/settings.json` 是本地配置，不进库），
 # 自检若读真实配置，用户一改配置就有一批自检红，而且看起来像代码坏了
 # （实测 2026-11-10 23:50：check_pricing / check_single_model / check_remote_profiles
 #  在用户禁用 pro、改过价格之后全红；换一份干净配置立刻全绿 —— 是自检的问题，不是代码的）。
+ENGINE_ROOT = Path(__file__).resolve().parent.parent
 SETTINGS = Path(os.environ.get("SIXCODER_SETTINGS")
-                or (Path(__file__).resolve().parent.parent / "data" / "settings.json"))
+                or (ENGINE_ROOT / "data" / "settings.json"))
+SETTINGS_TEMPLATE = ENGINE_ROOT / "data" / "settings.template.json"
+
+
+def _is_installed_tree() -> bool:
+    exe = Path(sys.executable).resolve()
+    return exe.parent.name.lower() == "python" and exe.parent.parent.name.lower() == "resources"
+
+
+# 覆盖安装会把安装目录整体换掉（NSIS 先删旧文件再解压），放在里面的 settings.json
+# 会跟着消失 —— 用户看到的就是"装个新版本/重开一次，key 全没了"（2026-11-21 报障）。
+# 配置本体仍按用户要求留在原地；打包态额外镜像一份到数据目录，
+# 下次启动没找到本体时先恢复镜像，再退回空白模板。
+MIRROR = (_paths.data_dir() / "settings.mirror.json"
+          if _paths.is_packaged() and _is_installed_tree() else None)
+
+
+def _mirror_write() -> None:
+    """把当前配置同步到镜像（best-effort，失败不影响主流程）。"""
+    if not MIRROR:
+        return
+    try:
+        MIRROR.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(SETTINGS, MIRROR)
+    except OSError:
+        pass
+
+
+def _bootstrap_packaged_settings() -> None:
+    """安装版启动：没有配置就先恢复镜像、再退回空白模板；有配置则刷新镜像。
+
+    **这里绝不清任何 key**。旧实现有一段"升级后清一次 key"，标记写在安装目录里：
+    首次安装拷完模板就 return 了、标记没写，用户填好 key 再启动一次命中清理分支，
+    刚填的 key 被清空（2026-11-21 实测复现）。包里本来就不带 settings.json
+    （打包硬闸保证），没有任何东西需要运行时清理，这段逻辑只剩误伤。
+    """
+    if not (_paths.is_packaged() and _is_installed_tree()):
+        return
+    if SETTINGS.exists():
+        _mirror_write()
+        return
+    for src in (MIRROR, SETTINGS_TEMPLATE):
+        if src and src.exists():
+            try:
+                SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src, SETTINGS)
+                return
+            except OSError:
+                continue
+
+
+_bootstrap_packaged_settings()
 
 # ---------------------------------------------------------------- 厂商预设
 #
@@ -189,6 +248,8 @@ def load() -> dict:
 def save(data: dict) -> None:
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 同步刷新镜像：覆盖安装后启动才能把这份配置恢复回来
+    _mirror_write()
 
 
 def get_remote() -> dict:
@@ -964,6 +1025,22 @@ def update_remote(patch: dict) -> tuple[dict, list[str]]:
     if changed:
         save(data)
     return remote, changed
+
+
+def any_configured_key() -> bool:
+    """**当前正在使用的厂商**是否有任意一把 key（不只看平铺 remote.api_key）。
+
+    2026-11-21 实测：只在厂商卡片里填 key 时，remote.available() 原来只查平铺
+    api_key → 状态红点一直"未配置"，但实际调用走 provider key 是通的。
+    只看 current provider：别的厂商有 key 不代表当前这条链路可用。
+    """
+    try:
+        p = current_provider()
+        if str(p.get("api_key") or "").strip():
+            return True
+        return any(str(k.get("api_key") or "").strip() for k in (p.get("keys") or []))
+    except Exception:                                    # noqa: BLE001
+        return False
 
 
 def mask(key: str) -> str:

@@ -29,6 +29,7 @@ from . import blueprint as _bp
 from . import probe as _probe
 
 COVERAGE_FILE = ".sixcoder/coverage.jsonl"
+FAILURES_FILE = ".sixcoder/last_failures.json"   # 最近一次观测的失败现象快照（协商读它）
 HISTORY_KEEP = 400          # 历史只留最近这么多次观测（够判停滞，不至于无限长）
 
 # 失败步骤的请求体带进证据的长度上限（防整条链 16 步把报告撑爆）。
@@ -67,9 +68,26 @@ def failed_step_request(probe: dict | None, detail: str, *, evidence: dict | Non
             continue
         method = str(st.get("method") or "GET").upper()
         path = str(st.get("path") or "")
-        body = st.get("json") if isinstance(st.get("json"), dict) else st.get("data")
+        # **json 写成字符串也要如实展示**（2026-11-19 实测事故）：探针里
+        # `"json": "{\"students\": [...]}"`（字符串，不是对象）时，旧逻辑
+        # `body = st["json"] if isinstance(..., dict) else st["data"]` 得到 None，
+        # 于是打印「(该步无 json 请求体)」——**这是假的**：请求体确实发了，只是
+        # 以字符串形态发出去（产物 json.loads 得到 str 而非 dict → 当空处理 → 0 命中）。
+        # 远端看到"无 body"就坚信 probe 没传数据，于是去改**本来正确**的产物规则
+        # 改了 5 轮（见产物 apps/rules/urls.py 的 docstring）。反馈被包错语义框 = 没到。
+        _jb = st.get("json")
+        if isinstance(_jb, str):
+            _trim = _jb.strip()
+            if _trim[:1] in ("{", "["):
+                try:
+                    _parsed = json.loads(_trim)
+                except Exception:                         # noqa: BLE001
+                    _parsed = None
+                if isinstance(_parsed, dict):
+                    _jb = _parsed                     # 能解析就按对象展示
+        body = _jb if isinstance(_jb, (dict, list)) else st.get("data")
         parts = [f"第{n}步 {method} {path}"]
-        if isinstance(body, dict):
+        if isinstance(body, (dict, list)):
             try:
                 _bj = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
             except Exception:                                     # noqa: BLE001
@@ -77,9 +95,28 @@ def failed_step_request(probe: dict | None, detail: str, *, evidence: dict | Non
             if len(_bj) > _MAX_BODY_CHARS:
                 _bj = _bj[:_MAX_BODY_CHARS] + "…(截断)"
             parts.append("请求体=" + _bj)
+        elif isinstance(_jb, str) and _jb.strip():
+            # 仍是字符串（解析不出对象）：原样给出 + 明确标注它会被**当字符串**发出
+            _bs = _jb if len(_jb) <= _MAX_BODY_CHARS else _jb[:_MAX_BODY_CHARS] + "…(截断)"
+            parts.append("请求体(字符串，会被当字符串发出而不能当对象解析)=%s" % _bs)
         ev = ev_by_no.get(n)
         if isinstance(ev, dict) and ev.get("status") is not None:
             parts.append("实际状态=%s" % ev.get("status"))
+        # **鉴权状态要可见**（2026-11-19 实测事故）：步骤期望 2xx 却没带
+        # Authorization 时，产物回 403「权限不足」，远端只能看到状态码，
+        # 完全无法判断"是我没带 token 还是产物真没权限" → 去改本来正确的权限逻辑。
+        # （cap.inv.topic.guard_pending_1751：建题步骤排在 login 之前、且无鉴权头。）
+        _hdr = st.get("headers")
+        _has_auth = isinstance(_hdr, dict) and any(
+            str(k).lower() == "authorization" for k in _hdr)
+        _want_ok = False
+        _es = st.get("expect_status")
+        if isinstance(_es, list):
+            _want_ok = any(str(x).isdigit() and 200 <= int(x) < 300 for x in _es)
+        elif str(_es or "").isdigit():
+            _want_ok = 200 <= int(str(_es)) < 300
+        if not _has_auth and _want_ok:
+            parts.append("未带鉴权头")
         # 实际响应体（2026-11-18 关键）：远端必须看到"产物返回了哪些字段"才能对准
         # 契约。实测 trace: 判据要 unacceptable_count，产物只给 unacceptable 列表 +
         # count，字段名错位 —— 但报告原来只说"字段不符 实际0 期望1"，远端看不见全貌，
@@ -115,8 +152,8 @@ def failed_step_request(probe: dict | None, detail: str, *, evidence: dict | Non
                     v = str(st[key])
                 parts.append("%s=%s" % (label, v))
         line = "  ".join(parts)
-        if not isinstance(body, dict):
-            line += "  (该步无 json 请求体)"
+        if not body:
+            line += "  (该步确实没有请求体)"
         if used + len(line) > _MAX_REQ_CHARS:
             line = line[:max(0, _MAX_REQ_CHARS - used)]
             out.append(line)
@@ -129,7 +166,8 @@ def failed_step_request(probe: dict | None, detail: str, *, evidence: dict | Non
     return "\n".join(out)
 
 
-def run(bp, ws, *, timeout: int = _probe.PROBE_TIMEOUT, only=None, emit=None) -> dict:
+def run(bp, ws, *, timeout: int = _probe.PROBE_TIMEOUT, only=None, emit=None,
+        include_descoped: bool = False) -> dict:
     """按蓝图观测整个项目。返回 cov（含每条能力的真实状态）。
 
     `only` 只测指定能力（增量用）；默认全量重测 —— 全量才有回归网。
@@ -161,7 +199,12 @@ def run(bp, ws, *, timeout: int = _probe.PROBE_TIMEOUT, only=None, emit=None) ->
         c = bp.by_id(cid)
         if c is None:
             continue
-        if c.status == "descoped" and (want is None or cid not in want):
+        # descoped 是**终态判定**，不是"这次没测到"。2026-11-19 实测：旧条件
+        # `and (want is None or cid not in want)` 在 only 显式点名时会把已降级的
+        # 能力重新观测成 absent —— 而蓝图自己的 why 已写明"概念重复/占位符无来源"，
+        # 于是引擎为这些**已废弃判据**反复派单改产物，覆盖恒 74/85、净增长 0、烧钱。
+        # 口径：descope 只有在显式 include_descoped=True（确需重评）时才重新观测。
+        if c.status == "descoped" and not include_descoped:
             caps[cid] = {"status": "descoped", "detail": c.why or "已降级"}
             continue
         if want is not None and cid not in want:
@@ -235,6 +278,54 @@ def record(ws, cov: dict, note: str = "") -> Path:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     _trim(p)
     return p
+
+
+def save_failures(ws, cov: dict) -> Path:
+    """把本轮观测到的**失败现象**落成快照，供死局协商读取（2026-11-19）。
+
+    为什么必须单独存一份（血泪）：
+      coverage.jsonl 每轮只记 `statuses`（状态名），**不含 detail/evidence**；
+      于是三方协商时审核者只看得到"判据定义 + 回滚叙事"，看不到
+      "探针实际跑了什么、返回了什么、和期望差在哪"。实测 11-19 两个审核者
+      在信息不全的框架里做了正确推理，却一直改错对象（改判据文本而非夹具/
+      产物），端到端连续 6 轮卡 67。这里把完整失败现象（含 failed_step_request
+      拼好的真实请求/响应/期望）存下来，协商包直接读——证据先到位，再谈裁决。
+
+    只存非 done 的能力；纯 I/O、幂等、异常只留痕不炸主流程。
+    """
+    p = Path(ws) / FAILURES_FILE
+    rows = {}
+    for cid, row in (cov.get("caps") or {}).items():
+        if str(row.get("status") or "") == "done":
+            continue
+        rows[str(cid)] = {
+            "status": str(row.get("status") or "absent"),
+            "detail": str(row.get("detail") or "")[:4000],
+        }
+    payload = {"at": round(time.time(), 1), "total": int(cov.get("total") or 0),
+               "done": len(cov.get("done") or []), "failures": rows}
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:                               # noqa: BLE001
+        print("[coverage] 失败现象快照写盘失败: %s" % exc)
+    return p
+
+
+def load_failures(ws, cap_ids: list[str] | None = None) -> dict:
+    """读回失败现象快照；cap_ids 给了就只取这些能力，没给取全部。"""
+    p = Path(ws) / FAILURES_FILE
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:                                    # noqa: BLE001
+        return {}
+    fails = d.get("failures") or {}
+    if not isinstance(fails, dict):
+        return {}
+    if cap_ids is None:
+        return fails
+    want = {str(c) for c in cap_ids}
+    return {k: v for k, v in fails.items() if k in want}
 
 
 def _trim(p: Path) -> None:

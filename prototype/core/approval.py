@@ -80,13 +80,18 @@ def _ticket_view(t: dict) -> dict:
 
 def request(node: str, title: str, detail: str = "", workspace: str | Path = "",
             emit=None, timeout: float = DEFAULT_TIMEOUT,
-            interactive: bool | None = None) -> dict:
+            interactive: bool | None = None, force: bool = False) -> dict:
     """请求人工审核。返回 {ok, decision, reason, ticket}。
 
     甲方模式 / 只读模式下（auto_approve=True）直接放行，不打扰人。
+
+    `force=True`（2026-11-23 部署通道）：**即使 auto_approve 也强制人审**。
+    外联到生产服务器等高危操作不能因为"甲方要全自动"就放行——这是少数
+    必须有人在场的节点。fail-closed 语义不变：没人答/超时=拒绝。
+    只有显式传 force 才生效，现有调用方默认 False，行为不变。
     """
     mode = permissions.current_mode()
-    if not permissions.needs_human(node):
+    if not force and not permissions.needs_human(node):
         return {"ok": True, "decision": "auto", "reason": f"{mode.name}：该节点不需要人工审核",
                 "ticket": None}
 

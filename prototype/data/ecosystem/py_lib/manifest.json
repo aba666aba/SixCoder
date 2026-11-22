@@ -1,0 +1,12 @@
+{
+ "name": "py_lib",
+ "version": "1",
+ "kind": "stack",
+ "description": "纯 Python 库/包（无 Web、无 CLI 入口）：识别 lib/__init__.py + pyproject.toml，用 py_call 探针直接调函数、断言返回值与异常验收",
+ "provides": ["stack:py_lib", "probe:py_call"],
+ "needs": [],
+ "adapter_class": "PyLibAdapter",
+ "detect_markers": ["lib/__init__.py"],
+ "verify": ["python", "-c", "print('py_lib ok')"],
+ "notes": "marker 只用 lib/__init__.py（单一独特文件，避免与 cli_tool 共用 pyproject.toml 抢判）。py_call 探针要求 expect 或 expect_raises（不能空判）；异常路径用 expect_raises 验错误类型。"
+}

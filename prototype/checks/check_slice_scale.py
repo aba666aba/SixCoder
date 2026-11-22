@@ -10,7 +10,8 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, r"E:\AAATOM\NewLai\SixCoder\prototype")
+ROOT = Path(__file__).resolve().parents[1]   # checks/ 的上一级 = prototype/（换盘符不失效）
+sys.path.insert(0, str(ROOT))
 
 from core import dosing, slicer  # noqa: E402
 
@@ -25,7 +26,7 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 
 def main() -> int:
     print("[1] 切片规模：Web 片不再被硬砍到 6")
-    src = Path(r"E:\AAATOM\NewLai\SixCoder\prototype\core\auto.py").read_text(encoding="utf-8")
+    src = (ROOT / "core" / "auto.py").read_text(encoding="utf-8")
     check("auto.py 里不再有 'funcs_cap = min(int(funcs_cap), 6)'",
           "funcs_cap = min(int(funcs_cap), 6)" not in src,
           "Web 片仍被拍脑袋的 6 卡着")
@@ -50,8 +51,7 @@ def main() -> int:
 
     print("[3b] 缩片：连续两片无收获才缩，且有地板")
     from core import auto
-    src_auto = Path(r"E://AAATOM//NewLai//SixCoder//prototype//core//auto.py").read_text(
-        encoding="utf-8")
+    src_auto = (ROOT / "core" / "auto.py").read_text(encoding="utf-8")
     check("存在缩片地板常量", hasattr(auto, "SLICE_SHRINK_FLOOR"),
           "缩片没有地板 → 会退化成一次一个函数")
     check("地板 >= 6（能容纳一次业务纵切）", auto.SLICE_SHRINK_FLOOR >= 6,
@@ -90,8 +90,7 @@ def main() -> int:
     from core import toolschema
     names = [t["function"]["name"] for t in toolschema.tool_schemas()]
     check("route_status 在 JSON Schema 里", "route_status" in names, str(names))
-    src2 = Path(r"E:\AAATOM\NewLai\SixCoder\prototype\core\remotetools.py").read_text(
-        encoding="utf-8")
+    src2 = (ROOT / "core" / "remotetools.py").read_text(encoding="utf-8")
     check("分发器里有 route_status 分支", 'name == "route_status"' in src2)
     check("GUIDE 里介绍了 route_status", "route_status" in src2)
 

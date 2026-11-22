@@ -100,6 +100,46 @@ TOOL_SCHEMAS: list[dict] = [
                           "text": {**_STR, "description": "要记的内容"},
                           "src": {**_STR, "description": "来源标注"}},
                          ["text"])}},
+    {"type": "function", "function": {
+        "name": "decide_route",
+        "description": (
+            "补偿路径决策：在决定怎么实现/验收一个需求前，先判断该走哪条路——"
+            "直接生成（判据可机械化+能起探针）、插件桥+产物验收（闭源宿主如 PR/Office）、"
+            "降维判据+人在环（审美型质量）、授权部署（人预留了服务器并开放通道，"
+            "白名单命令+强制人审）、结构性拒绝（进不去且判据不可判）。"
+            "只读：不改代码，返回路径、理由、引擎能验什么、人要做什么、补不到哪。"),
+        "parameters": _s({
+            "target": {**_STR, "description": "目标形态描述，如 'PR 自动剪辑插件' / '订单管理 API'"},
+            "closed_host": {"type": "boolean", "description": "目标是否寄生在闭源宿主里（PR/Office/AutoCAD 等），引擎进不去其进程"},
+            "can_observe_runtime": {"type": "boolean", "description": "引擎能否起目标进程并跑探针观测结果"},
+            "mechanical_verdict": {"type": "boolean", "description": "验收判据能否写成机器可判定（HTTP 状态码/DOM/数值/退出码）"},
+            "subjective_quality": {"type": "boolean", "description": "交付质量是否主要依赖主观审美/体验判断（好不好看/顺不顺手）"},
+            "deploy_authorized": {"type": "boolean", "description": "人是否已预留部署目标并开放受控通道（用于部署/上线类需求；未授权一律不走部署路径）"},
+            "requirement": {**_STR, "description": "需求原文摘要（只用于回显，不参与判定）"},
+        }, ["target"])}},
+    {"type": "function", "function": {
+        "name": "deploy_targets",
+        "description": (
+            "列出人工预先预留的部署服务器（受控部署通道）。只读：只给目标 id/host/user/"
+            "认证方式（agent / 私钥引用 / 用户名密码）/凭据是否已配置(掩码)/命令白名单，"
+            "**绝不返回私钥或密码本体**。只有人开了通道并登记过的目标才出现。"
+            "先在 decide_route 判出需要部署，再用这个看有哪些目标可用。"),
+        "parameters": _s({})}},
+    {"type": "function", "function": {
+        "name": "deploy_exec",
+        "description": (
+            "在预留服务器上执行一条命令（受控部署通道）。**严格约束，别指望能任意 ssh**："
+            "① 只能连 deploy_targets 列出的目标；② 命令必须整条命中该目标的 allow_commands "
+            "前缀且不含 shell 元字符，否则拒绝；③ 执行前先过**三方协商（≥2 同意才放行）**，"
+            "审核者反对/弃权/三方没配好都拒绝；④ 还要**强制人工审核**，没人答/超时=拒绝；"
+            "⑤ 全程写审计日志。认证支持 agent / 私钥路径 / 用户名密码三种，密码只按"
+            "env:/file:/prompt 引用由本机读取，绝不落盘、不进日志。远端只负责提出"
+            "'在哪台跑哪条命令+为什么'，放行权在三方+人。返回真实 rc 与输出，失败如实报告。"),
+        "parameters": _s({
+            "target": {**_STR, "description": "deploy_targets 里的目标 id"},
+            "command": {**_STR, "description": "要执行的命令（必须命中该目标白名单前缀）"},
+            "reason": {**_STR, "description": "为什么要跑这条命令（给人审看的）"},
+        }, ["target", "command"])}},
 ]
 
 TOOL_NAMES = [t["function"]["name"] for t in TOOL_SCHEMAS]

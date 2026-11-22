@@ -84,16 +84,28 @@ def delete_ticket(ticket_id: int) -> dict:
    核心逻辑必须你自己写，别把"需要你想清楚"的部分委托出去。
 10. **空桩不是实现**：上下文里 `raise NotImplementedError` / 只有 docstring 的函数，
     是**要你写**的桩，不是已有代码。照抄一遍等于什么都没做，会被判红。
+11. **前端组件（.jsx / .tsx / .vue）用（C）整份文件，且走 JSON files 格式**：
+    {{"files":[{{"path":"src/pages/Home.jsx","content":"<完整组件源码>"}}]}}
+    内容写**完整组件**（顶层 import + `export default function 组件名()` + JSX/模板）；
+    不要用 `# ===== 函数名 =====` 分段（那是 Python 函数体写法），不要加 Python 类型注解。
+    页面组件放 `src/pages/`，复用组件放 `src/components/`。JSX 里的引号用 `\\"` 正常转义。
 """
+
+
+# 前端组件后缀（2026-11-19 生态包）：不在 core/lang 的 LANGS 表里（那是"能编译验证的语言"），
+# 但前端确实要写这些文件。**只加组件后缀，不加 .html/.css**——.html 是故意拒的
+# （见下面 `_is_code_path 不认 .html` 那条：防止把 HTML 当 Python 写进 .py）。
+_FRONTEND_EXTS = (".jsx", ".tsx", ".vue")
 
 
 def _is_code_path(path: str) -> bool:
     """这个路径能不能当"要写的源码文件"？多语言：按 core/lang 的表判断后缀。"""
     try:
         from . import lang as _lang
-        exts = tuple(e for cfg in _lang.LANGS.values() for e in cfg["exts"])
+        exts = (tuple(e for cfg in _lang.LANGS.values() for e in cfg["exts"])
+                + _FRONTEND_EXTS)
     except Exception:                                    # noqa: BLE001
-        exts = (".py",)
+        exts = (".py",) + _FRONTEND_EXTS
     p = (path or "").replace("\\", "/").strip()
     if not p or p.startswith("/") or ".." in p.split("/"):
         return False

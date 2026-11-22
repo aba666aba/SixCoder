@@ -372,6 +372,82 @@ if __name__ == "__main__":
     part_deadlock()
     part_source()
 
+    print("[13] 处方执行顺序（2026-11-19 09:41 实测 IndexError：add_step 越过 len+1 保护）")
+    import json as _j13
+    import tempfile as _tf13
+    from core import judgefix as _jf13
+    _ws13 = Path(_tf13.mkdtemp())
+    (_ws13 / ".sixcoder").mkdir(parents=True)
+    (_ws13 / ".sixcoder" / "blueprint.json").write_text(_j13.dumps({"caps": [{"id": "cap.t",
+        "probe": {"steps": [{"method": "GET", "path": "/a/", "expect_status": [200]},
+                            {"method": "GET", "path": "/b/", "expect_status": [200]},
+                            {"method": "GET", "path": "/c/", "expect_status": [200]},
+                            {"method": "GET", "path": "/d/", "expect_status": [200]},
+                            {"method": "GET", "path": "/e/", "expect_status": [200]}]}}]},
+        ensure_ascii=False), encoding="utf-8")
+    _ops13 = [{"op": "add_step", "cap": "cap.t", "step": 6,
+               "value": {"method": "POST", "path": "/new/", "expect_status": [201]}},
+              {"op": "set_field", "cap": "cap.t", "step": 2, "field": "expect_status",
+               "value": [409]},
+              {"op": "delete_step", "cap": "cap.t", "step": 3},
+              {"op": "set_json_key", "cap": "cap.t", "step": 4, "field": "expect_json",
+               "key": "status", "value": "done"}]
+    _m13, _ = _jf13.merge_patches([_ops13, _ops13], ws=_ws13)
+    _r13 = _jf13.apply_patch(_ws13, _m13)
+    _st13 = _j13.loads((_ws13 / ".sixcoder" / "blueprint.json").read_text(encoding="utf-8"))[
+        "caps"][0]["probe"]["steps"]
+    _paths = [s["path"] for s in _st13]
+    check("add_step step=len+1 不再 IndexError（旧版必崩点）", _r13["changed"] == 4, str(_r13))
+    check("set 按原编号生效（/b/ → 409）", _st13[1]["path"] == "/b/"
+          and _st13[1]["expect_status"] == [409], str(_paths))
+    check("delete 按原编号生效（/c/ 消失）", "/c/" not in _paths, str(_paths))
+    check("add_step 落在末尾且原编号不错位", _paths == ["/a/", "/b/", "/d/", "/e/", "/new/"],
+          str(_paths))
+    check("源码里 st 的取值只在非 add 分支（修复点钉死）",
+          "st = None if _is_add else steps[step - 1]" in
+          (Path(__file__).resolve().parent.parent / "core" / "judgefix.py")
+          .read_text(encoding="utf-8"))
+
+    print("[12] 协商崩溃不许静默（2026-11-19 实夜：IndexError + UnboundLocalError 互相掩盖）")
+    import tempfile as _tf12
+    from core import deadlock as _dl12
+    _ws12 = Path(_tf12.mkdtemp())
+    (_ws12 / ".sixcoder").mkdir(parents=True)
+    _orig12 = _dl12.negotiate
+    def _boom12(*a, **k):
+        raise IndexError("模拟 negotiate 崩溃")
+    _dl12.negotiate = _boom12
+    _st12 = _dl12.load_state(_ws12)
+    _st12.update({"state": "idle", "caps": ["c1"], "round": 5})
+    _dl12.save_state(_ws12, _st12)
+    try:
+        _dl12.on_oscillation(_ws12, 5, "t", caps=["c1"])
+        check("协商异常向上抛（不静默吞）", False)
+    except IndexError:
+        check("协商异常向上抛（不静默吞）", True)
+    finally:
+        _dl12.negotiate = _orig12
+    check("异常后状态回 idle（不卡在 negotiate 致机制整夜失效）",
+          _dl12.load_state(_ws12).get("state") == "idle",
+          str(_dl12.load_state(_ws12).get("state")))
+    _log12 = (_ws12 / ".sixcoder" / "unlock_log.jsonl")
+    _txt12 = _log12.read_text(encoding="utf-8") if _log12.exists() else ""
+    check("异常进台账且带 traceback（铁律 7：不许只留类型名）",
+          "deadlock_error" in _txt12 and "traceback" in _txt12)
+
+    _d12 = {"decision": "fix_judge", "tally": {"fix_judge": 2, "unlock": 1},
+            "votes": {"writer": "unlock", "reviewer1": "fix_judge", "reviewer2": "fix_judge"},
+            "vote_reasons": {"reviewer1": {"reason": "同一教师 201 后又要求 403",
+                                           "judge_fix": "第 5 步 403 改 409", "judge_patch": []},
+                             "reviewer2": {"reason": "status 词表不一致",
+                                           "judge_fix": "统一 done", "judge_patch": []}},
+            "judge_fixed": 0}
+    _todo12 = Path(_dl12._write_judge_todo(_ws12, _d12))
+    _tt12 = _todo12.read_text(encoding="utf-8")
+    check("处方为空时落可读 TODO（人不用去翻 JSON）",
+          _todo12.is_file() and "同一教师 201 后又要求 403" in _tt12 and "统一 done" in _tt12)
+    check("TODO 写明处理步骤", "blueprint.json" in _tt12 and "cli.py full" in _tt12)
+
     print("[11] 远端开处方 + 引擎安全执行（2026-11-19 用户口径）")
     import json as _j11
     import tempfile as _tf11
@@ -387,10 +463,13 @@ if __name__ == "__main__":
     ]}}]}
     (ws11 / ".sixcoder" / "blueprint.json").write_text(
         _j11.dumps(_bp11, ensure_ascii=False), encoding="utf-8")
+    # **编号语义（2026-11-19 定稿）**：处方里的 step 一律指**审核者看到的原蓝图**
+    # 编号（证据包 steps.n）；引擎先做 set、后做 add/delete（各自降序），保证
+    # 原编号全程不错位。想"删 403 步 + 给 200 步补断言"就这么写：
     _patch = [
         {"op": "delete_step", "cap": "cap.t", "step": 2},
-        {"op": "set_field", "cap": "cap.t", "step": 2, "field": "body_has", "value": ["真题"]},
-        {"op": "set_json_key", "cap": "cap.t", "step": 2, "field": "expect_json",
+        {"op": "set_field", "cap": "cap.t", "step": 3, "field": "body_has", "value": ["真题"]},
+        {"op": "set_json_key", "cap": "cap.t", "step": 3, "field": "expect_json",
          "key": "teacher_username", "value": "u_t"},
     ]
     _m, _ = _jf11.merge_patches([_patch, _patch], ws=ws11)

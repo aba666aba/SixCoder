@@ -406,6 +406,14 @@ def _night_inner(repo: Path, requirement: str, model: str,
         _pl_ws.set_current(repo)
     except Exception:                                # noqa: BLE001
         pass
+    # 夜班开局把项目账本真值同步回 night_spent.json 镜像（2026-11-19）。
+    # 该镜像按 goal 隔离、每轮拼契约会漂移 key → 卡在旧值撒谎，误导交付报告/patrol。
+    # 停机仍只读 project_ledger，这里只是让"报告总消费"的镜像不再走样。
+    try:
+        from . import auto as _auto_sync
+        _auto_sync.sync_spent_from_ledger(Path(repo), requirement)
+    except Exception:                                # noqa: BLE001
+        pass
     from . import permissions as _perms
     from . import policy as _policy
     pol = _policy.current()
@@ -969,14 +977,26 @@ def _night_inner(repo: Path, requirement: str, model: str,
             # 双闸并行（2026-11-11）：说清是**哪个闸**触发的。
             # 余额闸 = 官方事实（余额耗尽）；预算闸 = 引擎记账（估算）。
             _why = "系统总预算超额 5%，自动收工（详见交付报告）"
+            _by_balance = False
             try:
                 from . import balance as _bal
                 _hit, _bwhy = _bal.balance_exhausted()
                 if _hit:
+                    _by_balance = True
                     _why = ("**官方余额已耗尽**（%s）→ 自动收工"
                             "（余额是官方事实，比自算花费更硬）" % _bwhy)
             except Exception:                            # noqa: BLE001
                 pass
+            # **预算闸触发才升档**（2026-11-19 用户口径）：停一次后允许正常重启，
+            # 下次停机线 = 上一档 ×1.2（105→126→151.2…）。余额耗尽不升档——
+            # 没钱就是没钱，升线只会让它白跑一轮又停。
+            if not _by_balance:
+                try:
+                    _lvl = _be.bump_stop_level(ws)
+                    _thr = _be.stop_threshold(ws)
+                    _why += "（已升到第 %d 档，下次停机线 ¥%.2f）" % (_lvl, _thr)
+                except Exception:                        # noqa: BLE001
+                    pass
             reason = _why
             need_human = reason     # 预算/余额耗尽：继续跑也没钱，必须叫人
             if emit:
@@ -1001,6 +1021,16 @@ def _night_inner(repo: Path, requirement: str, model: str,
                             for _cid, _c in (_cov.get("caps") or {}).items():
                                 if str((_c or {}).get("status") or "") == "done":
                                     cap_done.add(_cid)
+                            # 失败现象快照（2026-11-19）：让死局协商能看到
+                            # "探针实际返回 vs 期望"的完整证据，而不是只看判据定义。
+                            # 只 I/O、不改蓝图/产物；失败只留痕不炸主流程。
+                            try:
+                                from . import coverage as _covmod
+                                _covmod.save_failures(ws, _cov)
+                            except Exception as exc:      # noqa: BLE001
+                                if emit:
+                                    emit("notice", {"message": "失败现象快照跳过：%s"
+                                                    % type(exc).__name__})
                             cap_red, cap_detail = _oh.red_modules(_cov, bp, ws=ws)
                             # **失败分诊**（2026-11-15）：先判"谁该修"，再决定要不要花钱。
                             # 实测依据（11-12 抽检 40 条）：85% 是"函数级全过、端到端红"，
@@ -1100,6 +1130,67 @@ def _night_inner(repo: Path, requirement: str, model: str,
             if _done_now is not None:
                 prev_done = _done_now if prev_done is None else max(prev_done, _done_now)
 
+            # 停滞型死局唤醒（2026-11-19）：端到端连续多轮不涨 + 根因反复改同一批文件。
+            # 这是 on_rollback / on_oscillation 都够不着的第三形状——卡住的能力本就
+            # absent（弄红不了绿能力→不回滚）、每轮换不同文件（指纹一直变→不振荡），
+            # 结果三方全程休眠、本地 rootcause 循环空转烧钱。
+            # stall_rounds 是跨策略累计值（stall 每轮换策略被清零，不能用它判停滞）。
+            # on_stall 内部有独立 attempts 守卫（最多 2 次），超次数会带 reason 返回，
+            # 这里放行到后面的 stall>=3 收工逻辑兜底，不会无限烧钱。
+            from . import deadlock as _dlmod_stall
+            if stall_rounds >= _dlmod_stall.STALL_WAKE_ROUNDS:
+                _sres: dict = {}
+                try:
+                    _red_caps = [str(k) for k, c in
+                                 ((cap_cov or {}).get("caps") or {}).items()
+                                 if str((c or {}).get("status") or "") != "done"]
+                    _sres = _dlmod_stall.on_stall(
+                        ws, rnd, "端到端连续 %d 轮无增长" % stall_rounds,
+                        caps=_red_caps, stall_rounds=stall_rounds, emit=emit)
+                except BaseException as _exc:              # noqa: BLE001
+                    _tb = "".join(__import__("traceback").format_exception(
+                        type(_exc), _exc, _exc.__traceback__))
+                    try:
+                        _dlmod_stall._log(ws, {"event": "deadlock_error",
+                                               "where": "company.on_stall",
+                                               "error": "%s: %s" % (type(_exc).__name__, _exc),
+                                               "traceback": _tb[-1800:]})
+                    except BaseException:                  # noqa: BLE001
+                        pass
+                    if emit:
+                        emit("notice", {"message": "停滞死局协商跳过：%s: %s"
+                                        % (type(_exc).__name__, str(_exc)[:120])})
+                if _sres.get("continue"):
+                    # 授予解锁 → 打法梯子重置，下一轮在解锁范围干活
+                    strategy_i = 0
+                    stall = 0
+                    strat = strategies[strategy_i]
+                    dec_used = write_used = 0
+                    continue
+                if _sres.get("judge_fixed") and int(_sres.get("changed") or 0) > 0:
+                    # 改判据决议：收工但不叫人，watchdog 续跑带新判据（同振荡处置口径）
+                    reason = ("停滞死局：判据已按三方投票修正（%d 处）→ 重启继续"
+                              % int(_sres.get("changed") or 0))
+                    if emit:
+                        emit("judge_fix_applied", {
+                            "changed": _sres.get("changed"),
+                            "notes": (_sres.get("notes") or [])[:12],
+                            "backup": _sres.get("backup") or "",
+                            "kind": "stall"})
+                    need_human = ""                       # 不叫人：让 watchdog 续跑
+                    break
+                if _sres.get("judge_fixed"):
+                    reason = "停滞死局：三方判判据有病但 0 处可改 → 停下等人工"
+                    need_human = reason
+                    break
+                # 真正走完协商且被拒（有 decision、无 reason 守卫键）→ 收工叫人，停止空转
+                if "decision" in _sres and "reason" not in _sres:
+                    reason = "停滞死局：三方未授权（%s）→ 停止空转" % _sres.get("decision")
+                    need_human = reason
+                    break
+                # 否则是守卫挡住（超次数/已在流程）→ 继续正常流程，
+                # 由后面的 stall>=3 收工逻辑兜底。
+
             # 振荡检测：回到来过的失败状态 = 这一轮改动没有净效果
             try:
                 # 2026-11-10：指纹必须带上**端到端能力状态**。
@@ -1126,6 +1217,12 @@ def _night_inner(repo: Path, requirement: str, model: str,
                         # 死局形状②（不是"被回滚"那种形状①）。交给三方协商决定是否
                         # 解锁重试——不问就收工，等于把三把 key 白配了。
                         _dl_cont = False
+                        # **必须先在 try 外初始化**（2026-11-19 实测事故）：
+                        # on_oscillation 抛异常时 _dlr 未定义，后面 `_dlr.get(...)`
+                        # 会再抛 UnboundLocalError → 被外层 except 吞成
+                        # "振荡检测跳过：UnboundLocalError" → **既不 continue 也不
+                        # break**，继续空转到下一轮。两个异常互相掩盖，机制整夜没生效。
+                        _dlr: dict = {}
                         try:
                             from . import deadlock as _dlmod2
                             _red_caps = [str(k) for k, c in
@@ -1139,8 +1236,20 @@ def _night_inner(repo: Path, requirement: str, model: str,
                                     "round": rnd, "caps": _red_caps[:12],
                                     "note": "死局协商授予解锁 → 继续跑（解锁轮修复+三方复审）"})
                         except BaseException as _exc:          # noqa: BLE001
+                            # **不许只打类型名**（铁律 7）：IndexError 是哪个下标、
+                            # 在哪一行，全靠 traceback。这里落盘一行，便于事后定位。
+                            _tb = "".join(__import__("traceback").format_exception(
+                                type(_exc), _exc, _exc.__traceback__))
+                            try:
+                                _dlmod2._log(ws, {"event": "deadlock_error",
+                                                  "round": rnd,
+                                                  "error": "%s: %s" % (type(_exc).__name__, _exc),
+                                                  "traceback": _tb[-1800:]})
+                            except BaseException:                  # noqa: BLE001
+                                pass
                             if emit:
-                                emit("notice", {"message": "死局协商跳过：%s" % type(_exc).__name__})
+                                emit("notice", {"message": "死局协商跳过：%s: %s"
+                                                % (type(_exc).__name__, str(_exc)[:120])})
                         if _dl_cont:
                             # 继续跑：把打法梯子重置，下一轮在解锁范围内大胆修
                             strategy_i = 0
@@ -1959,8 +2068,10 @@ def _night_inner(repo: Path, requirement: str, model: str,
                                    "stubs": sorted(v["stubs"])} for k, v in final.items()},
                       delivery_path=str(delivery), reason=reason or "完成",
                       spent_s=round(time.time() - t0, 1), need_human=need_human)
-    # 日志固定写到仓库根的 _logs/，不跟随 cwd（否则从不同目录启动会散成好几处，实测踩过）
-    logs = Path(__file__).resolve().parent.parent.parent / "_logs"
+    # 日志固定写到运行期数据目录的 _logs/（开发态=仓库根，安装版=%LOCALAPPDATA%\SixCoder），
+    # 不跟随 cwd（否则从不同目录启动会散成好几处，实测踩过）
+    from . import paths as _paths
+    logs = _paths.logs_dir()
     logs.mkdir(parents=True, exist_ok=True)
     (logs / f"night-{task_id}.json").write_text(
         json.dumps({"result": res.__dict__, "curve": workorder.progress_curve(task_id)},
@@ -3177,7 +3288,11 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                   "但**端点路径必须与上面完全一致**。\n"
                   "**已验收的函数必须原样保留**（它们已通过机械判据，改坏了会被回滚）："
                   "只新增/改写端点相关的那部分，其余函数逐字不动。\n")
-        if granular in ("bodies", "line", "patch"):
+        # **前端组件直接走整文件模式**（2026-11-19 生态包）：author_bodies 那套是
+        # "只写函数体 + 引擎缩进"，对 JSX/Vue（import + export default 的整份组件）
+        # 根本不适用，白跑一次还必然失败。直接 author_module（整文件 JSON files）。
+        _is_frontend_file = str(rel).endswith((".jsx", ".tsx", ".vue"))
+        if granular in ("bodies", "line", "patch") and not _is_frontend_file:
             r = _author.author_bodies(ws, rel, contracts.get(rel), contracts, model_plan=_mod_plan,
                                       step_index=lvl, task_id=task_id, emit=emit,
                                       local_model=local_model, workingset=ws_text,

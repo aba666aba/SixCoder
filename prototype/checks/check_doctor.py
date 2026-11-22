@@ -63,6 +63,27 @@ def main() -> int:
     check("给了修法（移出易变内容）", "稳定前缀" in w.fix or "易变" in w.fix, w.fix)
     check("带证据（哪一次）", bool(w.evidence), w.evidence)
 
+    print("[4b] token 加权口径（2026-11-19：按次/按任务会被小调用绑架，测的是影子）")
+    # 真实形态：小调用（6 千 token、命中 2%）+ 大调用（17 万 token、命中 70%）
+    mixed = [_run("handoff", 128, 6130), _run("handoff", 128, 6130),
+             _run("whole_repo", 124000, 178000), _run("whole_repo", 130000, 178000)]
+    wt = doctor.weighted_trend(mixed)
+    check("加权不被小调用绑架（应≈69%，不是 2%）",
+          wt["enough"] and wt["overall"] > 0.6, str(wt))
+    check("大调用占比高的窗口不判下滑（drop 为负不能报警）",
+          not wt["regressed"] and wt["drop"] < 0, str(wt))
+    t2_runs = [_run("big", 120000, 178000)] * 3 + [_run("big", 20000, 178000)]
+    wt2 = doctor.weighted_trend(t2_runs)
+    check("大调用真掉档 → 判下滑（25 个百分点）",
+          wt2["regressed"] and wt2["drop"] >= doctor.CACHE_DROP_ALERT, str(wt2))
+    fs2 = doctor.cache_doctor(Path("."), t2_runs)
+    w2 = [f for f in fs2 if f.level == "warn"]
+    check("报警文案写明口径是 token 加权（不让人误读成按次）",
+          bool(w2) and "加权" in w2[0].what, w2[0].what if w2 else "")
+    check("正常文案也写明口径 + 前后半窗",
+          "加权" in doctor.cache_doctor(Path("."), mixed)[0].what,
+          doctor.cache_doctor(Path("."), mixed)[0].what)
+
     print("[5] doc_doctor：抓超长指南 / 失效引用 / 目录过期 / TODO")
     with _sandbox_temp() as td:
         ws = Path(td)

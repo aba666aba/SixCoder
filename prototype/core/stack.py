@@ -207,6 +207,15 @@ class StackAdapter:
         """这个栈的应用是不是标准 ASGI（决定判据端用 TestClient 还是 httpx 传输）。"""
         return True
 
+    def web_rules(self) -> str:
+        """这个栈的**能力表探针约定**（喂给远端推导蓝图时的那段规则）。
+
+        返回空串 = 用 blueprint.web_rules 的内置分支（FastAPI/Django）。
+        生态包（如前端 SPA）覆写它，就能让自己的探针约定（browser 探针）
+        直接进推导提示词 —— 不用改 blueprint（2026-11-19）。
+        """
+        return ""
+
 
 # ------------------------------------------------------------------ FastAPI 适配器
 # 把现有实现**原样搬进来** —— 输出必须与改动前逐字一致（回归铁律）。
@@ -705,12 +714,26 @@ def detect(ws) -> str:
     → **一条都落不下，还全绿**。
 
     判据（先强特征，后弱特征，取不到就 fastapi）：
+      · **生态包**（2026-11-19）：先按各包 detect_markers 判 —— 它们用的是比
+        "有个 main.py"更具体的特征（如 celery 配置、electron/main.cjs），
+        普通 FastAPI/Django 仓不会命中，所以不会被抢判；
       · Django：有 `manage.py`，且存在 `config/settings.py` / `project/settings.py` /
         任意 `<pkg>/settings.py`
       · FastAPI：有 `app/main.py`（且没有 manage.py）
     """
     ws = Path(ws)
     try:
+        # **生态包强特征优先**（2026-11-19）：像 microservice（docker-compose/celery）
+        # 这类项目同时有 `app/main.py`，若先跑内置 fastapi 分会话规则就永远抢不到。
+        # 强特征（docker-compose / celery 配置）比"有个 main.py"更具体，先判。
+        # 普通 FastAPI 项目没有这些 marker，不会被抢。
+        try:
+            from . import ecosystem as _eco
+            for _row in (_eco.list_packs() or []):
+                if _row.get("kind") == "stack" and _eco.detect(_row["name"], ws):
+                    return str(_row["name"])
+        except Exception:                                # noqa: BLE001
+            pass
         if (ws / "manage.py").is_file():
             for cand in ("config/settings.py", "project/settings.py"):
                 if (ws / cand).is_file():

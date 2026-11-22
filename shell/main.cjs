@@ -8,13 +8,16 @@
  *
  * 它不含任何业务逻辑：所有能力都在 Python 侧（权限/闸门/沙箱/审查/Git）。
  */
-const { app, BrowserWindow, dialog, shell, Menu, ipcMain } = require('electron')
-const { spawn } = require('child_process')
+const { app, BrowserWindow, dialog, shell, Menu, ipcMain, Tray, nativeImage } = require('electron')
+const { spawn, spawnSync } = require('child_process')
 const path = require('path')
 const net = require('net')
 const fs = require('fs')
+const os = require('os')
 
-const PORT = Number(process.env.SIXCODER_PORT || 8760)
+// 端口不是写死的：8760 被别的程序占用时自动往后找空闲端口，保证双击就能起。
+const BASE_PORT = Number(process.env.SIXCODER_PORT || 8760)
+let PORT = BASE_PORT
 
 // 打包后（安装版）资源在 process.resourcesPath 下：
 //   resources/python/python.exe     ← 随包附带的便携式 Python（用户不需要自己装）
@@ -25,16 +28,35 @@ const RES = process.resourcesPath || path.join(__dirname, '..')
 const BACKEND_DIR = process.env.SIXCODER_BACKEND
   || (IS_PACKED ? path.join(RES, 'prototype') : path.join(__dirname, '..', 'prototype'))
 
+// 运行期可变数据（日志/数据库/账本）放这里，与安装目录分离：
+// 卸载默认删程序本体 + 这个目录；勾选「保留仓库历史」时只删程序本体，数据原样留存。
+// 开发态不设（沿用仓库根），零迁移。
+const DATA_HOME = process.env.SIXCODER_HOME
+  || (IS_PACKED ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'SixCoder') : '')
+if (DATA_HOME) process.env.SIXCODER_HOME = DATA_HOME
+
 // Python 解释器：显式环境变量 → 包内自带（安装版）→ 本机已知位置 → PATH 里的 python
+// 每一档都先 `-c "import sys"` 试一下：包内 Python 被杀软拦截/缺 DLL 时，
+// 直接 spawn 只会看到"后端退出"，错误页却不知道原因。试不活的档位跳过，留好记录。
+function pythonWorks(exe) {
+  try {
+    const r = spawnSync(exe, ['-c', 'import sys; print(sys.version.split()[0])'], {
+      timeout: 5000, windowsHide: true, encoding: 'utf8',
+    })
+    return r.status === 0
+  } catch { return false }
+}
+
 function pickPython() {
-  if (process.env.SIXCODER_PYTHON && fs.existsSync(process.env.SIXCODER_PYTHON)) {
-    return process.env.SIXCODER_PYTHON
+  const cands = []
+  if (process.env.SIXCODER_PYTHON) cands.push(process.env.SIXCODER_PYTHON)
+  cands.push(path.join(RES, 'python', 'python.exe'))
+  cands.push('D:\\Python\\python.exe', 'C:\\Python312\\python.exe', 'C:\\Python311\\python.exe', 'python')
+  for (const exe of cands) {
+    if (exe.includes('\\') && !fs.existsSync(exe)) continue
+    if (pythonWorks(exe)) return exe
   }
-  const bundled = path.join(RES, 'python', 'python.exe')
-  if (fs.existsSync(bundled)) return bundled
-  const guesses = ['D:\\Python\\python.exe', 'C:\\Python312\\python.exe', 'C:\\Python311\\python.exe']
-  for (const g of guesses) { if (fs.existsSync(g)) return g }
-  return 'python'
+  return path.join(RES, 'python', 'python.exe')   // 都不可用：保留包内路径，错误页好指认
 }
 const PYTHON = pickPython()
 
@@ -42,6 +64,8 @@ let win = null
 let backend = null
 let backendLog = []
 let lastError = ''
+let backendExitCode = null
+let portOccupiedBy = []
 
 function spawnBackend() {
   const entry = path.join(BACKEND_DIR, 'server.py')
@@ -56,13 +80,15 @@ function spawnBackend() {
   }
   backend = spawn(PYTHON, [entry, '--port', String(PORT)], {
     cwd: BACKEND_DIR,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1',
+           ...(DATA_HOME ? { SIXCODER_HOME: DATA_HOME } : {}) },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   const push = (d) => {
     const s = String(d)
     backendLog.push(s)
     if (backendLog.length > 200) backendLog.shift()
+    writeBackendLog(s)
     process.stdout.write(`[backend] ${s}`)
   }
   backend.stdout.on('data', push)
@@ -74,47 +100,144 @@ function spawnBackend() {
     console.error('[shell] 后端启动失败:', lastError)
   })
   backend.on('close', (code) => {
-    console.log(`[shell] 后端退出 code=${code}`)
+    backendExitCode = code
+    console.log(`[shell] 后端退出 code=${code}  日志：${BACKEND_LOG_FILE}`)
+    writeBackendLog(`--- 后端进程退出 code=${code} ---\n`)
     backend = null
   })
 }
 
-function waitForPort(host, port, retries = 60) {
-  return new Promise((resolve, reject) => {
-    const probe = (left) => {
-      const sock = new net.Socket()
-      sock.setTimeout(800)
-      sock.connect(port, host, () => { sock.destroy(); resolve(true) })
-        .on('error', () => {
-          sock.destroy()
-          if (left <= 0) return reject(new Error('timeout'))
-          setTimeout(() => probe(left - 1), 500)
+/* 真健康检查：光用 TCP connect 判断"端口通了"是不够的——别的程序占了端口时
+   TCP 也通，会被误当成后端已就绪，然后 loadURL 加载出别人的页面（全蓝、无按钮）。
+   这里真发 HTTP GET /v1/health，并校验返回体里 app==='sixcoder'，
+   确认端口上跑的确实是本软件的后端。返回三态：'ours' | 'foreign' | 'off'。 */
+function probeHealth(port, timeoutMs = 1000) {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (v) => { if (!settled) { settled = true; req.destroy(); resolve(v) } }
+    const req = require('http').get(
+      { host: '127.0.0.1', port, path: '/v1/health', timeout: timeoutMs },
+      (res) => {
+        let body = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => { body += chunk; if (body.length > 4096) done('foreign') })
+        res.on('end', () => {
+          try {
+            const j = JSON.parse(body)
+            done(j && j.ok === true && j.app === 'sixcoder' ? 'ours' : 'foreign')
+          } catch { done('foreign') }
         })
-        .on('timeout', () => {
-          sock.destroy()
-          if (left <= 0) return reject(new Error('timeout'))
-          setTimeout(() => probe(left - 1), 500)
-        })
-    }
-    probe(retries)
+      })
+    req.on('timeout', () => done('off'))
+    req.on('error', () => done('off'))
   })
 }
 
-function errorPage(title, lines) {
-  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+// 等待某个端口上的**本软件后端**就绪（不是只要有东西监听就算）。
+function waitForBackend(port, retries = 60) {
+  return new Promise(async (resolve) => {
+    for (let i = 0; i < retries; i++) {
+      const st = await probeHealth(port, 800)
+      if (st === 'ours') return resolve(true)
+      if (st === 'foreign') return resolve(false)  // 被别的程序占了，别再等
+      await new Promise((r) => setTimeout(r, 500))
+    }
+    resolve(false)
+  })
+}
+
+// 选端口：优先用 BASE_PORT；被占用则依次 +1，找到第一个空闲端口给后端用。
+// 若 BASE_PORT 上已经是我们自己的后端（重复双击 / 手动起过），直接复用。
+async function choosePort() {
+  const state = await probeHealth(BASE_PORT)
+  if (state === 'ours') return { port: BASE_PORT, reuse: true, occupied: [] }
+  const occupied = []
+  for (let p = BASE_PORT; p < BASE_PORT + 20; p++) {
+    const free = await new Promise((resolve) => {
+      const sock = new net.Socket()
+      sock.setTimeout(600)
+      sock.on('error', () => { sock.destroy(); resolve(true) })
+      sock.on('timeout', () => { sock.destroy(); resolve(false) })
+      sock.connect(p, '127.0.0.1', () => { sock.destroy(); resolve(false) })
+    })
+    if (free) return { port: p, reuse: false, occupied }
+    occupied.push(p)
+    console.log(`[shell] 端口 ${p} 已被占用，尝试下一个`)
+  }
+  return { port: BASE_PORT, reuse: false, occupied, exhausted: true }
+}
+
+// 后端 stderr/stdout 落盘：远程机器出问题时能拿到真实原因（原来只在内存里，窗口一关就没了）。
+const LOG_DIR = DATA_HOME ? path.join(DATA_HOME, '_logs')
+  : path.join(BACKEND_DIR, '..', '_logs')
+const BACKEND_LOG_FILE = path.join(LOG_DIR, 'backend-shell.log')
+function writeBackendLog(s) {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true })
+    fs.appendFileSync(BACKEND_LOG_FILE, `[${new Date().toISOString()}] ${s}`)
+  } catch (e) { /* 日志写不进去也不能挡住启动 */ }
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+/* 后端起不来时，把"为什么"写清楚：别的机器上最常见的不是代码问题，而是
+   内置 Python 被杀软拦截 / 缺系统运行库 / 依赖装不全。这里逐项真跑一遍，
+   结果写进 startup-diagnose.txt，用户直接发回来就能定位。 */
+function diagnoseBackend() {
+  const out = []
+  const entry = path.join(BACKEND_DIR, 'server.py')
+  const webIndex = path.join(BACKEND_DIR, 'web', 'dist', 'index.html')
+  out.push(`OS: ${process.getSystemVersion ? process.getSystemVersion() : process.version} ${process.arch}`)
+  out.push(`Electron: ${process.versions.electron || '-'} / Node ${process.versions.node}`)
+  out.push(`RES: ${RES}`)
+  out.push(`Python: ${PYTHON}  exists=${fs.existsSync(PYTHON)}`)
+  out.push(`server.py: ${entry}  exists=${fs.existsSync(entry)}`)
+  out.push(`web/dist/index.html: ${webIndex}  exists=${fs.existsSync(webIndex)}`)
+  out.push(`SIXCODER_HOME: ${DATA_HOME || '(repo root)'}`)
+
+  const run = (code, timeout) => {
+    const r = spawnSync(PYTHON, ['-c', code], {
+      cwd: BACKEND_DIR, timeout, windowsHide: true, encoding: 'utf8',
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    })
+    const err = r.error ? `${r.error.code || ''} ${r.error.message}` : ''
+    return `code=${r.status} signal=${r.signal || '-'} ${err}\n${(r.stdout || '').trim()}\n${(r.stderr || '').trim()}`
+  }
+  out.push('\n[python -c import sys]\n' + run('import sys; print(sys.version); print(sys.executable)', 10000))
+  out.push('\n[import runtime deps]\n' + run(
+    'import fastapi, uvicorn, pydantic, starlette, libcst, httpx, tokenizers, coverage, psutil; print("deps OK")',
+    30000))
+  const text = out.join('\n')
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true })
+    fs.writeFileSync(path.join(LOG_DIR, 'startup-diagnose.txt'), text)
+  } catch { /* 诊断写不进去也不能挡错误页 */ }
+  return text
+}
+
+function errorPage(title, lines) {  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
     body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
          background:#0d1017;color:#d7dee9;font:14px/1.8 "Microsoft YaHei",system-ui}
-    .box{max-width:620px;padding:28px 32px;background:#151a23;border:1px solid #262d3a;border-radius:12px}
+    .box{max-width:680px;padding:28px 32px;background:#151a23;border:1px solid #262d3a;border-radius:12px}
     h1{font-size:18px;margin:0 0 6px}
     .bar{width:56px;height:3px;background:#4f8cff;margin:12px 0 16px}
     code{background:#1b212c;padding:2px 6px;border-radius:4px;font-family:Consolas,monospace}
-    li{margin:4px 0;color:#8792a6}
+    li{margin:4px 0;color:#aab4c6}
     .hint{margin-top:16px;color:#8792a6;font-size:12.5px}
+    button{margin-top:14px;padding:8px 16px;background:#4f8cff;color:#fff;border:0;border-radius:6px;cursor:pointer;font-size:13px}
   </style></head><body><div class="box">
     <h1>${title}</h1><div class="bar"></div>
     <ul>${lines.map((l) => `<li>${l}</li>`).join('')}</ul>
-    <div class="hint">排错顺序：① Ollama 是否运行（<code>ollama serve</code>）→ ② 端口 ${PORT} 是否被占用
-    → ③ Python 是否可用。<br/>详细日志可在终端查看（本窗口关闭后进程会一并退出）。</div>
+    <div class="hint">
+      <b>先看清原因再动手：</b>是否装了 Ollama <b>不影响启动</b>（只在用本地模型时才需要）。<br/>
+      常见原因按概率：① 后端 Python 启动报错 → 看日志最后几行；② 内置 Python 被杀毒软件拦截；
+      ③ 端口全被占用。<br/>
+      完整日志：<code>${BACKEND_LOG_FILE}</code>（菜单「日志与数据 → 打开日志目录」可直接打开）。
+    </div>
+    <button onclick="location.reload()">重试启动</button>
   </div></body></html>`
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
 }
@@ -125,6 +248,7 @@ async function createWindow() {
     title: 'SixCoder',
     backgroundColor: '#0d1017',
     autoHideMenuBar: true,
+    icon: trayIconPath(),          // 任务栏/标题栏图标（托盘同一个）
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -133,17 +257,96 @@ async function createWindow() {
   })
 
   try {
-    await waitForPort('127.0.0.1', PORT)
+    const ready = await waitForBackend(PORT)
+    if (!ready) throw new Error('后端未就绪')
     await win.loadURL(`http://127.0.0.1:${PORT}`)
-    console.log('[shell] 已加载界面')
+    console.log(`[shell] 已加载界面（端口 ${PORT}）`)
   } catch (e) {
-    const lines = [`后端在 60 秒内没有在端口 ${PORT} 就绪`]
+    const lines = [`后端未能在端口 ${PORT} 就绪（日志：<code>${BACKEND_LOG_FILE}</code>）`]
     if (lastError) lines.unshift(lastError)
-    if (/EADDRINUSE/.test(backendLog.join(''))) lines.unshift(`端口 ${PORT} 已被占用`)
-    if (backendLog.length) lines.push(`最近日志：<code>${backendLog.slice(-3).join(' ').slice(0, 240)}</code>`)
+    if (/EADDRINUSE/.test(backendLog.join(''))) lines.unshift('首选端口被占用且没有可用备用端口')
+    if (portOccupiedBy.length) lines.push(`已被占用、自动跳过的端口：${portOccupiedBy.join('、')}`)
+    if (backendExitCode !== null) lines.push(`后端进程退出码：<code>${backendExitCode}</code>`)
+    if (backendLog.length) lines.push(`最近日志：<code>${backendLog.slice(-4).join(' ').slice(-320)}</code>`)
+    const diag = diagnoseBackend()
+    const diagFile = path.join(LOG_DIR, 'startup-diagnose.txt')
+    lines.push(`启动诊断（已写入 <code>${diagFile}</code>）：<pre style="max-height:220px;overflow:auto;white-space:pre-wrap;background:#0b0e14;border:1px solid #262d3a;border-radius:6px;padding:8px;font:11px/1.6 Consolas,monospace;color:#aab4c6">${esc(diag)}</pre>`)
+    writeBackendLog(`--- 错误页：${lines.join(' | ')} ---\n`)
     await win.loadURL(errorPage('后端启动失败', lines))
   }
+  // 叉号 = 收进托盘（不是退出）。真退出只有两条：托盘菜单「退出 SixCoder」、系统关机。
+  win.on('close', (e) => {
+    if (isQuitting) return
+    e.preventDefault()
+    hideToTray(!trayHinted)
+    trayHinted = true
+  })
   win.on('closed', () => { win = null })
+}
+
+/* ---------------- 系统托盘：关闭 = 收进托盘，托盘里才真退出 ----------------
+   为什么要这样（2026-11-21 用户口径："关闭自动到托盘，托盘退出"）：
+   夜班是独立进程，关窗本来就不中断；但窗口一关就没法看进度、也没法点停止，
+   只能去任务管理器找。收进托盘后：叉号只是隐藏，左键点图标就回来；
+   真正退出走托盘菜单，退出时会明确提示夜班仍在跑（它不在应用进程树里）。 */
+let tray = null
+let isQuitting = false
+let trayHinted = false
+
+function trayIconPath() {
+  const cands = [
+    path.join(__dirname, 'build', 'icon.ico'),
+    path.join(__dirname, '..', 'shell', 'build', 'icon.ico'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'icon.ico') : '',
+    process.resourcesPath ? path.join(process.resourcesPath, 'app.asar.unpacked', 'build', 'icon.ico') : '',
+  ].filter(Boolean)
+  for (const p of cands) {
+    try { if (fs.existsSync(p)) return p } catch { /* 忽略 */ }
+  }
+  return undefined
+}
+
+function showWindow() {
+  if (!win) { createWindow(); return }
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+function createTray() {
+  if (tray) return tray
+  try {
+    const p = trayIconPath()
+    tray = new Tray(p ? nativeImage.createFromPath(p) : nativeImage.createEmpty())
+    tray.setToolTip('SixCoder（夜班在后台跑，点这里回来）')
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: '显示主窗口', click: showWindow },
+      { label: '打开日志目录', click: () => { try { shell.openPath(LOG_DIR) } catch { /* 忽略 */ } } },
+      { type: 'separator' },
+      { label: '退出 SixCoder', click: () => { isQuitting = true; app.quit() } },
+    ]))
+    tray.on('click', showWindow)
+    tray.on('double-click', showWindow)
+  } catch (e) {
+    console.warn('[shell] 托盘创建失败（不影响主窗口）:', e.message)
+    tray = null
+  }
+  return tray
+}
+
+function hideToTray(firstTime) {
+  if (!win) return
+  win.hide()
+  const t = createTray()
+  if (firstTime && t) {
+    // 第一次收进托盘时提示一次：否则用户以为软件已经退了
+    try {
+      t.displayBalloon({
+        title: 'SixCoder 仍在后台',
+        content: '窗口已收进托盘；夜班继续跑。左键点托盘图标回来，右键可退出。',
+      })
+    } catch { /* 部分系统不支持气泡，静默 */ }
+  }
 }
 
 /* ---------------- 原生能力（浏览器做不到的部分） ---------------- */
@@ -210,6 +413,8 @@ ipcMain.handle('shell-info', () => ({
   backendPort: PORT,
   backendDir: BACKEND_DIR,
   python: PYTHON,
+  dataHome: DATA_HOME || '',
+  packaged: IS_PACKED,
 }))
 
 function buildMenu() {
@@ -220,7 +425,35 @@ function buildMenu() {
         { label: '重新加载界面', accelerator: 'F5', click: () => win && win.reload() },
         { label: '开发者工具', accelerator: 'F12', click: () => win && win.webContents.toggleDevTools() },
         { type: 'separator' },
+        {
+          // 原 start.ps1 -Web 的等价物：把同一个界面交给系统浏览器
+          label: '在浏览器中打开',
+          accelerator: 'Ctrl+Shift+B',
+          click: () => shell.openExternal(`http://127.0.0.1:${PORT}`),
+        },
+        { type: 'separator' },
         { label: '退出', accelerator: 'Ctrl+Q', role: 'quit' },
+      ],
+    },
+    {
+      label: '日志与数据',
+      submenu: [
+        {
+          label: '打开日志目录',
+          click: () => {
+            const dir = DATA_HOME ? path.join(DATA_HOME, '_logs') : path.join(BACKEND_DIR, '..', '_logs')
+            fs.mkdirSync(dir, { recursive: true })
+            shell.openPath(dir)
+          },
+        },
+        {
+          label: '打开数据目录',
+          click: () => {
+            if (DATA_HOME) { fs.mkdirSync(DATA_HOME, { recursive: true }); shell.openPath(DATA_HOME) }
+            else shell.openPath(path.join(BACKEND_DIR, 'data'))
+          },
+        },
+        { label: '打开安装目录', click: () => shell.openPath(BACKEND_DIR) },
       ],
     },
     {
@@ -230,43 +463,99 @@ function buildMenu() {
           label: '打开文档目录',
           click: () => shell.openPath(path.join(BACKEND_DIR, '..', 'docs')),
         },
-        {
-          label: '打开原型目录',
-          click: () => shell.openPath(BACKEND_DIR),
-        },
       ],
     },
   ]))
 }
 
-/* ---------------- 单实例 ---------------- */
-if (!app.requestSingleInstanceLock()) {
+/* ---------------- 安装期环境准备（--env-setup） ----------------
+   安装器的可选组件页调用 `SixCoder.exe --env-setup --ollama --model`。
+   **不再有 env-setup.ps1**：逻辑全在 prototype/tools/env_setup.py，只有一份实现。
+   这里只负责开一个新控制台窗口让用户看到下载进度，不建界面、不启后端。 */
+const ENV_SETUP = process.argv.includes('--env-setup')
+/* ---------------- 安装期：自带运行时下载（--install-runtime） ----------------
+   安装器勾选了 Python/JDK/Go/MinGW 时调用：
+       SixCoder.exe --install-runtime python@3.13 java@21
+   逻辑全在 prototype/core/runtimes.py（清单/多源下载/解压/真跑一次校验），
+   这里只负责"开一个新控制台让用户看到进度"。 */
+const INSTALL_RUNTIME = process.argv.includes('--install-runtime')
+if (INSTALL_RUNTIME) {
+  const specs = process.argv.filter((a) => /^(python|java|go|mingw|git)@[\w.]+$/.test(a))
+  app.whenReady().then(() => {
+    if (!specs.length) { app.quit(); return }
+    try {
+      const child = spawn('cmd.exe',
+        ['/c', 'start', 'SixCoder 运行时安装', '/D', BACKEND_DIR,
+          PYTHON, '-m', 'core.runtimes', 'install', ...specs],
+        { windowsHide: false, detached: true, stdio: 'ignore',
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1',
+                 ...(DATA_HOME ? { SIXCODER_HOME: DATA_HOME } : {}) } })
+      child.unref()
+    } catch (e) {
+      dialog.showErrorBox('运行时安装失败', String(e && e.message || e))
+    }
+    app.quit()
+  })
+} else if (ENV_SETUP) {
+  const want = []
+  if (process.argv.includes('--ollama')) want.push('--ollama')
+  if (process.argv.includes('--model')) want.push('--model')
+  app.whenReady().then(() => {
+    const script = path.join(BACKEND_DIR, 'tools', 'env_setup.py')
+    if (!want.length) { app.quit(); return }
+    if (!fs.existsSync(script)) {
+      dialog.showErrorBox('环境准备失败', `找不到脚本：${script}`)
+      app.quit(); return
+    }
+    try {
+      const child = spawn('cmd.exe',
+        ['/c', 'start', 'SixCoder 环境准备', '/D', BACKEND_DIR, PYTHON, script, ...want],
+        { windowsHide: false, detached: true, stdio: 'ignore',
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1',
+                 ...(DATA_HOME ? { SIXCODER_HOME: DATA_HOME } : {}) } })
+      child.unref()
+    } catch (e) {
+      dialog.showErrorBox('环境准备失败', String(e && e.message || e))
+    }
+    app.quit()
+  })
+} else if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (win) { if (win.isMinimized()) win.restore(); win.focus() }
+    showWindow()
   })
 
   app.whenReady().then(async () => {
     buildMenu()
-    // 先探测端口：已有后端就复用（避免 EADDRINUSE 让窗口直接退出），
-    // 并清掉 Chromium 缓存，保证每次打开都拿到最新前端（实测旧页面缓存导致"改了看不到"）
-    try {
-      await waitForPort('127.0.0.1', PORT, 2)
-      global.__backendAlreadyUp = true
-    } catch { global.__backendAlreadyUp = false }
+    // 先选端口：8760 上若已是本软件后端就复用；被别的程序占了就自动 +1 找空闲端口。
+    // 关键是"真健康检查"——不能只看 TCP 通不通，否则会把占端口的别人的页面加载进来。
+    const choice = await choosePort()
+    PORT = choice.port
+    portOccupiedBy = choice.occupied || []
+    global.__backendAlreadyUp = !!choice.reuse
+    if (choice.exhausted) {
+      lastError = `端口 ${BASE_PORT} 起连续 20 个端口都被占用，无法启动后端`
+    }
+    console.log(`[shell] 端口选择：${PORT}  复用已有后端=${!!choice.reuse}  跳过=${portOccupiedBy.join(',') || '无'}`)
+    // 清掉 Chromium 缓存，保证每次打开都拿到最新前端（实测旧页面缓存导致"改了看不到"）
     try {
       const { session } = require('electron')
       await session.defaultSession.clearCache()
     } catch (e) { console.warn('[shell] 清缓存失败:', e.message) }
     spawnBackend()
     await createWindow()
-    app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
+    createTray()                                  // 托盘常驻，随时能点回来
+    app.on('activate', () => { showWindow() })
   })
 }
 
-app.on('window-all-closed', () => app.quit())
+// 窗口全关也不退出（收进托盘时窗口只是隐藏；真退出走托盘菜单/关机）
+app.on('window-all-closed', () => {
+  if (isQuitting) app.quit()
+})
 app.on('before-quit', () => {
+  isQuitting = true
   if (backend && !backend.killed) {
     console.log('[shell] 关闭后端')
     backend.kill()

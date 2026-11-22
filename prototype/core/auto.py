@@ -113,6 +113,35 @@ def _save_spent(ws: Path, goal: str, total: float) -> None:
         pass
 
 
+def sync_spent_from_ledger(ws: Path, goal: str) -> float:
+    """把项目账本真值同步回 night_spent.json 镜像（2026-11-19）。
+
+    背景：night_spent.json 按 goal 隔离，而夜班每轮拼契约文本会改变 goal，
+    导致 key 漂移、这个"报告总消费"的镜像卡在旧值（实测卡在 7 天前的 ¥50.92，
+    真值已 ¥123+）。停机不读它（读 project_ledger），但它撒谎会误导数出报告、
+    patrol 监控和人工排查。
+
+    做法：夜班开局时读 project_ledger.total()（明细派生的真值），用**当前 goal 的
+    key** 写回镜像。只升不降——镜像低于真值时抬上来；真值取不到（None）时不动。
+    返回写回后的镜像值。异常只吞不留痕于账本之外，绝不影响夜班主流程。
+
+    不碰 goal 隔离语义（check_night_budget 钉住）：换需求仍是新一届，只是这一届
+    开局先继承仓库累计的真值——与 "换需求≠换项目、额度按仓库" 的定稿一致。
+    """
+    try:
+        from . import project_ledger as _pl
+        true_val = _pl.total(ws)
+    except Exception:                                    # noqa: BLE001
+        true_val = None
+    if true_val is None:
+        return _load_spent(ws, goal)
+    mirror = _load_spent(ws, goal)
+    if float(true_val) > mirror + 1e-9:                  # 只升不降
+        _save_spent(ws, goal, float(true_val))
+        return float(true_val)
+    return mirror
+
+
 def _contract_funcs(text: str) -> int:
     from . import contractgen
     mods = contractgen.contract_mod.parse_requirement(text or "")

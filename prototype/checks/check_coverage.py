@@ -288,6 +288,16 @@ def main() -> int:
     keep = coverage.mark(bp10, cov10)
     check("降级状态不会被一次通过偷偷撤销",
           keep.by_id("cap.store.record").status in ("descoped", "done"))
+    # 2026-11-19：旧代码在 only 显式点名时会把 descoped 重新观测成 absent，
+    # 引擎于是为已废弃判据反复派单。descoped 是终态，不该被一次观测复活。
+    cov_d = coverage.run(bp10, ws10, only=["cap.store.record"])
+    dstat = cov_d["caps"].get("cap.store.record", {}).get("status")
+    check("only 点名也不复活已降级能力", dstat == "descoped", str(dstat))
+    cov_d2 = coverage.run(bp10, ws10, only=["cap.store.record"],
+                          include_descoped=True)
+    check("显式 include_descoped 才重评（保留重评出口）",
+          cov_d2["caps"].get("cap.store.record", {}).get("status") != "descoped",
+          str(cov_d2["caps"].get("cap.store.record")))
     weird = coverage.run(bp_of([{"id": "cap.http", "desc": "接口可用",
                                  "probe": {"kind": "http", "path": "/x"}, "funcs_est": 2}]),
                          make_ws())
@@ -356,6 +366,157 @@ def main() -> int:
     check("工作单链也带实际响应（不被 red_modules 的 [:300] 吃掉）",
           "实际响应" in _all_ev and "total=0" in _all_ev,
           "mods=%s ev=%s" % (_mods, _all_ev[:200]))
+
+    print("[10b] 字符串形态的 json 请求体也要如实展示（2026-11-19 实测事故）")
+    # 探针写成 `"json": "{\"students\":...}"`（字符串而非对象）时，旧渲染层
+    # `body = st["json"] if isinstance(dict) else st["data"]` 得 None →
+    # 打印「(该步无 json 请求体)」。**这是假的**：请求体确实发了，只是以字符串
+    # 形态发出。远端因此坚信"probe 没传数据"，去改本来正确的产物规则改了 5 轮。
+    str_probe = {"kind": "http", "steps": [
+        {"method": "POST", "path": "/api/v1/rules/pre-filter/",
+         "json": '{"students": [{"username": "stu1", "gpa": 2.0}], '
+                 '"topics": [{"code": "PF1", "min_gpa": 3.0}], '
+                 '"pairs": [{"student": "stu1", "topic": "PF1"}]}',
+         "expect_status": 200, "expect_json": {"unacceptable_count": 1}}]}
+    _det_s = coverage.failed_step_request(
+        str_probe, "第1步 JSON 字段不符：unacceptable_count（实际 0；期望 1）",
+        evidence={"steps": [{"step": 1, "method": "POST",
+                             "path": "/api/v1/rules/pre-filter/", "status": 200,
+                             "body": '{"unacceptable_count": 0}'}]})
+    check("字符串 json **不再**被误报成『无请求体』",
+          "无 json 请求体" not in _det_s and "该步确实没有请求体" not in _det_s, _det_s[:300])
+    check("字符串 json 的真实内容展示出来了（students/min_gpa 可见）",
+          "students" in _det_s and "min_gpa" in _det_s, _det_s[:300])
+    # 真正没请求体时才说"确实没有"（不把"有"说成"无"）
+    _none_probe = {"kind": "http", "steps": [
+        {"method": "GET", "path": "/x/", "expect_status": 200}]}
+    _det_n = coverage.failed_step_request(
+        _none_probe, "第1步 状态码 500（期望 200）",
+        evidence={"steps": [{"step": 1, "method": "GET", "path": "/x/", "status": 500}]})
+    check("确实没请求体时才标注『确实没有』",
+          "该步确实没有请求体" in _det_n, _det_n[:200])
+    # 鉴权状态必须可见（2026-11-19 实测）：期望 2xx 却没带 Authorization →
+    # 产物回 403「权限不足」，远端只看到状态码，无法判断"没带 token"还是"真没权限"。
+    _det_auth = coverage.failed_step_request(
+        {"kind": "http", "steps": [
+            {"method": "POST", "path": "/api/v1/topics/", "json": {"title": "T"},
+             "expect_status": [201]}]},
+        "第1步 POST /api/v1/topics/ → 状态码 403（期望 200/201）",
+        evidence={"steps": [{"step": 1, "method": "POST",
+                             "path": "/api/v1/topics/", "status": 403,
+                             "body": '{"detail": "权限不足"}'}]})
+    check("期望 2xx 但没带鉴权头 → 证据里点出来",
+          "未带鉴权头" in _det_auth, _det_auth[:240])
+    _det_auth2 = coverage.failed_step_request(
+        {"kind": "http", "steps": [
+            {"method": "POST", "path": "/api/v1/topics/", "json": {"title": "T"},
+             "headers": {"Authorization": "Bearer ${t}"},
+             "expect_status": [201]}]},
+        "第1步 POST /api/v1/topics/ → 状态码 403（期望 200/201）",
+        evidence={"steps": [{"step": 1, "method": "POST",
+                             "path": "/api/v1/topics/", "status": 403}]})
+    check("带了鉴权头就不加这条提示（不噪声）",
+          "未带鉴权头" not in _det_auth2, _det_auth2[:240])
+    # 端到端：字符串 json 到达产物时必须是**对象**（不是字符串），否则产物
+    # json.loads 得到 str、当空 bundle 处理 → 规则一条都不命中 → 恒 0。
+    ws_echo = Path(tempfile.mkdtemp(prefix="cov-echo-"))
+    (ws_echo / "main.py").write_text(
+        'import json\n'
+        'async def app(scope, receive, send):\n'
+        '    if scope["type"] != "http":\n'
+        '        return\n'
+        '    msg = await receive()\n'
+        '    raw = (msg.get("body") or b"").decode("utf-8", "replace")\n'
+        '    try:\n'
+        '        parsed = json.loads(raw)\n'
+        '    except Exception:\n'
+        '        parsed = None\n'
+        '    out = json.dumps({"type": type(parsed).__name__,\n'
+        '                      "keys": sorted(parsed) if isinstance(parsed, dict) else [],\n'
+        '                      "students_n": len((parsed or {}).get("students") or [])\n'
+        '                      if isinstance(parsed, dict) else -1}).encode()\n'
+        '    await send({"type": "http.response.start", "status": 200,\n'
+        '                "headers": [(b"content-type", b"application/json")]})\n'
+        '    await send({"type": "http.response.body", "body": out})\n',
+        encoding="utf-8")
+    r_echo = probe.run(ws_echo, {"kind": "http", "steps": [
+        {"method": "POST", "path": "/bundle/",
+         "json": '{"students": [{"username": "s1", "gpa": 2.0}], '
+                 '"topics": [{"code": "PF1", "min_gpa": 3.0}], '
+                 '"pairs": [{"student": "s1", "topic": "PF1"}]}',
+         "expect_status": 200, "expect_json": {"type": "dict", "students_n": 1}}]},
+        timeout=10)
+    check("字符串 json 到达产物时是**对象**（不是字符串，规则才判得动）",
+          bool(r_echo.get("ok")), str(r_echo.get("detail"))[:240])
+
+    print("[11] 同一步多个 save 的兜底值必须互不相同（2026-11-19 实测事故）")
+    # cap.llm.generate_validate_review 第 3 步 save c1/c2/c3 → first/second/
+    # third_candidate_id，而产物响应里没有这三个键。旧逻辑把三个变量**全兜底成 1**
+    # → 三次评审打在同一个候选（采纳→改写→驳回）→ stats 恒 adopted=0/rewritten=0，
+    # 判据永远红；远端对着本来正确的产物改了 5 轮。典型"判据夹具 bug 制造假 bug"。
+    ws_save = Path(tempfile.mkdtemp(prefix="cov-save-"))
+    (ws_save / "main.py").write_text(
+        'import json\n'
+        'async def app(scope, receive, send):\n'
+        '    if scope["type"] != "http":\n'
+        '        return\n'
+        '    path = scope.get("path") or "/"\n'
+        '    if path == "/gen":\n'
+        '        body = json.dumps({"candidates": [{"id": "a1"}, {"id": "a2"},\n'
+        '                                         {"id": "a3"}], "count": 3}).encode()\n'
+        '    else:\n'
+        '        body = json.dumps({"got": path.rsplit("/", 1)[-1]}).encode()\n'
+        '    await send({"type": "http.response.start", "status": 200,\n'
+        '                "headers": [(b"content-type", b"application/json")]})\n'
+        '    await send({"type": "http.response.body", "body": body})\n',
+        encoding="utf-8")
+    save_probe = {"kind": "http", "steps": [
+        {"method": "POST", "path": "/gen", "json": {"count": 3},
+         "expect_status": 200,
+         "save": {"c1": "first_candidate_id", "c2": "second_candidate_id",
+                  "c3": "third_candidate_id"}},
+        {"method": "GET", "path": "/c/${c1}", "expect_status": 200},
+        {"method": "GET", "path": "/c/${c2}", "expect_status": 200},
+        {"method": "GET", "path": "/c/${c3}", "expect_status": 200}]}
+    r_save = probe.run(ws_save, save_probe, timeout=10)
+    _vars = (r_save.get("evidence") or {}).get("vars") or {}
+    check("三个兜底变量互不相同（不再全塌成 1）",
+          len({str(_vars.get(k)) for k in ("c1", "c2", "c3")}) == 3, str(_vars))
+    check("兜底按 1/2/3 递增",
+          [str(_vars.get(k)) for k in ("c1", "c2", "c3")] == ["1", "2", "3"], str(_vars))
+    _steps_ev = (r_save.get("evidence") or {}).get("steps") or []
+    _fb = [s.get("save_fallback") for s in _steps_ev if s.get("save_fallback")]
+    check("兜底不静默：trace 里留了 save_fallback 痕迹",
+          bool(_fb) and len(_fb[0]) == 3, str(_fb))
+
+    # save 写成**字符串**时不能让整步抛异常（2026-11-19 实测）
+    # `"save": "{\"tok\": \"token\"}"` → 旧代码 `.items()` 抛 AttributeError →
+    # 该步整体失败 → token 从未存上 → 后续 `Bearer ${tok}` 全是字面量 → 403。
+    # （cap.inv.topic.guard_pending_1751 就是这么红的。）
+    ws_sv = Path(tempfile.mkdtemp(prefix="cov-savestr-"))
+    (ws_sv / "main.py").write_text(
+        'import json\n'
+        'async def app(scope, receive, send):\n'
+        '    if scope["type"] != "http":\n'
+        '        return\n'
+        '    path = scope.get("path") or "/"\n'
+        '    if path == "/login":\n'
+        '        body = json.dumps({"token": "T9"}).encode()\n'
+        '    else:\n'
+        '        hdrs = dict(scope.get("headers") or [])\n'
+        '        auth = (hdrs.get(b"authorization") or b"").decode("utf-8", "replace")\n'
+        '        body = json.dumps({"auth": auth}).encode()\n'
+        '    await send({"type": "http.response.start", "status": 200,\n'
+        '                "headers": [(b"content-type", b"application/json")]})\n'
+        '    await send({"type": "http.response.body", "body": body})\n',
+        encoding="utf-8")
+    r_sv = probe.run(ws_sv, {"kind": "http", "steps": [
+        {"method": "POST", "path": "/login", "json": {"username": "u", "password": "p"},
+         "expect_status": 200, "save": '{"tok": "token"}'},
+        {"method": "GET", "path": "/who", "headers": {"Authorization": "Bearer ${tok}"},
+         "expect_status": 200, "expect_json": {"auth": "Bearer T9"}}]}, timeout=10)
+    check("save 写成字符串时不抛异常，且 token 真存上（后续不用字面量 ${tok}）",
+          bool(r_sv.get("ok")), str(r_sv.get("detail"))[:300])
 
     print()
     if FAILS:

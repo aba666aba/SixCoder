@@ -15,8 +15,11 @@ import json
 import os
 from pathlib import Path
 
+from . import paths as _paths
+
 ENGINE_ROOT = Path(__file__).resolve().parents[1]      # prototype/
-CFG_FILE = ENGINE_ROOT.parent / "_logs" / "engine.json"
+# 打包态数据目录在 %LOCALAPPDATA%\SixCoder（见 core/paths.py），不再写安装目录
+CFG_FILE = _paths.logs_dir() / "engine.json"
 
 
 def _from_file() -> str:
@@ -51,16 +54,7 @@ def require_repo(explicit: str = "") -> Path:
     return p
 
 
-def save_repo(ws) -> Path:
-    """把项目路径记进引擎配置（供"--repo 一次、以后免填"用）。"""
-    data = {}
-    try:
-        data = json.loads(CFG_FILE.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            data = {}
-    except Exception:                                    # noqa: BLE001
-        data = {}
-    data["repo"] = str(Path(ws).resolve())
-    CFG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CFG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    return CFG_FILE
+# 2026-11-19：删掉从未被任何 CLI 入口调用的 save_repo()（"一次设置免填"写入端）。
+# 它的能力（写 engine.json 的 repo 字段）由用户按上面 require_repo 的提示 3 手动完成；
+# 留一个没有调用方的写入函数只会让 check_mechanism_wiring 每次报死机制。
+# 若将来要做"记住当前项目"命令，再连同 CLI 入口一起加回来。

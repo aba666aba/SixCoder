@@ -223,6 +223,50 @@ for i in range(30):
     check("不留批次残骸", not any(p.name.startswith(".gc-") for p in ws7.iterdir()),
           str(sorted(p.name for p in ws7.iterdir())))
 
+    print("[8] 收尾归档：有内容的搬引擎本地、空壳删、删记录时 purge（2026-11-19）")
+    import tempfile as _tf8
+    from core import scratch_store as _ss8
+    _ws8 = Path(_tf8.mkdtemp())
+    _tmp8 = _ws8 / ".sixcoder" / "tmp"
+    _tmp8.mkdir(parents=True)
+    _arch8 = Path(_tf8.mkdtemp())
+    _orig8 = _ss8.SCRATCH_ROOT
+    _ss8.SCRATCH_ROOT = _arch8
+    try:
+        (_tmp8 / "probe-111-1").mkdir()
+        (_tmp8 / "probe-111-1" / "f.py").write_text("x=1", encoding="utf-8")
+        (_tmp8 / "work-222").mkdir()
+        (_tmp8 / "work-222" / "g.py").write_text("y=1", encoding="utf-8")
+        (_tmp8 / "probe-333-1").mkdir()                     # 空壳
+        (_tmp8 / "code.py.broken_2035").write_text("backup", encoding="utf-8")
+        (_tmp8 / "_biz_run.py").write_text("run", encoding="utf-8")
+        (_tmp8 / "run_999_1.py").write_text("script", encoding="utf-8")
+        (_tmp8 / "笔记.txt").write_text("用户自己的东西", encoding="utf-8")
+
+        _r8 = _ss8.archive_scratch(_ws8, keep_rounds=3)
+        _left8 = sorted(p.name for p in _tmp8.iterdir())
+        check("有内容的引擎项全部搬到引擎本地归档（含 broken 备份/runner）",
+              _r8["moved"] == 5, str(_r8["moved"]))
+        check("空目录壳留给 gc_scratch（rename 批处理，不逐个 rmtree）",
+              _r8["left_empty"] == 1 and (_tmp8 / "probe-333-1").is_dir(),
+              str(_r8["left_empty"]))
+        check("源码里没有逐个 rmtree 空壳（会被宿主删除保护拖死）",
+              "shutil.rmtree(child" not in (ROOT / "core" / "scratch_store.py")
+              .read_text(encoding="utf-8"))
+        check("不认识的文件一律不碰（用户自己放的）", "笔记.txt" in _left8, str(_left8))
+        _dest8 = Path(_r8["dest"])
+        check("归档目录按仓库指纹命名", _dest8.parent.name == _ss8.repo_key(_ws8))
+        check("归档带 manifest（能追溯是哪次收尾）",
+              (_dest8 / ".manifest.json").is_file())
+        check("同一仓库多种路径写法指纹一致",
+              len({_ss8.repo_key("F:/a/b"), _ss8.repo_key("F:\\a\\b"),
+                   _ss8.repo_key("F://a//b/")}) == 1)
+        _pr8 = _ss8.purge_repo(_ws8)
+        check("删记录时 purge 清空该仓库归档（不留孤儿）",
+              _pr8["purged"] and not (_arch8 / _ss8.repo_key(_ws8)).exists(), str(_pr8))
+    finally:
+        _ss8.SCRATCH_ROOT = _orig8
+
     print()
     if FAILS:
         print("有失败项：%s" % ", ".join(FAILS))

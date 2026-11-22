@@ -100,17 +100,27 @@ def main() -> int:
     src = (ROOT / "core" / "slicer.py").read_text(encoding="utf-8")
     check("简报接了口径冲突检测", "capconf" in src and "describe_conflict" in src)
 
-    # ---- 7：实测产物仓能定位已知冲突 ----
+    # ---- 7：实测产物仓能跑通冲突检测（不依赖"仓里必须恰好有某条冲突"）----
+    # 2026-11-19：旧断言要求"能定位已知冲突 ≥1 条 + cap.llm.generate_candidate 在列"。
+    # 但产物会的冲突会被修掉（这正是引擎的目的），修完后这条恒红 —— 判据把
+    # "产物当下有 bug"当成通过条件，产物越健康越红，是典型的判据脆弱。
+    # 真正要钉的是：真实蓝图能加载、每条能力都能过 conflicts() 不报错、
+    # 若真有冲突则能被 describe_conflict 讲清楚。构造出的已知冲突已在 [3] 钉死。
     try:
         from core import blueprint as _bp
         ws = _repo_root()
-        if ws.is_dir():
+        if ws and ws.is_dir():
             b = _bp.load(ws)
             caps = b.caps if isinstance(b.caps, list) else list(b.caps.values())
-            hits = [c.id for c in caps if _cc.conflicts(c)]
-            check("实测产物仓能定位已知冲突（≥1 条）", len(hits) >= 1, str(hits))
-            check("已知冲突 cap.llm.generate_candidate 被定位",
-                  "cap.llm.generate_candidate" in hits, str(hits))
+            hits = []
+            for c in caps:
+                cf = _cc.conflicts(c)                  # 每条都不许抛（真实数据健壮性）
+                if cf:
+                    hits.append(c.id)
+                    check(f"真实冲突 {c.id} 能讲清楚", bool(_cc.describe_conflict(c)))
+            check("实测产物仓能跑通冲突检测（所有能力过一遍不报错）",
+                  len(caps) > 0, f"扫了 {len(caps)} 条，命中 {len(hits)} 条冲突")
+            print(f"  info  实测命中 {len(hits)} 条口径冲突（0 条 = 产物健康，不是失败）")
         else:
             print("  SKIP  实测产物仓不在本机")
     except Exception as exc:                           # noqa: BLE001

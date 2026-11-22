@@ -141,6 +141,57 @@ def main() -> int:
            W._rel_pattern("/api/v1/other/", "/api/v1/widgets/") is None)
 
         print()
+        print("[2b] 「路由已存在」识别（2026-11-19：作者区把视图写在 urls.py 里，"
+              "接线层原本误报『X 里没有可用的处理函数』）")
+        with tempfile.TemporaryDirectory() as _td2:
+            w2 = Path(_td2)
+            (w2 / "apps" / "demo").mkdir(parents=True)
+            (w2 / "apps" / "demo" / "urls.py").write_text(
+                "from django.http import JsonResponse\n"
+                "from django.urls import path\n\n\n"
+                "def _p_list(request):\n    return JsonResponse({'p': []})\n\n\n"
+                "def _p_submit(request, pk):\n    return JsonResponse({'id': pk})\n\n\n"
+                "urlpatterns: list = [\n"
+                "    path(\"\", _p_list),\n"
+                "    path(\"tags/\", _p_list),\n"
+                "    path(\"<int:pk>/submit/\", _p_submit),\n"
+                "]\n", encoding="utf-8")
+            U = "apps/demo/urls.py"
+            ck("根路径（rel 为空）已挂 → 识别为已存在",
+               W._route_exists(w2, U, ""))
+            ck("字面路由 tags/ 已挂 → 识别为已存在",
+               W._route_exists(w2, U, "tags/"))
+            ck("模板占位符 ${pk} 能对上 <int:pk> 参数段",
+               W._route_exists(w2, U, "${pk}/submit/"))
+            ck("不存在的路由 → 识别为未挂（不误判成已挂）",
+               not W._route_exists(w2, U, "ghost/"))
+            ck("段数不同不算已挂（submit/ 对 <int:pk>/submit/ 要判未挂）",
+               not W._route_exists(w2, U, "submit/"))
+            # 全已挂时 wire() 必须静默（零误导性 notice）——这是本轮修的真 bug
+            _ev: list = []
+            (w2 / "config").mkdir()
+            (w2 / "config" / "settings.py").write_text(
+                "SECRET_KEY = 'x'\nROOT_URLCONF = 'config.urls'\n", encoding="utf-8")
+            (w2 / "manage.py").write_text("", encoding="utf-8")
+            (w2 / "config" / "urls.py").write_text(
+                "from django.urls import include, path\n"
+                "urlpatterns = [path('api/v1/people/', include('apps.demo.urls'))]\n",
+                encoding="utf-8")
+            _bp2 = _BP([_Cap("cap.people.list", "GET", "/api/v1/people/"),
+                        _Cap("cap.people.tags", "GET", "/api/v1/people/tags/"),
+                        _Cap("cap.people.submit", "POST",
+                             "/api/v1/people/${pk}/submit/")])
+            _t = W.wire(w2, _bp2, emit=lambda k, d=None: _ev.append((k, d)))
+            _notes = [d for k, d in _ev if k == "notice"]
+            ck("全部路由已存在时 wire 不写盘", _t == [], _t)
+            ck("全部路由已存在时**不产出**『没有可用的处理函数』误报",
+               not any("没有可用的处理函数" in str(x) for x in _notes), str(_notes)[:400])
+            _carry = [d for k, d in _ev if k == "django_wire"]
+            ck("事件里如实报 already 计数（3 条已挂）",
+               bool(_carry) and _carry[0].get("already") == 3,
+               str(_carry)[:300])
+
+        print()
         print("[3] 真接线（写 urls.py → manage.py check）")
         bp = _BP([_Cap("cap.widgets.create", "POST", "/api/v1/widgets/",
                        ["title", "summary"]),

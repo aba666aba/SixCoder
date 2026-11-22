@@ -52,6 +52,13 @@ GUIDE = """\
 - run_tests(target) / static_analysis(path) —— 跑测试 / 静态分析
 - requirement_for(topic) —— 查全局约束（验收指标、规模目标）
 - write_memory(type, text) —— 记一条工程事实（唯一能写的东西）
+- decide_route(target, closed_host, can_observe_runtime, mechanical_verdict,
+  subjective_quality) —— 动手前先判该走哪条补偿路径：直接生成 / 插件桥+产物验收
+  （闭源宿主）/ 降维判据+人在环（审美）/ 授权部署通道 / 结构性拒绝。返回引擎能验什么、人要做什么。
+- deploy_targets() —— 列出人预先预留的部署服务器（只读，不含凭据）。
+- deploy_exec(target, command, reason) —— 在预留服务器上跑白名单命令：每次三方协商≥2+
+  强制人审、命令必须在白名单内、全程审计。认证支持 agent/私钥/用户名密码（密码按引用
+  读取，绝不落盘）。远端只能"提议"，放行权在三方+人，别指望能任意 ssh。
 
 规则：
 - 这些工具都是**只读**的（write_memory 只写 .sixcoder/knowledge.jsonl）。
@@ -69,6 +76,12 @@ GUIDE = """\
   slices/*.txt（本片契约）；也可用 read_file 直接读它们（一律只读）。
 - write_memory 是唯一能写的东西，只能写 .sixcoder/knowledge.jsonl，且只记事实/约束/坑。
 - 测试/契约/治理文件对工具循环只读，写入会被拒绝。
+- 需求涉及视频剪辑、PR/Office 插件、"好不好看"这类**能力边界**时，先调
+  decide_route 判路径，别一头扎进写代码：判成插件桥/人在环/拒绝就按返回的
+  human_must 办，不要假装引擎能自验。
+- 需要部署到服务器时用 deploy_targets 看人预留了哪些目标，再用 deploy_exec 提命令；
+  命令要贴白名单前缀、给清 reason。它不是任意 ssh：人审不过/命令越界都会被拒，
+  如实报告结果，不要声称"已经部署成功"。
 
 ## 最重要的一条：**最终必须给出答案正文**
 
@@ -640,8 +653,30 @@ class ToolLoop:
                     return False, "记忆写入失败（路径不可写或内容为空）"
                 self.memory_written.append(entry)
                 return True, f"已写入记忆 [{entry['type']}]：{entry['text'][:80]}"
+            if name == "decide_route":
+                from . import route_decision as _rd
+                decision = _rd.decide_route(
+                    target=attrs.get("target") or "",
+                    closed_host=attrs.get("closed_host", False),
+                    can_observe_runtime=attrs.get("can_observe_runtime", True),
+                    mechanical_verdict=attrs.get("mechanical_verdict", True),
+                    subjective_quality=attrs.get("subjective_quality", False),
+                    deploy_authorized=attrs.get("deploy_authorized", False),
+                    requirement=attrs.get("requirement") or "",
+                )
+                return True, json.dumps(decision, ensure_ascii=False, indent=2)
+            if name == "deploy_targets":
+                from . import deploy as _deploy
+                return True, json.dumps(_deploy.public_config(), ensure_ascii=False, indent=2)
+            if name == "deploy_exec":
+                from . import deploy as _deploy
+                res = _deploy.execute(
+                    attrs.get("target") or "", attrs.get("command") or "",
+                    reason=attrs.get("reason") or "", workspace=self.ws, emit=self.emit)
+                return bool(res.get("ok")), json.dumps(res, ensure_ascii=False, indent=2)
             return False, (f"未知工具：{name}（可用：read_file/outline/list_files/grep/imports/"
-                           f"check_import/contract_for/run_tests/static_analysis/write_memory）")
+                           f"check_import/contract_for/run_tests/static_analysis/write_memory/"
+                           f"decide_route/deploy_targets/deploy_exec）")
         except Exception as exc:                # noqa: BLE001
             return False, f"工具 {name} 执行异常：{type(exc).__name__}: {exc}"
 

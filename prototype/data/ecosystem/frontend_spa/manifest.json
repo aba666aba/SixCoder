@@ -1,0 +1,12 @@
+{
+ "name": "frontend_spa",
+ "version": "1",
+ "kind": "stack",
+ "description": "前端 SPA（React/Vue + Vite）：识别 package.json/vite.config/src，用浏览器探针（Playwright）做路由与 DOM 断言验收",
+ "provides": ["stack:frontend_spa", "probe:browser"],
+ "needs": ["node", "npm"],
+ "adapter_class": "FrontendSpaAdapter",
+ "detect_markers": ["package.json", "index.html", "vite.config.js", "vite.config.ts"],
+ "verify": ["node", "--version"],
+ "notes": "骨架在 templates/（React）。Vue 模板可另建 frontend_spa_vue 包。"
+}

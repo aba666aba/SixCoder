@@ -31,7 +31,7 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 def main() -> int:
     print("[1] 工具 schema：形状必须是 OpenAI/DeepSeek 官方格式")
     schemas = toolschema.tool_schemas()
-    check("有 14 个工具", len(schemas) == 14, str(len(schemas)))
+    check("工具数不少于 14（新增工具不算回归）", len(schemas) >= 14, str(len(schemas)))
     bad = []
     for t in schemas:
         f = t.get("function") or {}

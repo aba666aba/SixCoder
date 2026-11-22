@@ -40,7 +40,7 @@ MAX_CAPS = 200                    # 超过说明粒度太细，切片会碎成�
 SUBSYS_TRIGGER_CAPS = 60          # 能力数超过它 → 自动 split_subsystems
 SUBSYS_MAX_CAPS = 40              # 单组能力上限（一张能力表仍可管理、可审计）
 MAX_CAPS_WITH_SUBSYS = 2000       # 分组后蓝图的硬上限
-PROBE_KINDS = ("cli", "py_call", "pytest", "http")  # 已有执行器的种类（见 core/probe.py）
+PROBE_KINDS = ("cli", "py_call", "pytest", "http", "browser", "sql")  # 已有执行器的种类（见 core/probe.py）
 CAP_ID_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)*$")
 DEFAULT_FUNCS = 4                 # 没给估算时按 4 个函数算（宁可保守）
 # 每函数花费：两个实测形态反推出来的（302 行/20 函数/¥0.33；200 行/8 函数/¥0.21），
@@ -703,6 +703,17 @@ def web_rules(stack_name: str = "fastapi") -> str:
     更糟的是它会**重建 `app/` 目录**，与现有 Django 结构打架。
     """
     name = str(stack_name or "").lower()
+    # **优先用栈适配器自带的探针约定**（生态包）：前端 SPA 等新栈通过
+    # adapter.web_rules() 告诉远端"我这个栈的探针怎么写"，不用改这里。
+    try:
+        from . import stack as _stk_wr
+        _ad = _stk_wr.get(name)
+        if _ad is not None:
+            _custom = _ad.web_rules()
+            if _custom:
+                return _custom
+    except Exception:                                    # noqa: BLE001
+        pass
     if name == "django":
         return """1. `app` 全表固定写同一个：`config.asgi:application`
    （产物必须在 `config/asgi.py` 暴露名为 `application` 的 ASGI 应用）。
@@ -749,7 +760,7 @@ DERIVE_PROMPT = """你是软件架构师。把下面这一句**目标**变成一
 【每条能力必须带】
 - id：小写点分，如 `cap.csv.count`，全表唯一
 - desc：一句话，写清"输入什么 → 观测到什么"
-- probe：怎么观测，四选一
+- probe：怎么观测，六选一
     {"kind": "cli", "entry": "main.py", "args": ["count", "--file", "d.csv"],
      "files": {"d.csv": "name,age\\n山田,20\\n佐藤,30\\n"}, "stdout_has": "2"}
     {"kind": "py_call", "module": "calc", "func": "add", "args": [2, 3], "expect": 5}
@@ -765,6 +776,15 @@ DERIVE_PROMPT = """你是软件架构师。把下面这一句**目标**变成一
       {"method": "GET", "path": "/tickets",
        "headers": {"Authorization": "Bearer ${token}"},
        "expect_status": 200, "expect_json": {}}]}
+    {"kind": "browser", "start_cmd": "npm run dev", "port": 5173,
+     "url": "http://127.0.0.1:5173/",
+     "expect_dom": [{"selector": "#root"}, {"selector": "h1", "text": "首页"}]}
+    {"kind": "sql", "db": "app.db", "steps": [
+      {"sql": "SELECT COUNT(*) AS n FROM users", "expect_first": {"n": 3}}]}
+    · **browser 是前端 SPA 专用**（不是 ASGI，别用 http）；`expect_dom` 每条要
+      selector + text/count/visible 之一，**不许只给 url 不给断言**
+    · **sql 是数据层专用**（直连产物仓 sqlite，验"真落库"不是"接口返回"）；
+      判据至少给 expect_rows / expect_first / expect_contains 之一
   · **不许只判退出码**：至少有 stdout_has 或 expect 或 expect_json，否则空壳 `print(0)` 也能过
   · cli 的 **entry 必须是仓库里的脚本文件**（如 main.py）。写 `python` / `pytest` 这类
     解释器命令当 entry，这条能力永远无法被观测（会被当成仓库里一个叫 python 的文件）
@@ -780,9 +800,10 @@ DERIVE_PROMPT = """你是软件架构师。把下面这一句**目标**变成一
 - funcs_est：这条能力大约要写几个函数（整数，别虚报）
 - modules：大致落在哪些文件（可以空）
 
-【Web / HTTP 项目（看到就照做，这条优先级最高）】
-目标里只要出现 Web、网站、页面、前端、HTTP、REST、API、接口、服务、Django、
-登录、看板 等字样，就**一律用 http 探针，不许用 cli 探针**。
+【Web 项目（看到就照做，这条优先级最高）】
+目标里出现 Web、网站、页面、前端、HTTP、REST、API、接口、服务、Django、
+登录、看板 等字样，就**不许用 cli 探针**：**后端接口用 http 探针，前端 SPA 用
+browser 探针**（两者别混：前端页面不是 ASGI，http 的 app.main:app 对它不存在）。
 **具体写法由技术栈决定 —— 严格照下面这段，写错落点等于整张表作废**：
 
 @WEB_RULES@
@@ -1069,6 +1090,35 @@ def normalize_http(bp: "Blueprint", notes: list[str] | None = None) -> int:
         if not isinstance(steps, list) or not steps:
             continue
         new = json.loads(json.dumps(steps))
+        # ①-before：把"json 写成 JSON 字符串"的步骤归一化成对象（2026-11-19 实测）。
+        #    蓝图里部分 register/login 的 json 是 `"{\"username\":...}"`（字符串）
+        #    而不是 dict —— probe.fill() 只做占位符替换、不 json.loads，字符串被
+        #    原样当请求体发出 → Django 回 422「用户名不能为空」→ 后续 403/404
+        #    全是连锁假 bug。而且本函数下面的账号统一、probe.dedupe_role_users
+        #    都只认 dict，字符串步骤会被它们整段跳过 → 必须在这里先归一化。
+        #    只解析"能 json.loads 成 dict"的字符串；纯文本/表单串保持原样。
+        for _st in new:
+            if not isinstance(_st, dict):
+                continue
+            _body = _st.get("json")
+            if isinstance(_body, str) and _body.lstrip().startswith("{"):
+                try:
+                    _parsed = json.loads(_body)
+                except Exception:                            # noqa: BLE001
+                    _parsed = None
+                if isinstance(_parsed, dict):
+                    _st["json"] = _parsed
+            # **save 也可能是字符串**（2026-11-19 实测：`"{\"token\": \"token\"}"`）：
+            # 运行时 `.items()` 会抛 AttributeError → 该步整体失败 → token 从未存上
+            # → 后续 `Bearer ${token}` 是字面量 → 403。同源归一。
+            _sv = _st.get("save")
+            if isinstance(_sv, str) and _sv.lstrip().startswith("{"):
+                try:
+                    _psv = json.loads(_sv)
+                except Exception:                            # noqa: BLE001
+                    _psv = None
+                if isinstance(_psv, dict):
+                    _st["save"] = _psv
         user = "u_" + re.sub(r"[^a-z0-9]+", "_", str(c.id).lower())[:20]
         pre: list[dict] = []
         joined = _jtext(new)
@@ -1700,6 +1750,15 @@ def derive(goal: str, *, budget_cny: float = 0.0, llm=None, do_audit: bool = Tru
               .replace("@BUDGET@", f"{bp.total_budget_cny:.2f}")
               .replace("@PER_FUNC@", f"{CNY_PER_FUNC:.4f}")
               .replace("@N_FUNCS@", str(_n_funcs_for(bp.total_budget_cny))))
+    # UI 审美样式库（用户挑的预设 + 自填颜色）作为**附加约定**注入，不放进 web_rules()
+    # 本身——那样会污染"django/fastapi 探针规则"的既有断言。用户没选风格就不注入。
+    try:
+        from . import uistyles as _ui
+        _contract = _ui.contract_text()
+        if _contract:
+            prompt += "\n\n" + _contract
+    except Exception:                                    # noqa: BLE001
+        pass
     # **推导要有自愈**（实测 exp1e）：唯一一次没有重试的远端调用就是这里，
     # 一旦输出被截断/解析不出 JSON，整次运行直接以"空蓝图"失败、一分钱没花却什么都没做。
     # 口径与契约合成一致：解析不出来 → 加大正文配额重试一次，并明确"只输出 JSON"。

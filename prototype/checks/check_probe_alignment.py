@@ -16,6 +16,7 @@
   3. 账号身份字段（username/email）在链上无本步来源时 → 取链上注册值
   以及一条"不许乱改"的负向规则：业务常量断言（如 {"code":"unauthorized"}）不许动。
 """
+import json
 import sys
 from pathlib import Path
 
@@ -139,6 +140,107 @@ def main() -> int:
     _src2 = _inspect.getsource(_oh.observe)
     check("openhouse.observe 里也调了（甲方模式那一路）",
           "align_probe_expectations" in _src2, "")
+
+    print("[7] json 写成 JSON 字符串的步骤必须归一化（2026-11-19 血泪）")
+    # 实测：部分 register/login 的 json 是 `"{\"username\":...}"`（字符串）而非 dict，
+    # probe.fill 原样发出 → 422「用户名不能为空」→ 后续 403/404 连锁假 bug。
+    c7 = cap("cap.inv.candidate.guard_x", [
+        {"method": "POST", "path": "/api/v1/auth/register/",
+         "json": '{"username": "u_guard_x", "password": "p1", "role": "teacher"}',
+         "expect_status": 201},
+    ])
+    b7 = bp.Blueprint(goal="t", caps=[c7])
+    bp.normalize_http(b7)
+    body7 = c7.probe["steps"][0]["json"]
+    check("蓝图加载时字符串 json 被解析为对象",
+          isinstance(body7, dict) and body7.get("username") == "u_guard_x",
+          str(body7))
+    # 运行时兜底：不经过 normalize_http 的存量探针，runner 里的 fill 也要能解析。
+    # fill 定义在 _HTTP_RUNNER（子进程脚本文本）里，不是模块级函数 —— 从这里抽出来真执行。
+    from core import probe as _probe
+    _ns: dict = {"json": json, "VAR": {}}
+    _runner_src = _probe._HTTP_RUNNER
+    _fill_start = _runner_src.index("def fill(v):")
+    _fill_end = _runner_src.index("def pick(obj, path):")
+    exec(_runner_src[_fill_start:_fill_end], _ns)         # noqa: S102 —— 执行引擎自己的 runner 片段
+    _fill = _ns["fill"]
+    filled7 = _fill('{"username": "u_x", "password": "p1"}')
+    check("运行时 fill 把字符串 json 解析为对象",
+          isinstance(filled7, dict) and filled7.get("username") == "u_x",
+          str(filled7))
+    check("纯文本串不被误当 json 解析",
+          _fill("just a plain string") == "just a plain string")
+    # 占位符在解析后的对象里仍能被替换
+    _ns["VAR"] = {"uid": "u_sub"}
+    check("字符串 json 解析后占位符仍能替换",
+          _fill('{"username": "${uid}"}').get("username") == "u_sub",
+          str(_fill('{"username": "${uid}"}')))
+    # 账号统一能覆盖归一化后的步骤（字符串时代会被整段跳过）
+    c7b = cap("cap.inv.candidate.guard_y", [
+        {"method": "POST", "path": "/api/v1/auth/register/",
+         "json": '{"username": "u_old", "password": "p1"}', "expect_status": 201},
+        {"method": "POST", "path": "/api/v1/auth/login/",
+         "json": '{"username": "u_old", "password": "p1"}', "expect_status": 200},
+    ])
+    b7b = bp.Blueprint(goal="t", caps=[c7b])
+    bp.normalize_http(b7b)
+    users7b = {s["json"].get("username") for s in c7b.probe["steps"][:2]
+               if isinstance(s.get("json"), dict)}
+    check("归一化后账号统一能作用到（串味被消除）",
+          len(users7b) == 1, str(users7b))
+
+    print("[8] 鉴权顺序修复：建资源排在 login 之前是**判据错**，不是产物错（2026-11-19）")
+    # 实测 cap.inv.topic.guard_pending_1751：register → POST /topics/（期望 201、无鉴权头）
+    # → login → approve。建题排在登录前，产物只能回 403，后续连带 404——这种探针
+    # **结构上不可能通过**，远端却反复去改本来正确的权限逻辑。
+    from core import probe as _pb
+    _bad = {"kind": "http", "steps": [
+        {"method": "POST", "path": "/api/v1/auth/register/",
+         "json": {"username": "u_g", "password": "p1", "role": "admin"}, "expect_status": [201]},
+        {"method": "POST", "path": "/api/v1/topics/",
+         "json": {"title": "T", "capacity": 2}, "expect_status": [200, 201]},
+        {"method": "POST", "path": "/api/v1/auth/login/",
+         "json": '{"username": "u_g", "password": "p1"}',
+         "expect_status": [200], "save": '{"token": "token"}'},
+        {"method": "POST", "path": "/api/v1/topics/${topic_id}/approve/",
+         "json": {}, "expect_status": [400, 403, 409, 422]},
+    ]}
+    _fixed = _pb._repair_auth_order(_bad)
+    _paths = [s.get("path") for s in _fixed["steps"]]
+    check("login 被提到建题之前",
+          _paths[0].endswith("/register/") and _paths[1].endswith("/login/")
+          and _paths[2] == "/api/v1/topics/", str(_paths))
+    _tk = (_fixed["steps"][2].get("headers") or {}).get("Authorization")
+    check("建题步骤补上了 Bearer ${token}（save 是字符串也能认）",
+          _tk == "Bearer ${token}", str(_tk))
+    check("register 不被硬塞 token（认证步骤本身不带鉴权）",
+          not ((_fixed["steps"][0].get("headers") or {}).get("Authorization")))
+    # 已通过的能力不能被改（返回同一对象）
+    _ok_probe = {"kind": "http", "steps": [
+        {"method": "POST", "path": "/api/v1/auth/login/",
+         "json": {"username": "u", "password": "p"}, "expect_status": [200],
+         "save": {"token": "token"}},
+        {"method": "POST", "path": "/api/v1/topics/",
+         "json": {"title": "T"}, "headers": {"Authorization": "Bearer ${token}"},
+         "expect_status": [201]},
+    ]}
+    check("本来就正确的探针原样返回（对已绿能力零影响）",
+          _pb._repair_auth_order(_ok_probe) is _ok_probe)
+    # 多条 login 时角色不确定 → 宁可不动
+    _two = {"kind": "http", "steps": [
+        {"method": "POST", "path": "/api/v1/topics/", "json": {"title": "T"},
+         "expect_status": [201]},
+        {"method": "POST", "path": "/api/v1/auth/login/",
+         "json": {"username": "a", "password": "p"}, "save": {"ta": "token"}},
+        {"method": "POST", "path": "/api/v1/auth/login/",
+         "json": {"username": "b", "password": "p"}, "save": {"tb": "token"}},
+    ]}
+    check("多条 login 时不猜角色，原样返回", _pb._repair_auth_order(_two) is _two)
+    # 接线钉子：函数存在 ≠ 真实调用路径会走到（本项目反复踩过的病）
+    _src_pb = (Path(__file__).resolve().parents[1] / "core" / "probe.py") \
+        .read_text(encoding="utf-8")
+    check("run() 的 http 分支真调用它（不是死函数）",
+          "_repair_auth_order(_dedupe_http_probe(probe))" in _src_pb)
 
     print()
     if FAILS:

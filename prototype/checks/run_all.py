@@ -34,7 +34,11 @@ def _cleanup_tmp() -> None:
     for d in TMP_ROOT.iterdir():
         try:
             shutil.rmtree(d) if d.is_dir() else d.unlink()
-        except OSError:
+        except Exception:                                 # noqa: BLE001
+            # **不能只 catch OSError**（2026-11-19 实测）：宿主给 Python 注入的
+            # 批量删除护栏抛的是 `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`
+            # 这类非 OSError 异常；旧代码只 catch OSError → 清理失败直接把整个
+            # 自检拖垮（一行 check 都没跑就挂）。清理失败不该阻断开跑。
             pass
 
 
@@ -63,16 +67,44 @@ def _child_env(idx: int) -> dict:
     return env
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description="跑自检；支持分批，避免单进程过长被环境拦下")
+    ap.add_argument("--batch", default="", help="i/n：只跑第 i 批（1 起），共 n 批")
+    ap.add_argument("--only", default="", help="逗号分隔的脚本名，只跑这些")
+    ap.add_argument("--list", action="store_true", help="只列出脚本与总数")
+    args = ap.parse_args(argv)
     _ensure_tmp()
     # **开跑也清一次**（2026-11-18）：结尾清只在"跑完整轮 run_all"时生效，
     # 单独跑几个 check_* 脚本不清 —— 实测一轮全量清空后，单跑 4 个脚本又堆回
     # 600+ 目录。开头清一次，把残留封顶为"单轮自检的量"。
     _cleanup_tmp()
     scripts = sorted(p.name for p in HERE.glob("check_*.py"))
+    if args.only:
+        want = {s.strip() for s in args.only.split(",") if s.strip()}
+        scripts = [s for s in scripts if s in want]
+    if args.list:
+        print(f"共 {len(scripts)} 个自检脚本")
+        for _i, _s in enumerate(scripts, 1):
+            print(f"  {_i:3d}  {_s}")
+        return 0
+    total_all = len(scripts)
+    if args.batch:
+        try:
+            _i_s, _n_s = args.batch.split("/")
+            _bi, _bn = int(_i_s), int(_n_s)
+            if not (1 <= _bi <= _bn):
+                raise ValueError
+        except Exception:                               # noqa: BLE001
+            print(f"--batch 格式应为 i/n（1<=i<=n），收到：{args.batch!r}")
+            return 2
+        _per = (total_all + _bn - 1) // _bn
+        scripts = scripts[(_bi - 1) * _per: _bi * _per]
+        print(f"分批：第 {_bi}/{_bn} 批，本批 {len(scripts)} 个（总 {total_all}）\n")
+    else:
+        print(f"共 {len(scripts)} 个自检脚本\n")
     failed: list[str] = []
     blocked_names: list[str] = []
-    print(f"共 {len(scripts)} 个自检脚本\n")
     try:
         for idx, name in enumerate(scripts):
             if name == "check_remote_http.py":
