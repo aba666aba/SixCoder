@@ -10,7 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 from core import agent, reference  # noqa: E402
 
 IMPL = '''from __future__ import annotations
@@ -57,7 +58,7 @@ def main() -> int:
 
     for p in ("core/agent.py", "core/reference.py"):
         try:
-            ast.parse(Path(p).read_text(encoding="utf-8"))
+            ast.parse((ROOT / p).read_text(encoding="utf-8"))
             ok &= check(f"{p} 语法", True)
         except SyntaxError as exc:
             ok &= check(f"{p} 语法", False, str(exc))

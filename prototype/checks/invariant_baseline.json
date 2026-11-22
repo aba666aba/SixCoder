@@ -4247,5 +4247,1174 @@
     "value": "在 `<rootcause>` 里写明反证再动手；否则**按它修，不要重新分析*",
     "snip": "\"在 `<rootcause>` 里写明反证再动手；否则**按它修，不要重新分析**。\\n\\n\"",
     "依据": "上下文保护：项目方诊断最多 8000 字符（结论不是文档，超长=没收敛）；超了截断不影响判据，避免撑爆简报/挤掉源码；由 check_wholerepo[9] 钉住截断行为"
+  },
+  "browser.py|截断长度|200|34138098": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "out.append(\"未捕获 JS 异常：%s\" % e[:200])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|200|16f7ef63": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "out.append(\"console.error：%s\" % e[:200])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|200|44b1aaf6": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "out.append(\"请求失败：%s\" % r[:200])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|120|c6cc1293": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "res[\"desc\"] = \"%s 文本为 %r（期望包含 %r）\" % (sel, got[:120], want[:60])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|60|c6cc1293": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "res[\"desc\"] = \"%s 文本为 %r（期望包含 %r）\" % (sel, got[:120], want[:60])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|300|ce04704c": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "visit_res.console_errors.append(txt[:300])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|300|8f2cd164": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "visit_res.page_errors.append(str(err)[:300])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|80|7e976b07": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "(req.failure or \"\")[:80]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|300|ad04f148": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "res.console_errors.append(str(msg.text)[:300])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|300|d7734e44": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "res.page_errors.append(str(err)[:300])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|300|695d2ca2": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "res.error = \"%s: %s\" % (type(exc).__name__, str(exc)[:300])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "browser.py|截断长度|160|652e8dc6": {
+    "file": "browser.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "lines.append(\" %s\" % ln[:160])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "budget_estimate.py|比较阈值|200|81fa5507": {
+    "file": "budget_estimate.py",
+    "kind": "比较阈值",
+    "value": "200",
+    "snip": "while (cap > 0 and guard < 200",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "codelocate.py|截断长度|160|4418627a": {
+    "file": "codelocate.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "return s[:160] + (\"…\" if len(s) > 160 else \"\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "codelocate.py|截断长度|20|e02cf40e": {
+    "file": "codelocate.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "\"hits\": hits[:limit], \"files\": scanned, \"skipped\": skipped[:20]}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "coderun.py|截断长度|240|f693eb59": {
+    "file": "coderun.py",
+    "kind": "截断长度",
+    "value": "240",
+    "snip": "\"message\": (m.groupdict().get(\"msg\") or line)[:240]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "coderun.py|截断长度|40|43f5d166": {
+    "file": "coderun.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "for k, v in list(frame.f_locals.items())[:40]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "coderun.py|截断长度|10|dea603e9": {
+    "file": "coderun.py",
+    "kind": "截断长度",
+    "value": "10",
+    "snip": "for e in (cmd.get(\"exprs\") or [])[:10]}})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "coderun.py|截断长度|10|a660dcb1": {
+    "file": "coderun.py",
+    "kind": "截断长度",
+    "value": "10",
+    "snip": "nonce = uuid.uuid4().hex[:10]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "coderun.py|截断长度|12|cf08c526": {
+    "file": "coderun.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "sid = uuid.uuid4().hex[:12]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|默认上限|max_age_hours=48|6a502221": {
+    "file": "company.py",
+    "kind": "默认上限",
+    "value": "48",
+    "snip": "_ge = _probe_gc2.gc_engine_tmp(max_age_hours=48.0, max_entries=4000)",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|默认上限|max_entries=4000|6a502221": {
+    "file": "company.py",
+    "kind": "默认上限",
+    "value": "4000",
+    "snip": "_ge = _probe_gc2.gc_engine_tmp(max_age_hours=48.0, max_entries=4000)",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|截断长度|12|b9a1a976": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "\"notes\": (_sres.get(\"notes\") or [])[:12],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|截断长度|12|2c9ab5c0": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "\"round\": rnd, \"caps\": _red_caps[:12],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|截断长度|12|0ea0de05": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "\"notes\": (_dlr.get(\"notes\") or [])[:12],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|截断长度|200|bf873ac9": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"detail\": f\"{type(exc).__name__}: {exc}\"[:200]}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "company.py|截断长度|200|8feaaff7": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"detail\": str(_wres.get(\"detail\") or \"\")[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|400|678d6ba5": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"detail\": str(detail or \"\")[:400]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|120|f2dca906": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "if isinstance(v, (dict, list)) else str(v)[:120])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|200|835831d7": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"desc\": str(getattr(c, \"desc\", \"\") or \"\")[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|200|167ca1a0": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"error\": \"\" if r.get(\"ok\") else str(r.get(\"error\") or \"\")[:200]}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|200|40e3a64f": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"; \".join(_er.get(\"errors\") or [])[:200]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|120|6f18e78c": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "% (_nm, \"; \".join(_er.get(\"notes\") or [])[:120]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|200|91eb3064": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "% (_nm, \"; \".join(_er.get(\"errors\") or [])[:200]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|24|0ff514c0": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "24",
+    "snip": "out[\"judge_fix_notes\"] = notes[:24]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deadlock.py|截断长度|12|24bdb1d2": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "out[\"judge_fix_skipped\"] = skipped[:12]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|32|6dd79fab": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "tid = str(t.get(\"id\") or \"\").strip()[:32]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|40|08485c92": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "allow = [str(x).strip() for x in (t.get(\"allow_commands\") or []) if str(x).strip()][:40]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|40|07c48fea": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "deny = [str(x).strip() for x in (t.get(\"deny_commands\") or []) if str(x).strip()][:40]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|253|a71b60cd": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "253",
+    "snip": "\"host\": str(t.get(\"host\") or \"\").strip()[:253],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|128|fab8f07b": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "128",
+    "snip": "\"user\": str(t.get(\"user\") or \"\").strip()[:128],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|512|0667c32e": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "512",
+    "snip": "\"key_ref\": str(t.get(\"key_ref\") or \"\").strip()[:512],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|512|cbc58fcf": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "512",
+    "snip": "\"workdir\": str(t.get(\"workdir\") or \"\").strip()[:512],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|200|fbac92ce": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"note\": str(t.get(\"note\") or \"\").strip()[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|200|3c482fb7": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"command\": str(command)[:200], \"why\": why})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|200|26187e66": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"command\": command[:200], \"tally\": cons[\"tally\"]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|200|73342989": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"command\": command[:200], \"decision\": ap.get(\"decision\")})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "deploy.py|截断长度|200|ff13f539": {
+    "file": "deploy.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "_audit(ws, {\"action\": \"deploy_exec\", \"target\": target_id, \"command\": command[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|200|6a9ee811": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "evidence=str(exc.text or \"\")[:200], symbol=rel))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|160|1b8c77bb": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "evidence=ast.get_source_segment(src, node)[:160] or \"\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|177e7738": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "% type(exc).__name__, evidence=str(exc)[:300], symbol=\"d2\")]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|1f1484f1": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "evidence=str(exc)[:300], symbol=\"d2\")]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|76be8732": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "evidence=str(exc)[:300], symbol=\"d3\")]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|800667ff": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "out.append(Error(\"P1\", \"contract\", rel, txt[:300],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|600|3b8c9f3c": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "evidence=txt[:600], symbol=sym or rel))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|200|68a7f5e7": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "evidence=ast.get_source_segment(src, node)[:200] or \"\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|0087d90b": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "evidence=(body[:300] + \"…\") if len(body) > 300 else body,",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|ab66c84e": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "evidence=str(exc)[:300], symbol=\"d6\")]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|fc2f30cf": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "evidence=str(exc)[:300], symbol=str(cid)))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|0cd2f919": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "evidence=str(exc)[:300], symbol=\"d8\"))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "detectors.py|截断长度|300|1b6961dd": {
+    "file": "detectors.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "evidence=str(exc)[:300], symbol=name)]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "django_wire.py|截断长度|300|dbba88d1": {
+    "file": "django_wire.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "_emit(emit, \"notice\", {\"message\": \"Django 接线复验失败，已回滚：%s\" % detail[:300]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "doctor.py|截断长度|16|1cbe8e0a": {
+    "file": "doctor.py",
+    "kind": "截断长度",
+    "value": "16",
+    "snip": "worst = \"；\".join(\"%s %.0f%%\" % (n[:16], r * 100) for n, r in items[:3])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ecosystem.py|截断长度|2000|49bfa4ed": {
+    "file": "ecosystem.py",
+    "kind": "截断长度",
+    "value": "2000",
+    "snip": "return {\"ok\": cp.returncode == 0, \"rc\": cp.returncode, \"output\": out[:2000]}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ecosystem.py|截断长度|400|a08a08c1": {
+    "file": "ecosystem.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "errors.append(\"复验失败（rc=%s）：%s\" % (vr[\"rc\"], vr[\"output\"][:400]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "envinstall.py|截断长度|400|5344db75": {
+    "file": "envinstall.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"errors\": errors, \"output\": str(out_tail)[:400],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "envinstall.py|截断长度|12|1d1bd882": {
+    "file": "envinstall.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "h = hashlib.sha256(key.encode(\"utf-8\")).hexdigest()[:12]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "errorreport.py|截断长度|300|8471e88c": {
+    "file": "errorreport.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "lines.append((\" 证据：%s\" if i == 0 else \" %s\") % ln[:300])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "flow.py|截断长度|200|72a13fe2": {
+    "file": "flow.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "_err = \"%s: %s\" % (type(exc).__name__, str(exc)[:200])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "fullgen.py|截断长度|200|aa2c59a8": {
+    "file": "fullgen.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"done\": r.get(\"done\"), \"detail\": str(r.get(\"detail\") or \"\")[:200]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "fullgen.py|截断长度|200|9b1f7c42": {
+    "file": "fullgen.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "% str(r.get(\"detail\") or \"\")[:200]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "fullgen.py|截断长度|300|a047c3ff": {
+    "file": "fullgen.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "lines.append(\" 证据：%s\" % (ev[0][:300] if ev else \"\"))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "fullgen.py|截断长度|300|baf6adf1": {
+    "file": "fullgen.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "lines.append(\" %s\" % ln[:300])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "human_once.py|截断长度|12|28940166": {
+    "file": "human_once.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "_BOOT_ID = uuid.uuid4().hex[:12]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|200|30d82a2c": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "for st in val[\"steps\"][:200]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|120|47960f39": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "notes.append(\"跳过非法操作（%s）：%s\" % (why, str(op)[:120]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|80|fb3eb66d": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "skipped.append(\"%s（%s）\" % (str(op)[:80], why))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|160|56dfd329": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"; \".join(ir.get(\"notes\") or [])[:160]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|200|e6dcfbc4": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "% (cid, \"; \".join(ir.get(\"errors\") or [])[:200]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|160|bb2b5e69": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "\"; \".join(pr.get(\"notes\") or [])[:160]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|200|ecee771a": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "% (cid, \"; \".join(pr.get(\"errors\") or [])[:200]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|200|e5e429ed": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "% (cid, \"; \".join(er.get(\"errors\") or [])[:200]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|80|0e88be35": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "% (cid, op[\"field\"], str(op.get(\"value\"))[:80]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|80|afda82c0": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "% (cid, step, op[\"field\"], str(op.get(\"value\"))[:80]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "judgefix.py|截断长度|80|d645d6eb": {
+    "file": "judgefix.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "% (cid, step, op[\"field\"], op[\"key\"], str(op.get(\"value\"))[:80]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "night.py|截断长度|200|2796a00f": {
+    "file": "night.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"reason\": str(getattr(res, \"reason\", \"\"))[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "night.py|截断长度|200|0f239ef2": {
+    "file": "night.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"need_human\": str(getattr(res, \"need_human\", \"\") or \"\")[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|800|399b4d8e": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "\"command\": cmd[:800],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|300|9b5231c6": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"reason\": str(s.get(\"reason\") or \"\").strip()[:300],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|20|2240c30d": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "return out[:20]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|32|38b587c5": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "uid = str(u.get(\"id\") or \"\").strip()[:32]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|32|733a0f8b": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "\"target\": str(u.get(\"target\") or \"\").strip()[:32],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|800|99b48665": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "\"health_check\": str(u.get(\"health_check\") or \"\").strip()[:800],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|800|0fe2af5c": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "\"rollback\": [str(c).strip()[:800] for c in (u.get(\"rollback\") or []) if str(c).strip()][:20],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|20|0fe2af5c": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "\"rollback\": [str(c).strip()[:800] for c in (u.get(\"rollback\") or []) if str(c).strip()][:20],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|200|db3b810e": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"note\": str(u.get(\"note\") or \"\").strip()[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|80|eec08281": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "return False, f\"命令 {c[:80]!r} 未过白名单：{why}\"",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|200|171034ba": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "_deploy._audit(ws, {\"action\": \"ops_denied\", \"unit\": unit_id, \"why\": why[:200]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|400|b2967bd6": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"command\": \"; \".join(cmds)[:400] + (f\" [回滚 {len(unit.get('rollback') or [])} 条]\" if unit.get(\"rollback\") else \"\"),",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|200|665fd89f": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"reason\": f\"运维单元 {unit_id}：\" + (unit.get(\"note\") or \"\")[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|300|550ae172": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "f\"原因：{(unit.get('note') or '(无)')[:300]}\"),",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|200|19a788d7": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"command\": s[\"command\"][:200], \"rc\": r[\"rc\"], \"ok\": r[\"ok\"]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "ops.py|截断长度|200|d3a6646c": {
+    "file": "ops.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"command\": cmd[:200], \"ok\": r[\"ok\"]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|800|399b4d8e": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "\"command\": cmd[:800],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|300|9b5231c6": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"reason\": str(s.get(\"reason\") or \"\").strip()[:300],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|20|2240c30d": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "return out[:20]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|32|b9ae76a5": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "pid = str(p.get(\"id\") or \"\").strip()[:32]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|32|18e54f8b": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "targets = [str(t).strip()[:32] for t in (p.get(\"targets\") or []) if str(t).strip()]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|32|1a729463": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "32",
+    "snip": "\"targets\": list(dict.fromkeys(targets))[:32], # 去重、保序、限 32 台",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|800|b07d4e84": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "\"health_check\": str(p.get(\"health_check\") or \"\").strip()[:800],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|800|9b079b91": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "800",
+    "snip": "\"rollback\": [str(c).strip()[:800] for c in (p.get(\"rollback\") or []) if str(c).strip()][:20],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|20|9b079b91": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "\"rollback\": [str(c).strip()[:800] for c in (p.get(\"rollback\") or []) if str(c).strip()][:20],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|200|1ed07fef": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"note\": str(p.get(\"note\") or \"\").strip()[:200],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|60|fe1acf43": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "return False, f\"目标 {tid} 的命令 {c[:60]!r} 未过白名单：{why}\"",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|200|16573332": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "_deploy._audit(ws, {\"action\": \"orch_denied\", \"plan\": plan_id, \"why\": why[:200]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|300|dfe6b99c": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"target\": host_list[:300],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|400|ece2fcd5": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"command\": \"; \".join(cmds)[:400] + f\" → {len(targets)} 台主机\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|200|0b9df482": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"reason\": f\"编排计划 {plan_id}：{(plan.get('note') or '')[:200]}\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|300|b3daf321": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "f\"原因：{(plan.get('note') or '(无)')[:300]}\"),",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "orchestration.py|截断长度|200|8249d054": {
+    "file": "orchestration.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"command\": s[\"command\"][:200], \"rc\": s[\"rc\"], \"ok\": s[\"ok\"]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "pathbind.py|截断长度|4000|2c361e81": {
+    "file": "pathbind.py",
+    "kind": "截断长度",
+    "value": "4000",
+    "snip": "out = ((r.stdout or \"\") + \"\\n\" + (r.stderr or \"\"))[:4000]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "paths.py|截断长度|10|01e96b0d": {
+    "file": "paths.py",
+    "kind": "截断长度",
+    "value": "10",
+    "snip": "return hashlib.sha1(norm.encode(\"utf-8\")).hexdigest()[:10]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|200|0154c1b0": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "f\"- 目标：{str(p.get('target') or '(未指定)')[:200]}\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|400|225e1c21": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "f\"- 具体命令/动作：{str(p.get('command') or p.get('action') or '(未指定)')[:400]}\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|400|cc70ea7d": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "f\"- 理由：{str(p.get('reason') or '(未给)')[:400]}\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|400|335e4da8": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "f\"- 风险面：{str(p.get('risk') or '外部副作用/不可逆操作')[:400]}\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|400|83ba8262": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "f\"- 引擎已做的护栏：{str(p.get('guardrails') or '白名单 + 审计')[:400]}\",",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|300|97a0fc9e": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "reasons[role] = str(v.get(\"reason\") or \"\")[:300]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|200|2d6a78ca": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "errors[role] = str(r.get(\"error\") or \"\")[:200]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|40|bd778d5b": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "\"kind\": str((proposal or {}).get(\"kind\") or \"\")[:40],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "risk_consensus.py|截断长度|80|bba79d47": {
+    "file": "risk_consensus.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "\"target\": str((proposal or {}).get(\"target\") or \"\")[:80],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "route_decision.py|截断长度|300|222e434c": {
+    "file": "route_decision.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"target\": str(target or \"\")[:300],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "route_decision.py|截断长度|500|ba1d359d": {
+    "file": "route_decision.py",
+    "kind": "截断长度",
+    "value": "500",
+    "snip": "\"requirement\": str(requirement or \"\")[:500],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "runtimes.py|截断长度|120|a117a6d6": {
+    "file": "runtimes.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "return True, out.splitlines()[0][:120] if out else \"ok\"",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "sshcred.py|截断长度|12|4b6b1bc3": {
+    "file": "sshcred.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "self.var = env_name or (\"SC_ASKPASS_\" + uuid.uuid4().hex[:12])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "thirdparty.py|截断长度|300|a7326875": {
+    "file": "thirdparty.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "evidence=str(exc)[:300],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "tool_lib.py|截断长度|2000|4f3bd0bc": {
+    "file": "tool_lib.py",
+    "kind": "截断长度",
+    "value": "2000",
+    "snip": "\"output\": out[:2000]}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "tool_lib.py|截断长度|400|a08a08c1": {
+    "file": "tool_lib.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "errors.append(\"复验失败（rc=%s）：%s\" % (vr[\"rc\"], vr[\"output\"][:400]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "triage.py|截断长度|300|71649073": {
+    "file": "triage.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"evidence\": ((details or {}).get(mod) or [\"\"])[0][:300]})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "uistyles.py|禁令|· 配色（用户自填；未填=待用户填，禁止引擎自行指定色值）：|a8e2cda1": {
+    "file": "uistyles.py",
+    "kind": "禁令",
+    "value": "· 配色（用户自填；未填=待用户填，禁止引擎自行指定色值）：",
+    "snip": "lines.append(\"· 配色（用户自填；未填=待用户填，禁止引擎自行指定色值）：\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "uiwatch.py|截断长度|300|5c79c933": {
+    "file": "uiwatch.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"what\": (getattr(e, \"what\", \"\") or \"\")[:300] if e else \"\"})",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "uiwatch.py|截断长度|120|200537c4": {
+    "file": "uiwatch.py",
+    "kind": "截断长度",
+    "value": "120",
+    "snip": "(x.get(\"what\") or \"\")[:120]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "validators.py|截断长度|400|dbb36010": {
+    "file": "validators.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "float(r.get(\"seconds\") or 0), str(r.get(\"detail\") or \"\")[:400]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "verify.py|截断长度|300|f5e2e30d": {
+    "file": "verify.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "return False, \"；\".join(str(d.get(\"desc\") or \"?\") for d in bad)[:300]",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "verify.py|截断长度|300|9b6e2218": {
+    "file": "verify.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"detail\": f\"验收页生成失败：{err3}\", \"evidence\": (txt or \"\")[:300],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "verify.py|截断长度|300|b371afe3": {
+    "file": "verify.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "\"evidence\": (txt or \"\")[:300], \"human_review\": human}",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "verify.py|截断长度|400|d01bf6a0": {
+    "file": "verify.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"evidence\": (sug or {}).get(\"contract\", \"\")[:400],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "verify.py|截断长度|400|e592960e": {
+    "file": "verify.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "\"evidence\": (txt or \"\")[:400],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|60|c7f6214c": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "for ln in files[rel].splitlines()[:60]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|60|0a9a8536": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "60",
+    "snip": "deps.append(\"（相对导入）\" + t[:60])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|200|0400aa6a": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "for path, func in sorted(rf.items())[:200]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|80|e88615df": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "for rel in stats[\"signatures_only\"][:80]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|10|4a8f2451": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "10",
+    "snip": "for it in _rej[:10]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|160|28423651": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "160",
+    "snip": "parts.append(\"- `%s`：%s\\n\" % (it.get(\"path\"), str(it.get(\"why\"))[:160]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|20|25139565": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "lines.append(\"- 其它（blueprint 无契约，仍需保持绿）：\" + \", \".join(missing[:20]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|300|8471e88c": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "300",
+    "snip": "lines.append((\" 证据：%s\" if i == 0 else \" %s\") % ln[:300])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|80|b8aaa1ff": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "80",
+    "snip": "for x in pend[:80]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|600|5cdee94a": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "600",
+    "snip": "lines.append(\"- %s：%s\" % (k, \", \".join(str(x) for x in v)[:600]))",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|40|44751564": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "for cid in _done_ids[:40]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|40|4d5c50fd": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "for cid in _bad[:40]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|12|ed1a8faa": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "12",
+    "snip": "for o in orders[:12]:",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|40|0d53c0bb": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "40",
+    "snip": "p.write_text(_json.dumps({\"paths\": list(dict.fromkeys(paths))[:40],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|20|db240677": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "20",
+    "snip": "p.write_text(_json.dumps(items[:20], ensure_ascii=False, indent=1), encoding=\"utf-8\")",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|200|35a354d3": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "out.append(\"护栏原文：%s\\n\" % detail[:200])",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|4000|05110bbb": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "4000",
+    "snip": "\"text\": parsed[\"rootcause\"][:4000],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|10|77ef2f2b": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "10",
+    "snip": "_emit(emit, \"whole_need\", {\"paths\": parsed[\"need\"][:10],",
+    "依据": "（待填：这个数字凭什么）"
+  },
+  "wholerepo.py|截断长度|200|c09d154c": {
+    "file": "wholerepo.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"detail\": str(res.get(\"detail\") or \"\")[:200]})",
+    "依据": "（待填：这个数字凭什么）"
   }
 }

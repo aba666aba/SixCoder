@@ -48,7 +48,10 @@ def main() -> int:
                  if ".git" not in p.parts and "node_modules" not in p.parts
                  and "_logs" not in p.parts and ".cache" not in p.parts
                  and "dist-installer" not in p.parts
-                 and ".tmp" not in str(p.relative_to(ROOT))]
+                 and ".tmp" not in str(p.relative_to(ROOT))
+                 # 内置 Python 的第三方库自带 .ps1（playwright 安装脚本）——那不是仓库残留
+                 and "site-packages" not in p.parts
+                 and "shell" not in p.parts]
     ck("仓库根没有任何 bat/ps1/cmd 残留", not leftovers, leftovers[:6])
 
     print("[2] 安装包结构：自带运行时 + NSIS")
