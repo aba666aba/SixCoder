@@ -1737,7 +1737,13 @@ def gate_import_smoke(ws: Path, timeout: int = 120) -> GateResult:
     import subprocess as _sp
     import sys as _sys
     try:
-        r = _sp.run([_sys.executable, "-c", f"import {_emod}"], cwd=str(ws),
+        # 内置 Python 是 `._pth` 隔离模式：`sys.path` 固定为解释器自带目录，
+        # **不含当前目录、也不读 PYTHONPATH**，因此 `python -c "import main"` 一律
+        # ModuleNotFoundError（2026-11-23 实测）。这条闸门挂在"每次写文件后"，
+        # 一失败就把生成回滚 → 表现为"入口不可导入、两轮修复失败"。
+        # 与 probe 的 runner 同口径：显式把工作区塞进 sys.path。
+        _code = f"import sys; sys.path.insert(0, {str(ws)!r}); import {_emod}"
+        r = _sp.run([_sys.executable, "-c", _code], cwd=str(ws),
                     capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=timeout)
     except (_sp.TimeoutExpired, OSError) as exc:

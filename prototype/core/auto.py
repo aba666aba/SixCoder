@@ -3050,7 +3050,11 @@ def _asgi_smoke(ws) -> dict | None:
     import subprocess as _sp
     import sys as _sys
     try:
-        r = _sp.run([_sys.executable, "-c", f"import {_emod}"], cwd=str(ws),
+        # 内置 Python 是 `._pth` 隔离模式：`sys.path` 固定、不含 cwd、不读 PYTHONPATH，
+        # `python -c "import app.main"` 一律 ModuleNotFoundError → 会误判"工作区入口坏了"
+        # 并触发两轮修复后收工（2026-11-23 实测，同 gates.gate_import_smoke）。
+        _code = f"import sys; sys.path.insert(0, {str(ws)!r}); import {_emod}"
+        r = _sp.run([_sys.executable, "-c", _code], cwd=str(ws),
                     capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=120)
     except (_sp.TimeoutExpired, OSError) as exc:

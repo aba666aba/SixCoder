@@ -1654,8 +1654,22 @@ def _run_pytest(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict
         root = scratch
     try:
         targets = args or named or [str(root)]
-        cmd = [sys.executable, "-B", "-m", "pytest", "-v", *targets]
-        _r = _run_child(cmd, cwd=str(root), timeout=timeout, env=_env(ws))
+        # 项目根必须在 pytest 的 sys.path 上（2026-11-23 修）：
+        #   · pytest 的 `prepend` 只把 **测试文件所在目录**（tests/）加入 sys.path，
+        #     `tests/test_x.py` 里 `from store import ...` 会 ModuleNotFoundError；
+        #   · 真实项目"仓库根即导入根"，这不是测试写法问题；
+        #   · 环境变量 PYTHONPATH 在 pytest 9 下不生效，必须用 `-o pythonpath=`；
+        #     且该 ini 值按 os.pathsep 解析，**Windows 反斜杠会被当转义吃掉**，
+        #     必须换成正斜杠（实测 2026-11-23：反斜杠下 1 error during collection）。
+        _pp_ini = str(Path(ws).resolve()).replace("\\", "/")
+        cmd = [sys.executable, "-B", "-m", "pytest", "-v",
+               "-o", f"pythonpath={_pp_ini}", *targets]
+        env_p = _env(ws)
+        _pp = str(Path(ws).resolve())
+        if env_p.get("PYTHONPATH"):
+            _pp = _pp + os.pathsep + env_p["PYTHONPATH"]
+        env_p["PYTHONPATH"] = _pp
+        _r = _run_child(cmd, cwd=str(root), timeout=timeout, env=env_p)
         if _r["timed_out"]:
             return {"ok": False, "detail": f"pytest 超时 {timeout}s"}
         out, err, code = _r["out"], _r["err"], _r["code"]
