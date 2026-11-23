@@ -178,6 +178,29 @@ function writeBackendLog(s) {
   } catch (e) { /* 日志写不进去也不能挡住启动 */ }
 }
 
+/* 启动流程日志（2026-11-23）。
+
+   为什么单独一个文件：安装版双击后"没反应"时，用户能拿到的只有这个文件。
+   之前两个盲区让这类故障完全无法排查：
+     1. `app.whenReady().then(...)` **没有 .catch** —— 里面任何异常都被静默吞掉，
+        表现就是"进程活着/退出、但没窗口、没日志"；
+     2. 拿不到单实例锁时直接 `app.quit()` —— 静默退出，连一行记录都没有，
+        而上一实例如果是被强杀的僵尸，用户看到的就是"双击毫无反应"。
+   每次启动都追加记录（含 argv / isPackaged / 锁结果），出问题直接发这个文件。 */
+const BOOT_LOG_FILE = path.join(LOG_DIR, 'boot.log')
+function writeBootLog(msg) {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true })
+    fs.appendFileSync(BOOT_LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`)
+  } catch (e) { /* 日志写不进去也不能挡住启动 */ }
+}
+
+function logFatal(where, err) {
+  const text = err && err.stack ? err.stack : String(err)
+  writeBootLog(`!! ${where} 失败：${text}`)
+  console.error(`[shell] ${where} 失败:`, text)
+}
+
 function esc(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -519,14 +542,14 @@ if (INSTALL_RUNTIME) {
     }
     app.quit()
   })
-} else if (!app.requestSingleInstanceLock()) {
-  app.quit()
 } else {
-  app.on('second-instance', () => {
-    showWindow()
-  })
+  // 单实例锁：拿不到通常意味着"已有实例在跑"（应激活它然后退出）。
+  // 但上一实例要是被强杀/崩溃留下的僵尸锁，直接 quit 会让用户看到"双击毫无反应"
+  // ——所以这里区分「真有活实例（后端在线）」与「僵尸锁」两种情形（2026-11-23）。
+  const gotLock = app.requestSingleInstanceLock()
+  writeBootLog(`启动：isPackaged=${IS_PACKED} lock=${gotLock} argv=${JSON.stringify(process.argv.slice(1))}`)
 
-  app.whenReady().then(async () => {
+  async function boot() {
     buildMenu()
     // 先选端口：8760 上若已是本软件后端就复用；被别的程序占了就自动 +1 找空闲端口。
     // 关键是"真健康检查"——不能只看 TCP 通不通，否则会把占端口的别人的页面加载进来。
@@ -537,17 +560,40 @@ if (INSTALL_RUNTIME) {
     if (choice.exhausted) {
       lastError = `端口 ${BASE_PORT} 起连续 20 个端口都被占用，无法启动后端`
     }
-    console.log(`[shell] 端口选择：${PORT}  复用已有后端=${!!choice.reuse}  跳过=${portOccupiedBy.join(',') || '无'}`)
+    writeBootLog(`端口选择 ${PORT}  复用已有后端=${!!choice.reuse}  跳过=${portOccupiedBy.join(',') || '无'}`)
     // 清掉 Chromium 缓存，保证每次打开都拿到最新前端（实测旧页面缓存导致"改了看不到"）
     try {
       const { session } = require('electron')
       await session.defaultSession.clearCache()
     } catch (e) { console.warn('[shell] 清缓存失败:', e.message) }
     spawnBackend()
+    writeBootLog('已 spawn 后端')
     await createWindow()
     createTray()                                  // 托盘常驻，随时能点回来
+    writeBootLog('窗口与托盘就绪，启动完成')
     app.on('activate', () => { showWindow() })
-  })
+  }
+
+  if (gotLock) {
+    app.on('second-instance', () => {
+      showWindow()
+    })
+    // 必须 .catch：以前这里没有 catch，whenReady 里任何异常都被静默吞掉，
+    // 表现就是"没窗口也没日志"，完全无法排查。
+    app.whenReady().then(boot).catch((e) => logFatal('boot', e))
+  } else {
+    app.whenReady().then(async () => {
+      const st = await probeHealth(BASE_PORT, 1500)
+      writeBootLog(`拿不到单实例锁；BASE_PORT(${BASE_PORT}) health=${st}`)
+      if (st === 'ours') {
+        writeBootLog('已有活实例（后端在线）→ 本次启动退出，窗口应在任务栏/托盘')
+        app.quit()
+        return
+      }
+      writeBootLog('锁被占但端口没有活后端 → 判定为僵尸锁，强制启动')
+      await boot()
+    }).catch((e) => logFatal('boot(zombie-lock)', e))
+  }
 }
 
 // 窗口全关也不退出（收进托盘时窗口只是隐藏；真退出走托盘菜单/关机）
