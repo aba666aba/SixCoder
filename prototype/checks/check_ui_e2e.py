@@ -143,7 +143,7 @@ def main() -> int:
             pg.wait_for_timeout(300)
             pg.locator("input[placeholder*='凭据引用']").fill("env:E2E_PW")
             pg.locator("textarea[placeholder*='git pull']").fill(
-                "git pull\nsystemctl restart app")
+                "git pull\nsystemctl restart app\nsystemctl is-active app")
             pg.click("button:has-text('保存目标')")
             pg.wait_for_timeout(1000)
             dcfg = (json.loads(tmp.read_text(encoding="utf-8")) or {}).get("deploy") or {}
@@ -156,7 +156,8 @@ def main() -> int:
             check("凭据只存引用（env:）", tg.get("credential") == "env:E2E_PW",
                   repr(tg.get("credential")))
             check("命令白名单整行保存",
-                  tg.get("allow_commands") == ["git pull", "systemctl restart app"],
+                  tg.get("allow_commands") == ["git pull", "systemctl restart app",
+                                               "systemctl is-active app"],
                   str(tg.get("allow_commands")))
 
             # ⑤ 安全红线：明文密码不许落盘（后端静默丢弃，界面仍提示已保存）
@@ -203,7 +204,43 @@ def main() -> int:
                   and plan.get("rollback") == ["systemctl restart app"],
                   str({k: plan.get(k) for k in ("health_check", "rollback")}))
 
-            # ⑦ 体检：真跑链路走查，出结果（不强求全绿，只要求跑出结论）
+            # ⑦ 编排执行：三级闸门都能确定触发（开关 → 白名单 → 协商）
+            # 刻意不开任何测试后门（不注入自动批准），只验「接线正确 + 拒绝原因可见」。
+            pg.locator("button:has-text('提交执行')").click()      # 此时通道未启用
+            pg.wait_for_timeout(1500)
+            t1 = pg.locator("body").inner_text()
+            check("执行·未启用时被拒且原因可见", "未启用" in t1, t1[-200:])
+
+            pg.click("button:has-text('切换')")                   # 启用编排通道
+            pg.wait_for_timeout(900)
+            ocfg1 = (json.loads(tmp.read_text(encoding="utf-8")) or {}).get("orchestration") or {}
+            check("编排通道可启用", ocfg1.get("enabled") is True, str(ocfg1.get("enabled")))
+
+            # 白名单外的命令：保存得进（配置面），执行必须被拒
+            pg.locator("input[placeholder*='计划 id']").fill("e2e_bad")
+            pg.locator("label:has-text('e2ehost') input[type='checkbox']").check()
+            pg.locator("textarea[rows='4']").fill("rm -rf /tmp/e2e_not_allowed || 越权试探")
+            pg.click("button:has-text('保存计划')")
+            pg.wait_for_timeout(900)
+            pg.locator("select:has(option[value='e2e_bad'])").select_option("e2e_bad")
+            pg.locator("button:has-text('提交执行')").click()
+            pg.wait_for_timeout(2000)
+            t2 = pg.locator("body").inner_text()
+            check("执行·白名单外命令被拒", "白名单" in t2, t2[-240:])
+
+            # 白名单内的计划：应真的往下走（协商/人审），且必须有可见反馈
+            pg.locator("select:has(option[value='e2e_rollout'])").select_option("e2e_rollout")
+            pg.locator("button:has-text('提交执行')").click()
+            got, t3 = False, ""
+            for _ in range(20):
+                pg.wait_for_timeout(1000)
+                t3 = pg.locator("body").inner_text()
+                if "✗" in t3 or "✓" in t3:
+                    got = True
+                    break
+            check("执行·白名单内必须有明确反馈（不静默）", got, t3[-260:])
+
+            # ⑧ 体检：真跑链路走查，出结果（不强求全绿，只要求跑出结论）
             pg.click(".tab:has-text('体检')")
             pg.wait_for_timeout(700)
             pg.click("button:has-text('跑链路走查')")

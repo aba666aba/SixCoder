@@ -907,7 +907,7 @@
   "kind": "截断长度",
   "value": "500",
   "snip": "db.execute(\"UPDATE nodes SET last_error=? WHERE id=?\", (feedback[:500], node[\"nid\"]))",
-  "依据": "展示类截断（emit 事件 / 证据 / 命令输出 / reason）：只决定『给人看多少』，判据一律读原始数据，不参与比较。>=1000 的大数值已逐条核过用途，其中影响判据/人审/提示词的已在各自条目写明"
+  "依据": "失败证据落库节点字段的预算（nodes.last_error）：只影响『事后排查时能读到多长的失败原因』。**判据不受影响**——真正的门禁记录走 db.record_gate(..., feedback) 存完整正文，探针与判据读的是那份。500 字够定位常见 ToolError / 引擎异常"
  },
  "agent.py|截断长度|20000|3d7046a3": {
   "file": "agent.py",
@@ -935,7 +935,7 @@
   "kind": "截断长度",
   "value": "500",
   "snip": "db.execute(\"UPDATE nodes SET last_error=? WHERE id=?\", (reason[:500], node[\"nid\"]))",
-  "依据": "展示类截断（emit 事件 / 证据 / 命令输出 / reason）：只决定『给人看多少』，判据一律读原始数据，不参与比较。>=1000 的大数值已逐条核过用途，其中影响判据/人审/提示词的已在各自条目写明"
+  "依据": "失败证据落库节点字段的预算（nodes.last_error）：只影响『事后排查时能读到多长的失败原因』。**判据不受影响**——真正的门禁记录走 db.record_gate(..., feedback) 存完整正文，探针与判据读的是那份。500 字够定位常见 ToolError / 引擎异常"
  },
  "agent.py|截断长度|500|e98e3949": {
   "file": "agent.py",
@@ -2674,7 +2674,7 @@
   "kind": "截断长度",
   "value": "400",
   "snip": "return {\"ok\": rc == 0, \"head\": head if rc2 == 0 else \"\", \"detail\": out[:400],",
-  "依据": "展示类截断（emit 事件 / 证据 / 命令输出 / reason）：只决定『给人看多少』，判据一律读原始数据，不参与比较。>=1000 的大数值已逐条核过用途，其中影响判据/人审/提示词的已在各自条目写明"
+  "依据": "gitops 操作结果里 detail 的上限（400 字）：纯返回给调用方/界面看的输出摘要，ok/head/conflicts 等判据字段不截断。属展示"
  },
  "oracle.py|截断长度|200|962d4906": {
   "file": "oracle.py",

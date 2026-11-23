@@ -275,6 +275,34 @@ def main(argv: list[str]) -> int:
     if r["stale_baseline"]:
         print(f"\n  [baseline 里过期 {len(r['stale_baseline'])} 条]（代码已删，可以清掉）")
 
+    # 依据自洽性审计（2026-11-23）：标为"展示类"但切片落在**会影响行为的上下文**里，
+    # 说明依据可能写偏了（实测抓到 contract.py 的 1200 其实是判据阈值、
+    # agent.py 的 500 是失败证据落库）。只提醒、不判失败——最终仍要人看。
+    suspect = []
+    for it in r["ruled"]:
+        if it.get("kind") != "截断长度":
+            continue
+        if not str(it.get("依据") or "").startswith("展示类截断"):
+            continue
+        try:
+            n = int(it["value"])
+        except (TypeError, ValueError):
+            continue
+        if n < 300:
+            continue
+        snip = it.get("snip") or ""
+        for pat, why in ((r"INSERT|UPDATE\s+\w+\s+SET|db\.execute", "写数据库"),
+                         (r"prompt|PROMPT|\.replace\(\"@", "进提示词"),
+                         (r"write_text|open\(", "写文件")):
+            if re.search(pat, snip):
+                suspect.append((why, it))
+                break
+    if suspect:
+        print(f"\n  [依据自洽性提醒] {len(suspect)} 条标为『展示类』却疑似影响行为（>=300 字），"
+              f"建议复核依据是否写偏：")
+        for why, it in suspect[:8]:
+            print(f"    {it['file']}:{it['line']} {it['value']} ({why})  {it['snip'][:70]}")
+
     fails = len(r["unruled"]) + len(empty_reason)
     print()
     if fails:
