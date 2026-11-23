@@ -259,6 +259,25 @@ def main() -> int:
           any("stdout_has" in x for x in _pr2.validate(
               {"kind": "cli", "cmd": ["go", "test"]})))
 
+    # 跨语言 cmd 探针**真跑**（本机有 node 时）：证明"识别 + 执行 + 断言"整条链通，
+    # 而不只是结构自检。没有该工具链就如实跳过（不算通过）。
+    import shutil as _sh
+    if _sh.which("node"):
+        _wn = _P2(_t3.mkdtemp(prefix="eco_node_run_"))
+        _TMP.append(_wn)
+        (_wn / "server.js").write_text("// node backend\n", encoding="utf-8")
+        (_wn / "check.js").write_text("console.log('ok from node')\n", encoding="utf-8")
+        _rn = _pr2.run(_wn, {"kind": "cli", "cmd": ["node", "check.js"],
+                             "stdout_has": "ok from node"})
+        check("node cmd 探针真跑通过", _rn.get("ok") is True,
+              str(_rn.get("detail"))[:140])
+        _rn2 = _pr2.run(_wn, {"kind": "cli", "cmd": ["node", "check.js"],
+                              "stdout_has": "__NEVER__"})
+        check("node cmd 探针断言不符判红", _rn2.get("ok") is False,
+              str(_rn2.get("detail"))[:140])
+    else:
+        print("  SKIP  node 未安装，跨语言真跑跳过（不算通过）")
+
     print("[5] 协商接线：install_ecosystem")
     op = {"op": "install_ecosystem", "cap": "cap.x", "pack": _pack("t_wi")}
     check("valid_patch_op 放行合法生态包", jf.valid_patch_op(op)[0])
