@@ -128,7 +128,11 @@ def gate_syntax(ws: Path, paths: list[str]) -> GateResult:
 
 def gate_tests(ws: Path, targets: list[str] | None = None, timeout: int = 180) -> GateResult:
     t0 = time.time()
-    cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider"]
+    # 仓库根必须在 pytest 的 sys.path 上：`tests/test_x.py` 里 `from store import ...`
+    # 在 prepend 模式下只加 tests/ 目录 → 必失败（2026-11-23，同 probe._run_pytest）。
+    _pp = str(Path(ws).resolve()).replace("\\", "/")
+    cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider",
+           "-o", f"pythonpath={_pp}"]
     if targets:
         cmd += targets
     rc, out = tools.run_cmd(ws, cmd, timeout=timeout)
@@ -1315,6 +1319,9 @@ def _batch_import(ws: Path, entries: list[tuple[str, str, Path]],
                       | {str(Path(c).resolve()) for _, _, c in entries})
     script = (
         "import json,sys,importlib\n"
+        # 内置 Python 的 `._pth` 隔离模式**忽略 PYTHONPATH** → 必须显式注入，
+        # 否则批量 import 全部 ModuleNotFound（2026-11-23；argv[2] 用 | 分隔）。
+        "sys.path[:0]=[p for p in sys.argv[2].split('|') if p]\n"
         "mods=[l for l in open(sys.argv[1],encoding='utf-8').read().splitlines() if l.strip()]\n"
         "out={}\n"
         "for mod in mods:\n"
@@ -1329,11 +1336,12 @@ def _batch_import(ws: Path, entries: list[tuple[str, str, Path]],
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write("\n".join(mods))
-        proc = subprocess.run([sys.executable, "-c", script, list_path], cwd=str(Path(ws).resolve()),
+        proc = subprocess.run([sys.executable, "-c", script, list_path,
+                               "|".join(pathlist)],
+                              cwd=str(Path(ws).resolve()),
                               capture_output=True, text=True, timeout=max(timeout, 60),
                               encoding="utf-8", errors="replace",
                               env={**os.environ, "PYTHONIOENCODING": "utf-8",
-                                   "PYTHONPATH": os.pathsep.join(pathlist),
                                    "PYTHONDONTWRITEBYTECODE": "1"})
         data = _json.loads(proc.stdout or "{}")
         if not isinstance(data, dict):
@@ -1385,11 +1393,14 @@ def gate_import_ok(ws: Path, paths: list[str], timeout: int = 60) -> GateResult:
                     findings.append(f"{rel}（import {mod}）导入失败：{err[:160]}")
         else:
             for rel, mod, cwd in entries:
-                proc = subprocess.run([sys.executable, "-c", f"import {mod}"], cwd=str(cwd),
+                # 内置 Python 的 `._pth` 隔离模式**忽略 PYTHONPATH**，必须显式注入
+                # （2026-11-23；与 gate_import_smoke 同口径）。
+                _code = (f"import sys; sys.path.insert(0, {str(Path(cwd).resolve())!r});"
+                         f" import {mod}")
+                proc = subprocess.run([sys.executable, "-c", _code], cwd=str(cwd),
                                       capture_output=True, text=True, timeout=timeout,
                                       encoding="utf-8", errors="replace",
                                       env={**os.environ, "PYTHONIOENCODING": "utf-8",
-                                           "PYTHONPATH": str(Path(ws).resolve()),
                                            "PYTHONDONTWRITEBYTECODE": "1"})
                 if proc.returncode != 0:
                     err = (proc.stderr or "").strip().splitlines()

@@ -142,7 +142,10 @@ def run_cmd(ws, cmd: str) -> dict:
         d.mkdir(parents=True, exist_ok=True)
         script = d / f"run_{os.getpid()}_{_RUN_SEQ}.py"
         try:
-            script.write_text(m.group("code"), encoding="utf-8")
+            # 前置一行把工作区塞进 sys.path：内置 Python 的 `._pth` 下，临时脚本所在目录
+            # 不会自动进 path，`import app.xxx` 会 ModuleNotFound（2026-11-23）。
+            script.write_text(f"import sys; sys.path.insert(0, {str(ws)!r})\n"
+                              + m.group("code"), encoding="utf-8")
         except OSError as exc:
             return {"cmd": cmd, "ok": False, "exit": None, "out": "",
                     "err": f"引擎写不了临时脚本：{exc}"}
@@ -155,7 +158,19 @@ def run_cmd(ws, cmd: str) -> dict:
     head = argv[0].lower()
     # 用**当前解释器**跑 python/pytest，避免"作者跑的是别的环境"这种最隐蔽的假绿
     if head in ("python", "python3", "python.exe", "py"):
-        argv = [sys.executable, "-B", *argv[1:]]
+        _rest = argv[1:]
+        # 脚本形态走 runpy：`._pth` 下 `python main.py` 的**脚本目录不进 sys.path**，
+        # main.py 里 `from cli_core import ...` 会直接 ModuleNotFound（2026-11-23）。
+        # runpy 显式注入脚本目录，语义与正常解释器下 `python main.py` 等价。
+        if _rest and _rest[0].endswith(".py"):
+            _sp = (ws / _rest[0]).resolve()
+            _code = ("import sys, runpy\n"
+                     f"sys.path.insert(0, {str(_sp.parent)!r})\n"
+                     f"sys.argv = {([str(_sp), *_rest[1:]])!r}\n"
+                     f"runpy.run_path({str(_sp)!r}, run_name='__main__')\n")
+            argv = [sys.executable, "-B", "-c", _code]
+        else:
+            argv = [sys.executable, "-B", *_rest]
     elif head == "pytest":
         argv = [sys.executable, "-B", "-m", "pytest", *argv[1:]]
     return _exec(ws, argv, cmd)

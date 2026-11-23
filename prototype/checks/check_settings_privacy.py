@@ -60,8 +60,11 @@ def main() -> int:
     cfg = json.loads((ROOT / "packaging" / "electron-builder.json").read_text(encoding="utf-8"))
     flt = cfg["extraResources"][1]["filter"]
     for pat in ("!data/settings.json", "!data/toolchains.json",
-                "!data/tool_lib/**", "!data/ecosystem/**", "!data/scratch/**"):
+                "!data/tool_lib/**", "!data/scratch/**"):
         ck("filter 有 " + pat, pat in flt)
+    # 生态包**必须进安装版**：否则装好的软件认不出 frontend_spa/electron/spring_boot 等栈，
+    # 等于功能缺失。早期为缩小体积排除了它，2026-11-23 已改为随包分发。
+    ck("生态包不被排除（装好的软件要能用）", "!data/ecosystem/**" not in flt, flt)
     ck("仍保留 data/axe.min.js", "!data/axe.min.js" not in flt)
     extras = cfg["extraResources"]
     ck("extraResources 放的是模板文件（不覆盖用户 settings.json）", any(

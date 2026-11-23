@@ -238,15 +238,37 @@ def gate_coverage(ws: Path, level: str = "M", floor: float | None = None,
         # M 档 80% 地板因此永远判红 —— 覆盖率就成了假红，会卡死整次夜班。
         # --source 指向工作区，report 再按同口径过滤，外部文件一律不计。
         source = str(Path(ws).resolve())
-        proc = subprocess.run([sys.executable, "-m", "coverage", "run",
-                               f"--source={source}", "-m", "pytest", "-q"],
+        # 覆盖率跑不起来最常见的原因不是"没测试"，而是**测试本身导入失败**：
+        # pytest 的 prepend 只加 tests/ 目录，`from store import ...` 会 ModuleNotFound
+        # → 一条都没收集到 → 覆盖率 0% → 被当成"真的没覆盖"（2026-11-23）。
+        _pp = source.replace("\\", "/")
+        # 优先用 pytest-cov：`coverage run -m pytest` 在**嵌入式 Python** 下会崩——
+        # coverage 的 execfile 调整 sys.path 后，import pytest → wcwidth → unicodedata
+        # 找不到（内置 Python 的 .pyd 只在解释器目录，2026-11-23 实测）。
+        # pytest-cov 在测试进程内启动覆盖率，不经过 execfile，口径同样是 --cov 过滤。
+        proc = subprocess.run([sys.executable, "-m", "pytest", "-q",
+                               f"--cov={source}", "--cov-report=term",
+                               "-o", f"pythonpath={_pp}"],
                               cwd=str(ws), capture_output=True, text=True, timeout=timeout,
                               env=_cov_env)
-        rep = subprocess.run([sys.executable, "-m", "coverage", "report", "--format=total",
-                              f"--include={source}/*"],
-                             cwd=str(ws), capture_output=True, text=True, timeout=60,
-                             env=_cov_env)
-        total = float((rep.stdout or "0").strip().splitlines()[-1] or 0)
+        total = None
+        for ln in (proc.stdout or "").splitlines():
+            if ln.strip().startswith("TOTAL"):
+                m = re.search(r"(\d+)%", ln)
+                if m:
+                    total = float(m.group(1))
+        if total is None:
+            # pytest-cov 不可用（未安装 / 版本不认 --cov）→ 回退到 coverage run/report
+            subprocess.run([sys.executable, "-m", "coverage", "run",
+                            f"--source={source}", "-m", "pytest", "-q",
+                            "-o", f"pythonpath={_pp}"],
+                           cwd=str(ws), capture_output=True, text=True, timeout=timeout,
+                           env=_cov_env)
+            rep = subprocess.run([sys.executable, "-m", "coverage", "report", "--format=total",
+                                  f"--include={source}/*"],
+                                 cwd=str(ws), capture_output=True, text=True, timeout=60,
+                                 env=_cov_env)
+            total = float((rep.stdout or "0").strip().splitlines()[-1] or 0)
     except Exception as exc:                             # noqa: BLE001
         return GateResult("coverage", True, "static_rule", "error",
                           f"覆盖率测量失败（{type(exc).__name__}）；不给通过结论",

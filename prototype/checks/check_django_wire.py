@@ -192,6 +192,15 @@ def main() -> int:
                str(_carry)[:300])
 
         print()
+        try:
+            import django  # noqa: F401
+        except ImportError:
+            # [3] 写盘后要用 `manage.py check` 做复验守卫；没有 django 时守卫必然失败 →
+            # 回滚快照 → touched 为空，看起来像"接线逻辑坏了"，其实是缺依赖（2026-11-23）。
+            print("  SKIP  [3]/[4] 真接线需要 django（写盘后 manage.py check 守卫），本环境没有")
+            print()
+            print("SKIP：django 真接线未覆盖（缺依赖）；[1][2][2b] 已通过")
+            return 0
         print("[3] 真接线（写 urls.py → manage.py check）")
         bp = _BP([_Cap("cap.widgets.create", "POST", "/api/v1/widgets/",
                        ["title", "summary"]),

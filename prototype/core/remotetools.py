@@ -664,7 +664,11 @@ class ToolLoop:
                     deploy_authorized=attrs.get("deploy_authorized", False),
                     requirement=attrs.get("requirement") or "",
                 )
-                return True, json.dumps(decision, ensure_ascii=False, indent=2)
+                # 附上"四条路径各自适用什么信号"的速查：远端的系统提示里也有，但工具
+                # 返回值是**当下可见**的那一份，判完路径立刻能对照（tool_summary 的用处）。
+                return True, json.dumps(
+                    {**decision, "summary": _rd.tool_summary()},
+                    ensure_ascii=False, indent=2)
             if name == "deploy_targets":
                 from . import deploy as _deploy
                 return True, json.dumps(_deploy.public_config(), ensure_ascii=False, indent=2)
