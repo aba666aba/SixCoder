@@ -45,12 +45,58 @@ LIMIT_HINT = re.compile(r"上限|阈值|门槛|floor|ceil|cap|limit|最多|至�
 PROHIBIT = re.compile(r"[\"'][^\"']{0,80}(不许|不允许|禁止|不要|不得)[^\"']{0,80}[\"']")
 SLICE_TAIL = re.compile(r"\[\s*:\s*(\d{2,})\s*\]")
 SLICE_HEAD = re.compile(r"\[\s*(\d{2,})\s*:\s*\]")
-KWARG_NUM = re.compile(r"\b(max_[a-z_]+|min_[a-z_]+|floor|ceil|cap|cap_total)\s*[:=]\s*(-?\d+)")
-CMP_NUM = re.compile(r"(?:>=|<=|==|!=|>|<)\s*(\d{2,})")
+# 数字要支持千分位下划线：`max_lines=1_000_000` 以前被切成 1（2026-11-23 修）
+_NUM = r"(-?\d[\d_]*)"
+KWARG_NUM = re.compile(r"\b(max_[a-z_]+|min_[a-z_]+|floor|ceil|cap|cap_total)\s*[:=]\s*" + _NUM)
+CMP_NUM = re.compile(r"(?:>=|<=|==|!=|>|<)\s*(\d[\d_]{1,})")
 
 
 def _snippet(line: str) -> str:
     return re.sub(r"\s+", " ", line.strip())[:120]
+
+
+def _code_mask(line: str) -> str:
+    """把**普通字符串**的字面量内容换成等长空格，只留生效代码用于数字匹配。
+
+    目的：`label="> 100 万行"` 这类文案里的数字不是常量，不该被当成比较阈值
+    （2026-11-23 实测：scale.py 的档位标签被扫成 3 条假阈值）。
+
+    关键细节：**f-string 不掩**——`f"{x[:120]}"` 里的切片是生效代码，
+    掩掉会漏掉大量真截断（第一版就踩了这个，误删 115 条）。
+    引号本身保留，偏移量与原文一致。
+    """
+    out: list[str] = []
+    q = ""
+    fstr = False
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if not q:
+            if ch in "\"'":
+                q = ch
+                pre = line[max(0, i - 2):i].lower()
+                fstr = pre.endswith("f") or pre.endswith("rf") or pre.endswith("fr")
+                out.append(ch)
+                i += 1
+                continue
+            out.append(ch)
+            i += 1
+            continue
+        # —— 字符串内部 ——
+        if ch == "\\" and i + 1 < n:          # 转义：整体跳过（长度不变）
+            out.append(ch if fstr else " ")
+            out.append(line[i + 1] if fstr else " ")
+            i += 2
+            continue
+        if ch == q:
+            q = ""
+            fstr = False
+            out.append(ch)
+            i += 1
+            continue
+        out.append(ch if fstr else " ")
+        i += 1
+    return "".join(out)
 
 
 def _key(path: Path, kind: str, value: str, snip: str) -> str:
@@ -118,23 +164,25 @@ def scan() -> list[dict]:
             if not line or line.startswith("#"):
                 continue
             base = {"file": p.name, "line": i, "snip": _snippet(line)}
+            # 数字类只在**生效代码**里找：字符串字面量（文案/提示）里的数字不是常量
+            code = _code_mask(line)
 
             # 1) 截断类：[:N] / [N:]
-            for m in list(SLICE_TAIL.finditer(line)) + list(SLICE_HEAD.finditer(line)):
+            for m in list(SLICE_TAIL.finditer(code)) + list(SLICE_HEAD.finditer(code)):
                 n = int(m.group(1))
                 items.append({**base, "kind": "截断长度", "value": str(n),
                               "key": _key(p, "截断长度", str(n), base["snip"])})
             # 2) 关键字参数里的上限
-            for m in KWARG_NUM.finditer(line):
-                n = int(m.group(2))
-                if n and LIMIT_HINT.search(line):
+            for m in KWARG_NUM.finditer(code):
+                n = int(m.group(2).replace("_", ""))
+                if n and LIMIT_HINT.search(code):
                     items.append({**base, "kind": "默认上限", "value": str(n),
                                   "name": m.group(1),
                                   "key": _key(p, "默认上限", f"{m.group(1)}={n}", base["snip"])})
             # 3) 比较阈值
-            for m in CMP_NUM.finditer(line):
-                n = int(m.group(1))
-                if n >= 10 and LIMIT_HINT.search(line):
+            for m in CMP_NUM.finditer(code):
+                n = int(m.group(1).replace("_", ""))
+                if n >= 10 and LIMIT_HINT.search(code):
                     items.append({**base, "kind": "比较阈值", "value": str(n),
                                   "key": _key(p, "比较阈值", str(n), base["snip"])})
             # 4) 禁令语句
