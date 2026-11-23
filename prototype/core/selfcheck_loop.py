@@ -31,6 +31,8 @@ import sys
 import time
 from pathlib import Path
 
+from . import pyenv as _pyenv
+
 MAX_STEPS = 6            # 一次片内自验最多几步（每步 = 一次远端 + 至多 2 条命令）
 CMDS_PER_STEP = 2
 CMD_TIMEOUT = 60         # 单条命令超时（与探针同口径）
@@ -163,12 +165,8 @@ def run_cmd(ws, cmd: str) -> dict:
         # main.py 里 `from cli_core import ...` 会直接 ModuleNotFound（2026-11-23）。
         # runpy 显式注入脚本目录，语义与正常解释器下 `python main.py` 等价。
         if _rest and _rest[0].endswith(".py"):
-            _sp = (ws / _rest[0]).resolve()
-            _code = ("import sys, runpy\n"
-                     f"sys.path.insert(0, {str(_sp.parent)!r})\n"
-                     f"sys.argv = {([str(_sp), *_rest[1:]])!r}\n"
-                     f"runpy.run_path({str(_sp)!r}, run_name='__main__')\n")
-            argv = [sys.executable, "-B", "-c", _code]
+            # 统一走 pyenv（._pth 下脚本目录不进 sys.path），并把工作区根也注入
+            argv = _pyenv.script_argv(ws / _rest[0], _rest[1:], root_dir=ws)
         else:
             argv = [sys.executable, "-B", *_rest]
     elif head == "pytest":

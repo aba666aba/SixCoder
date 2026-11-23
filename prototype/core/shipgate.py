@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 from . import blueprint as _bp
+from . import pyenv as _pyenv
 from . import probe as _probe
 
 
@@ -690,7 +691,9 @@ def ship_check(ws, bp) -> dict:
     # 3) 测试能跑
     if (ws / "tests" / "test_api.py").is_file():
         try:
-            p = subprocess.run([sys.executable, "-m", "pytest", "-q", "tests"],
+            # 必须带 `-o pythonpath=`：否则 tests/test_api.py 里的 `from app…` 在
+            # `._pth` 隔离下导入失败，被误判成"测试不通过"（2026-11-23）。
+            p = subprocess.run(_pyenv.pytest_argv(ws, ["tests"]),
                                cwd=str(ws), capture_output=True, text=True, timeout=300,
                                encoding="utf-8", errors="replace",
                                env={**__import__("os").environ, "PYTHONDONTWRITEBYTECODE": "1"})

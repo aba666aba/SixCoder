@@ -26,6 +26,8 @@ import sys
 import time
 from pathlib import Path
 
+from . import pyenv as _pyenv
+
 PROBE_KINDS = ("cli", "py_call", "pytest", "http", "browser", "sql", "electron")
 PROBE_TIMEOUT = 60
 _SCRATCH_SEQ = 0
@@ -1653,18 +1655,9 @@ def _run_cli(ws: Path, probe: dict, timeout: int, out_cap: int = 240) -> dict:
             p = scratch / str(name)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(str(content), encoding="utf-8")
-        # 内置 Python 的 `._pth` 模式会让 `python script.py` 的**脚本目录也不进 sys.path**
-        # （2026-11-23 实测：main.py 里 `from cli_core import ...` 直接 ModuleNotFound）。
-        # 用 runpy 显式注入脚本目录再执行，与正常解释器下 `python script.py` 等价：
-        # `__file__`/`__name__`/`sys.argv` 都对，`sys.exit(n)` 的退出码照常传播。
-        _script = str(target)
-        _code = (
-            "import sys, runpy\n"
-            f"sys.path.insert(0, {str(target.parent)!r})\n"
-            f"sys.argv = {([_script, *args])!r}\n"
-            f"runpy.run_path({_script!r}, run_name='__main__')\n"
-        )
-        _r = _run_child([sys.executable, "-B", "-c", _code],
+        # 统一走 pyenv：内置 Python 的 `._pth` 下脚本目录不进 sys.path，
+        # 裸写 `python script.py` 会让 main.py 里的同目录 import 直接失败（2026-11-23）。
+        _r = _run_child(_pyenv.script_argv(target, args),
                         cwd=str(scratch), timeout=timeout, env=_env(ws))
         if _r["timed_out"]:
             return {"ok": False, "detail": f"超时 {timeout}s（可能有死循环或等待输入）"}
