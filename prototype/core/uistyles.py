@@ -84,13 +84,20 @@ def _valid_color(value: str) -> bool:
 
 
 def validate_selection(selected: str, colors: dict | None) -> tuple[bool, str]:
-    """校验一次选择是否合法：预设存在、颜色值都是安全色值、无未知插槽。"""
+    """校验一次选择是否合法：预设存在、颜色值都是安全色值、无未知插槽。
+
+    **空值算"还没填"，不是非法值**（2026-11-23 修）：前端首次打开面板时每个插槽
+    都是空串，用户只挑样式不填色就点保存 → 旧逻辑报"颜色值不合法"，等于把
+    "先选样式、颜色慢慢填"这条正常路径堵死（`select()` 的注释本来也允许空）。
+    """
     if not get_preset(selected):
         return False, "未选择有效预设"
     allowed = {s.get("key") for s in color_slots()}
     for k, v in (colors or {}).items():
         if k not in allowed:
             return False, f"未知颜色插槽：{k}"
+        if not str(v or "").strip():
+            continue                     # 空 = 用户尚未填，允许
         if not _valid_color(v):
             return False, f"颜色值不合法或含注入字符：{k}"
     return True, "ok"

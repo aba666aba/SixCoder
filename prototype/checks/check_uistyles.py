@@ -114,6 +114,17 @@ def main() -> int:
         check("验收页无脚本注入", "<script" not in html)
         u.select("minimal-clean", {})       # 复原，不留测试色值
 
+        print("[9] 空插槽允许（先选样式、颜色后填）")
+        # 2026-11-23 真 UI 跑出来的 bug：前端首次打开每个插槽都是空串，
+        # 旧校验把空串当"非法色值"→ 只挑样式不填色就保存会 400。
+        ok_empty, why_empty = u.validate_selection("minimal-clean", {"primary": "", "bg": ""})
+        check("空插槽不算非法", ok_empty, why_empty)
+        check("非法值仍拒绝（底线没松）",
+              not u.validate_selection("minimal-clean", {"primary": "<script>"})[0])
+        check("未知插槽仍拒绝",
+              not u.validate_selection("minimal-clean", {"nope": "#fff"})[0])
+        u.select("minimal-clean", {})
+
     finally:
         os.environ.pop("SIXCODER_SETTINGS", None)
         try:
