@@ -185,6 +185,11 @@ const remote = ref({ available: false, reason: '', remote: {}, usage: {} })
 const remoteForm = reactive({ api_key: '', model: '', base_url: '', compat: 'deepseek' })
 const remoteTest = reactive({ busy: false, ok: null, detail: '' })
 
+const remoteUsage = ref(null)
+async function loadRemoteUsage() {
+  try { remoteUsage.value = await api('/v1/settings/remote/usage') }
+  catch (e) { /* 辅助信息：拿不到不影响配置面板 */ }
+}
 async function loadRemote(reveal = false) {
   try {
     const d = await api('/v1/settings/remote' + (reveal ? '?reveal=true' : ''))
@@ -194,6 +199,7 @@ async function loadRemote(reveal = false) {
     remoteForm.compat = d.remote?.compat || 'deepseek'
     if (reveal) remoteForm.api_key = d.remote?.key_plain || ''
     loadPricing(d)
+    loadRemoteUsage()
     loadProfiles()        // 模型档案与"单模型思考强度阶梯"一起刷新（改了立刻能看到新阶梯）
   } catch (e) { errMsg.value = '[FAIL] 读取远端设置失败：' + e.message }
 }
@@ -925,12 +931,32 @@ async function runOrchExec() {
 
 /* ---------------- 能力边界（插件适配 + 判据开放，只读） ---------------- */
 const capCfg = ref({ adapters: [], sources: [], loaded: false })
+const capDetail = ref({})       // key → 文本（探针建议 / 判据约定）
+const capBusy = ref({})
 async function loadCapabilities() {
   try {
     const [hp, js] = await Promise.all([
       api('/v1/host-plugins'), api('/v1/judgment-sources')])
     capCfg.value = { adapters: hp.adapters || [], sources: js.sources || [], loaded: true }
   } catch (e) { errMsg.value = '[FAIL] 读能力边界：' + e.message }
+}
+async function loadPluginProbe(adapterId) {
+  capBusy.value = { ...capBusy.value, [adapterId]: true }
+  try {
+    const d = await api('/v1/host-plugins/probe?adapter=' + encodeURIComponent(adapterId))
+    capDetail.value = { ...capDetail.value,
+      [adapterId]: d.contract || d.why || '（该适配器没有探针建议）' }
+  } catch (e) { errMsg.value = '[FAIL] 探针建议：' + e.message }
+  finally { capBusy.value = { ...capBusy.value, [adapterId]: false } }
+}
+async function loadJudgeContract(sourceId) {
+  const k = 'js:' + sourceId
+  capBusy.value = { ...capBusy.value, [k]: true }
+  try {
+    const d = await api('/v1/judgment-sources/contract?source=' + encodeURIComponent(sourceId))
+    capDetail.value = { ...capDetail.value, [k]: d.contract || '（该来源没有判据约定）' }
+  } catch (e) { errMsg.value = '[FAIL] 判据约定：' + e.message }
+  finally { capBusy.value = { ...capBusy.value, [k]: false } }
 }
 
 /* ---------------- 引擎体检（链路走查 / 闭环验收 / 运维单元） ----------------
@@ -948,7 +974,13 @@ async function runWalkthrough() {
 
 const opsCfg = ref({ enabled: false, units: [], capability: {} })
 const opsExec = reactive({ unit: '', password: '', busy: false, result: null })
+const vcCap = ref(null)
+async function loadVerifyCapability() {
+  try { vcCap.value = await api('/v1/verify/capability') }
+  catch (e) { /* 辅助信息：拿不到不影响体检主流程 */ }
+}
 async function loadOps() {
+  loadVerifyCapability()
   try {
     opsCfg.value = await api('/v1/ops')
     if (!opsExec.unit && opsCfg.value.units?.length) opsExec.unit = opsCfg.value.units[0].id
@@ -4810,6 +4842,13 @@ onUnmounted(() => {
                   <td class="mono">{{ remote.remote?.key_masked || '—' }}
                     <span class="dim" style="font-size:11px">（来源：{{ remote.remote?.key_source || '无' }}）</span></td></tr>
             </table>
+            <div v-if="remoteUsage" class="panel" style="margin-top:10px;padding:8px 10px;font-size:12px">
+              <div style="font-weight:600;margin-bottom:4px">用量与花费</div>
+              <div class="dim" style="font-size:11.5px;line-height:1.7">
+                调用 {{ remoteUsage.calls }} 次 ｜ 花费 ¥{{ Number(remoteUsage.cost_cny || 0).toFixed(4) }}
+                ｜ 缓存命中 {{ Math.round((remoteUsage.cache_hit_rate || 0) * 100) }}%
+              </div>
+            </div>
             <div class="panel-title" style="margin-top:12px">更新密钥</div>
             <div class="row" style="gap:8px;align-items:center">
               <input v-model="remoteForm.api_key" type="password" placeholder="sk-...（留空则不修改）" style="flex:1" />
@@ -5225,6 +5264,12 @@ onUnmounted(() => {
                 <a v-for="(d, i) in a.docs" :key="'d' + i" :href="d" target="_blank"
                    style="color:var(--accent);margin-right:8px">公开文档{{ i + 1 }}</a>
               </div>
+              <div style="margin-top:6px">
+                <button class="ghost tiny" :disabled="capBusy[a.id]" @click="loadPluginProbe(a.id)">
+                  {{ capBusy[a.id] ? '生成中…' : '看探针建议' }}</button>
+              </div>
+              <pre v-if="capDetail[a.id]" class="approval-diff"
+                   style="margin-top:6px;font-size:10px;white-space:pre-wrap">{{ capDetail[a.id] }}</pre>
             </div>
 
             <div class="panel-title" style="font-size:13px;margin-top:14px">② 判据开放（平台开放接口，判据可机读）</div>
@@ -5248,6 +5293,13 @@ onUnmounted(() => {
                 凭据：{{ s.auth }} ·
                 <a :href="s.docs" target="_blank" style="color:var(--accent)">公开文档</a>
               </div>
+              <div style="margin-top:6px">
+                <button class="ghost tiny" :disabled="capBusy['js:' + s.id]"
+                        @click="loadJudgeContract(s.id)">
+                  {{ capBusy['js:' + s.id] ? '生成中…' : '看判据约定' }}</button>
+              </div>
+              <pre v-if="capDetail['js:' + s.id]" class="approval-diff"
+                   style="margin-top:6px;font-size:10px;white-space:pre-wrap">{{ capDetail['js:' + s.id] }}</pre>
             </div>
           </template>
 
@@ -5281,6 +5333,9 @@ onUnmounted(() => {
               <div class="panel-title" style="font-size:13px">② 闭环验收</div>
               <div class="dim" style="font-size:11px;line-height:1.6;margin-bottom:6px">
                 机验只覆盖结构/产物/DOM/CSS；审美与真链路仍人在环，结果里会明确列出。
+              </div>
+              <div v-if="vcCap" class="dim" style="font-size:11px;margin-bottom:6px">
+                验收覆盖：{{ (vcCap.verifies || []).join(' / ') }}<span v-if="vcCap.fail_closed">（默认红：拿不到信号就判不通过）</span>
               </div>
               <button class="btn" :disabled="verifyBusy" @click="runVerify()">
                 {{ verifyBusy ? '验收中…' : '跑闭环验收' }}</button>

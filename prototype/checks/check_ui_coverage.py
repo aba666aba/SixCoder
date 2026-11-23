@@ -42,12 +42,9 @@ API_ONLY = {
 }
 
 # —— 该接、但还没接（打 WARN，不计失败）——
-TODO_UI = {
-    "/v1/settings/remote/usage": "用量统计应展示（花了多少钱）；待接",
-    "/v1/host-plugins/probe": "能力边界 Tab 只展示清单，未提供『生成探针建议』按钮",
-    "/v1/judgment-sources/contract": "同上：未提供『生成判据约定』按钮",
-    "/v1/verify/capability": "体检页可展示『验收覆盖哪些』的能力声明；待接",
-}
+# 2026-11-23：上一轮的 4 个已全部接上（探针建议 / 判据约定 / 验收覆盖声明 / 用量统计），
+# 目前没有待接项。以后新增接口若一时接不了前端，登记在这里并写清原因。
+TODO_UI: dict[str, str] = {}
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
