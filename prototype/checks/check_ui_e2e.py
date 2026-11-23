@@ -319,6 +319,15 @@ def main() -> int:
                   "alpha.py" in pg.locator(".editor-head").inner_text(),
                   pg.locator(".editor-head").inner_text()[:120])
 
+            # 换仓库必须清空搜索结果：否则旧命中指向上一个仓库，点一下打开**别的仓库的同名文件**
+            ws_s2 = Path(tempfile.mkdtemp(prefix="e2esearch2-"))
+            (ws_s2 / "gamma.py").write_text("print('other repo')\n", encoding="utf-8")
+            pg.locator("input[placeholder='仓库路径']").fill(str(ws_s2))
+            pg.wait_for_timeout(900)
+            check("换仓库后旧搜索结果被清空",
+                  pg.locator(".fs-hit").count() == 0,
+                  f"残留 {pg.locator('.fs-hit').count()} 条")
+
             # 编辑器树与工具通道的跳过集合必须对齐（否则用户项目的 venv/ 会整棵树冒出来）
             (ws_s / "venv").mkdir(exist_ok=True)
             (ws_s / "venv" / "injected.py").write_text("pass\n", encoding="utf-8")
@@ -350,6 +359,13 @@ def main() -> int:
                 check("体检走查出结论", "通过" in body3 and "链路" in body3)
             except Exception:                            # noqa: BLE001
                 check("体检走查出结论", False, "45s 内没出结果")
+
+            # ⑪ 状态说明：前端版本自检（磁盘最新 bundle vs 浏览器实际加载的那个）
+            pg.click(".tab:has-text('状态说明')")
+            pg.wait_for_timeout(1500)
+            t6 = pg.locator("body").inner_text()
+            check("状态页显示前端版本并判定是否旧版", "前端版本" in t6, t6[-200:])
+            check("版本对比逻辑生效（同一次构建应一致）", "与磁盘一致" in t6, t6[-240:])
 
             bad = [f"{s} {u.split('/v1/')[-1]}" for s, u in net if s >= 400]
             check("全程无 4xx/5xx 业务请求", not bad, str(bad[:4]))

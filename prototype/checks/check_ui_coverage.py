@@ -33,9 +33,6 @@ API_ONLY = {
         "工具通道（探针/CLI 要递归+limit 的扁平树）；编辑器用 /v1/repo/tree 的懒加载单层树。"
         "两者跳过目录集合已对齐（2026-11-23 补 venv/env/target）",
     "/v1/remote/tool": "远端工具循环入口，由夜班/CLI 驱动（界面不该直接调工具循环）",
-    "/v1/web-version":
-        "诊断接口：人工/CI 用来确认前端 bundle 指纹（排查『界面是不是旧版』），"
-        "界面自身不需要调自己版本",
     "/v1/settings/remote/models/primary":
         "单独切主模型的快捷入口（CLI/API 用）；界面上切主模型走 POST /v1/settings/remote "
         "整体保存（见 loadRemote 的保存路径），两条路等价",

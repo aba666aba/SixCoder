@@ -1056,6 +1056,27 @@ async function loadPlanTrace(cap) {
   }
 }
 
+/* 前端 bundle 版本自检（/v1/web-version）：
+   服务端给磁盘上最新的 index-*.js，浏览器给**自己实际加载**的那个。
+   两者不一致 = 界面是缓存里的旧版（"装了新版却看到旧界面"的老问题），
+   这时唯一正确的指引是强刷，而不是让用户怀疑是不是装错了。 */
+const webVer = ref(null)
+async function loadWebVersion() {
+  try {
+    const d = await api('/v1/web-version')
+    const el = document.querySelector('script[type="module"][src]')
+    let loaded = ''
+    if (el) {
+      try { loaded = new URL(el.getAttribute('src'), window.location.href).pathname.split('/').pop() || '' }
+      catch (e) { loaded = '' }
+    }
+    webVer.value = {
+      disk: d.bundle || '', loaded, builtAt: d.built_at || 0,
+      match: !!loaded && !!d.bundle && loaded === d.bundle,
+    }
+  } catch (e) { webVer.value = { error: e.message } }
+}
+
 const HELP_POINTS = [
   '写出要改的**文件路径**（如 calc.py、service.py）：规划器靠它识别模块清单，写得越明确，计划越稳。',
   '一句话一个行为：要什么函数/类、参数、返回值，以及**异常怎么处理**（如"金额为 0 时抛 ValueError"）。',
@@ -1205,24 +1226,29 @@ const fsSearch = reactive({
   on: false, q: '', caseSensitive: false, busy: false,
   hits: [], scanned: 0, truncated: false, searched: false, err: '',
 })
+let fsSearchSeq = 0      // 请求序号：连续回车时丢弃过期响应，避免后发先至盖掉正确结果
 async function runFsSearch() {
   const q = fsSearch.q.trim()
   if (!form.repo) { fsSearch.err = '先选一个仓库目录'; return }
   if (!q) { fsSearch.err = '输入要搜的关键词'; return }
+  const seq = ++fsSearchSeq
+  const repoAtSend = form.repo
   fsSearch.busy = true
   fsSearch.err = ''
   try {
-    const p = new URLSearchParams({ repo: form.repo, q, limit: '200' })
+    const p = new URLSearchParams({ repo: repoAtSend, q, limit: '200' })
     if (fsSearch.caseSensitive) p.set('case', 'true')
     const d = await api('/v1/fs/search?' + p.toString())
+    if (seq !== fsSearchSeq) return          // 已有更新的搜索，这次结果作废
     fsSearch.hits = d.hits || []
     fsSearch.scanned = d.files || 0
     fsSearch.truncated = !!d.truncated
     fsSearch.searched = true
   } catch (e) {
+    if (seq !== fsSearchSeq) return
     fsSearch.err = e.message
     fsSearch.hits = []
-  } finally { fsSearch.busy = false }
+  } finally { if (seq === fsSearchSeq) fsSearch.busy = false }
 }
 
 // 换了仓库就清掉旧的树缓存并重新加载（避免显示上一个仓库的文件）
@@ -1231,6 +1257,12 @@ watch(() => form.repo, () => {
   treeExpanded.value = {}
   treeRoot.value = ''
   treeError.value = ''
+  // 搜索结果同样必须清：旧命中指向上一个仓库的路径，点一下会打开**另一个仓库的同名文件**
+  fsSearchSeq++            // 让还在飞的搜索请求作废
+  fsSearch.hits = []
+  fsSearch.searched = false
+  fsSearch.err = ''
+  fsSearch.busy = false
   if (form.repo) { loadTree(''); loadClarify(); adoptDetached() }
 })
 
@@ -4674,7 +4706,7 @@ onUnmounted(() => {
           <span class="tab" :class="{ active: settingsTab === 'caps' }" @click="settingsTab = 'caps'; loadCapabilities()">能力边界</span>
           <span class="tab" :class="{ active: settingsTab === 'health' }" @click="settingsTab = 'health'; loadOps()">体检</span>
           <span class="tab" :class="{ active: settingsTab === 'plan' }" @click="settingsTab = 'plan'; loadPlanView()">自主计划</span>
-          <span class="tab" :class="{ active: settingsTab === 'status' }" @click="settingsTab = 'status'">状态说明</span>
+          <span class="tab" :class="{ active: settingsTab === 'status' }" @click="settingsTab = 'status'; loadWebVersion()">状态说明</span>
           <span class="spacer"></span>
           <button class="ghost tiny" @click="showSettings = false">关闭 ✕</button>
         </div>
@@ -5620,6 +5652,21 @@ onUnmounted(() => {
           <template v-else-if="settingsTab === 'status'">
             <div class="panel-title">当前状态</div>
             <table>
+              <tr><td class="dim" style="width:150px">前端版本</td>
+                  <td style="font-size:11px">
+                    <template v-if="!webVer">读取中…</template>
+                    <span v-else-if="webVer.error" class="dim">读不到（{{ webVer.error }}）</span>
+                    <template v-else>
+                      <span class="mono">{{ webVer.loaded || '未知' }}</span>
+                      <span v-if="webVer.match" class="badge b-ok" style="margin-left:6px">与磁盘一致</span>
+                      <span v-else class="badge b-warn" style="margin-left:6px">界面是旧版</span>
+                      <div class="dim" style="font-size:10.5px;margin-top:2px">
+                        磁盘上最新：<span class="mono">{{ webVer.disk || '—' }}</span>
+                        <span v-if="!webVer.match"> · 界面加载的不是它 = 浏览器缓存了旧 bundle，
+                          按 <b>Ctrl+F5</b> 强制刷新即可</span>
+                      </div>
+                    </template>
+                  </td></tr>
               <tr><td class="dim" style="width:150px">Ollama</td>
                   <td><span class="badge" :class="health?.ollama ? 'b-ok' : 'b-bad'">{{ health?.ollama ? '在线' : '离线' }}</span></td></tr>
               <tr><td class="dim">可用模型</td><td class="mono" style="font-size:11px">{{ (models || []).join(' , ') || '—' }}</td></tr>
