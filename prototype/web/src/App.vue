@@ -5185,6 +5185,10 @@ onUnmounted(() => {
               <div class="dim" style="font-size:11px;margin-bottom:4px">
                 步骤（每行一条；用 <code>||</code> 分隔原因，如 <code>systemctl restart app || 重启服务</code>）
               </div>
+              <div class="dim" style="font-size:10.5px;margin-bottom:4px;line-height:1.5">
+                失败联动：<b>不勾</b>「首台失败即停」→ 单机失败隔离，该台后续步骤立刻中止并回滚；
+                <b>勾了</b> → 该台步骤仍走完（整批会在这台停），避免半截操作。默认不勾。
+              </div>
               <textarea v-model="orchForm.stepsText" rows="4"
                         style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);padding:6px 8px;border-radius:4px;font-family:var(--mono,monospace);font-size:12px"></textarea>
               <div class="row" style="gap:8px;margin-top:6px;flex-wrap:wrap">
