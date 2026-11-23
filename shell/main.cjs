@@ -1,36 +1,14 @@
-/* ── 环境自检（必须放在 require('electron') **之前**）────────────────────────
-   ELECTRON_RUN_AS_NODE=1 会让 Electron 以**纯 Node 模式**执行本文件：下一行的
-   `require('electron')` 直接抛 "Cannot find module 'electron'"，主进程一行业务代码
-   都没跑就退出。用户看到的是"双击毫无反应"，且没有任何日志可查
-   ——2026-11-23 我本人就被这个环境变量卡了一个多小时才找到。
+/* ── 关于 ELECTRON_RUN_AS_NODE（别再在这里做检测）────────────────────────────
+   这个环境变量会让 exe 以**纯 Node** 运行：Electron 不会加载 app（既不是 asar
+   也不是 app 目录），而是把参数交给 Node（无参数就进 REPL 等 stdin）。
+   因此**本文件根本不会被执行** —— 2026-11-23 实测：设了该变量后进程会一直挂着
+   等输入、不产生任何日志，写在这里的检测代码一次也跑不到（已回退，不要重复加）。
 
-   所以这里在加载 electron 之前先检测，留下两样东西再退出：
-     · _logs/启动失败-ELECTRON_RUN_AS_NODE.txt（给用户看的说明，双击能打开）
-     · _logs/boot.log 追加一行（和其他启动记录放一起）
-   并 `process.exit(2)` 明确非零退出——不再是"静默消失、连一行记录都没有"。
+   真正有效的做法只有两条，都不在 app 代码里：
+     · 安装期检查（NSIS 安装器里读 $ENV{ELECTRON_RUN_AS_NODE}，装之前就提示）；
+     · 排障文档写明：双击没反应时先查这个变量，并看 %LOCALAPPDATA%\SixCoder\_logs\boot.log。
+   下面是正常的启动流程（boot.log 会记录 lock / 端口 / spawn / 窗口就绪）。
    ──────────────────────────────────────────────────────────────────────── */
-if (process.env.ELECTRON_RUN_AS_NODE) {
-  const fs0 = require('fs')
-  const path0 = require('path')
-  const detail = '检测到环境变量 ELECTRON_RUN_AS_NODE='
-    + JSON.stringify(process.env.ELECTRON_RUN_AS_NODE)
-    + '：它会让本程序以 Node 模式启动，因此无法创建窗口。'
-    + '解决：删除该环境变量后重新启动（命令行执行 setx ELECTRON_RUN_AS_NODE "" ，再重开程序）。'
-  try {
-    const dir0 = path0.join(process.env.LOCALAPPDATA || '.', 'SixCoder', '_logs')
-    fs0.mkdirSync(dir0, { recursive: true })
-    fs0.appendFileSync(path0.join(dir0, 'boot.log'),
-      `[${new Date().toISOString()}] !! ${detail}\n`)
-    fs0.writeFileSync(path0.join(dir0, '启动失败-ELECTRON_RUN_AS_NODE.txt'),
-      'SixCoder 未能启动\n\n' + detail + '\n')
-  } catch (e) { /* 写不进去也要继续送提示 */ }
-  try { console.error('[shell] ' + detail) } catch (e) { /* 无 console 忽略 */ }
-  /* 这里**故意不弹系统对话框**：此时 electron 不可用，只能借外部命令
-     （mshta / powershell / rundll32 都属 LOLBin），在别人的机器上容易触发
-     安全软件告警——"为了提示一个错误反而引起可疑行为"不划算。
-     落地文件 + 非零退出码已经足够：用户按 `_logs` 目录就能看到原因。 */
-  process.exit(2)
-}
 
 /**
  * SixCoder 桌面外壳（Electron）。

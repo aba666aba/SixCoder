@@ -328,6 +328,23 @@ def main() -> int:
                   pg.locator(".fs-hit").count() == 0,
                   f"残留 {pg.locator('.fs-hit').count()} 条")
 
+            # 左栏空间分配：文件树是主角，用过的仓库默认折叠在底部（可手动展开）
+            # 用**比例**而不是绝对像素：不同视口高度下绝对值会变，比例才是"谁是主角"的判据
+            _lb = pg.locator(".col-left").bounding_box()
+            _tb = pg.locator(".tree-root").first.bounding_box()
+            _ratio = (_tb["height"] / _lb["height"]) if (_tb and _lb and _lb["height"]) else 0
+            check("文件树占左栏主要高度（>45%）", _ratio > 0.45,
+                  f"{_ratio:.0%} ({(_tb['height'] if _tb else 0):.0f}/"
+                  f"{(_lb['height'] if _lb else 0):.0f}px)")
+            check("用过的仓库默认折叠",
+                  not pg.locator(".col-left .table-wrap").first.is_visible())
+            pg.click(".col-left .panel-title:has-text('用过的仓库')")
+            pg.wait_for_timeout(500)
+            check("点标题能展开用过的仓库",
+                  pg.locator(".col-left .table-wrap").first.is_visible())
+            pg.click(".col-left .panel-title:has-text('用过的仓库')")
+            pg.wait_for_timeout(400)
+
             # 编辑器树与工具通道的跳过集合必须对齐（否则用户项目的 venv/ 会整棵树冒出来）
             (ws_s / "venv").mkdir(exist_ok=True)
             (ws_s / "venv" / "injected.py").write_text("pass\n", encoding="utf-8")

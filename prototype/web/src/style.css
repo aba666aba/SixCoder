@@ -52,6 +52,12 @@ body {
 .col-left > .panel { flex: 0 0 auto; }
 .col-left > .panel.grow { flex: 1 1 auto; min-height: 150px; display: flex; flex-direction: column; }
 .col-left > .panel.grow > .table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+/* 文件树是左栏的主角：占满剩余高度，不再限死在 260px
+   （用过的仓库已改为底部可折叠，把空间让出来） */
+.col-left > .panel.grow.tree-panel { min-height: 240px; }
+.col-left > .panel.tree-panel > .tree-root {
+  flex: 1 1 auto; max-height: none; min-height: 140px; overflow: auto;
+}
 .col-mid { flex: 1; min-width: 0; }
 .col-right { width: 400px; flex: 0 0 400px; border-right: none; }
 

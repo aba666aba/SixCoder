@@ -15,6 +15,9 @@ const taskInfo = ref(null)
 const audit = ref(null)
 const history = ref([])
 const repos = ref([])
+// 用过的仓库默认折叠并压在左栏最底部：左栏的空间应该优先给文件树
+// （历史仓库是"偶尔回看"，文件树是"每次都在用"）。点标题展开/收起。
+const reposFolded = ref(true)
 const fileList = ref([])
 const fileView = ref(null)
 
@@ -3725,7 +3728,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="panel">
+        <div class="panel grow tree-panel">
           <div class="panel-title">
             文件
             <span class="spacer"></span>
@@ -3799,15 +3802,18 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="panel grow">
-          <div class="panel-title">
+        <div class="panel">
+          <div class="panel-title" style="cursor:pointer"
+               :title="reposFolded ? '展开用过的仓库' : '收起（把空间让给文件树）'"
+               @click="reposFolded = !reposFolded">
+            <span style="width:10px;display:inline-block;color:var(--dim)">{{ reposFolded ? '▸' : '▾' }}</span>
             用过的仓库
             <span class="badge b-dim" style="margin-left:6px">{{ repos.length }}</span>
             <span class="spacer"></span>
-            <button class="ghost tiny" @click="loadHistory()">刷新</button>
-            <button class="ghost tiny del-btn" title="清空全部历史任务" @click="showClear = true">清空</button>
+            <button class="ghost tiny" @click.stop="loadHistory()">刷新</button>
+            <button class="ghost tiny del-btn" title="清空全部历史任务" @click.stop="showClear = true">清空</button>
           </div>
-          <div class="table-wrap">
+          <div v-show="!reposFolded" class="table-wrap" style="max-height:220px">
             <table>
               <thead>
                 <tr><th>仓库</th><th>状态</th><th>最近需求</th><th style="width:26px"></th></tr>
