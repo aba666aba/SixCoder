@@ -1015,6 +1015,47 @@ async function runOpsExec() {
   } finally { opsExec.busy = false }
 }
 
+/* ---------------- 自主计划（只读视图：蓝图 / 切片 / 覆盖） ---------------- */
+// 后端 /v1/plan 的 docstring 写得很清楚：全自主跑的进度就靠这三样东西看
+// ——计划长什么样、下一刀切在哪、上一轮观测结果。此前只有 API，界面看不到。
+const planView = ref(null)
+const planBusy = ref(false)
+const planCoverBusy = ref(false)
+const planCoverRes = ref(null)
+const planTrace = ref({ cap: '', data: null, busy: false })
+async function loadPlanView() {
+  if (!form.repo) { planView.value = { ok: false, reason: '先选一个仓库目录' }; return }
+  planBusy.value = true
+  try {
+    planView.value = await api('/v1/plan?repo=' + encodeURIComponent(form.repo))
+  } catch (e) {
+    planView.value = { ok: false, reason: e.message }
+  } finally { planBusy.value = false }
+}
+async function runPlanCover() {
+  if (!form.repo) { errMsg.value = '先选一个仓库目录'; return }
+  planCoverBusy.value = true
+  planCoverRes.value = null
+  try {
+    // 这个接口会**真跑覆盖探针并写回蓝图**（本地执行，不花 token），所以要显式点
+    planCoverRes.value = await api('/v1/plan/cover?repo=' + encodeURIComponent(form.repo))
+    await loadPlanView()
+  } catch (e) {
+    planCoverRes.value = { ok: false, reason: e.message }
+  } finally { planCoverBusy.value = false }
+}
+async function loadPlanTrace(cap) {
+  if (!form.repo) return
+  planTrace.value = { cap, data: null, busy: true }
+  try {
+    const d = await api('/v1/plan/trace?repo=' + encodeURIComponent(form.repo)
+      + '&cap=' + encodeURIComponent(cap))
+    planTrace.value = { cap, data: d, busy: false }
+  } catch (e) {
+    planTrace.value = { cap, data: { error: e.message }, busy: false }
+  }
+}
+
 const HELP_POINTS = [
   '写出要改的**文件路径**（如 calc.py、service.py）：规划器靠它识别模块清单，写得越明确，计划越稳。',
   '一句话一个行为：要什么函数/类、参数、返回值，以及**异常怎么处理**（如"金额为 0 时抛 ValueError"）。',
@@ -1100,6 +1141,7 @@ function openSettingsAt(tab) {
   if (settingsTab.value === 'orch') loadOrch()
   if (settingsTab.value === 'caps') loadCapabilities()
   if (settingsTab.value === 'health') loadOps()
+  if (settingsTab.value === 'plan') loadPlanView()
 }
 const showLoginModal = ref(false)
 const buildId = ref('')
@@ -4569,6 +4611,7 @@ onUnmounted(() => {
           <span class="tab" :class="{ active: settingsTab === 'orch' }" @click="settingsTab = 'orch'; loadOrch()">多机编排</span>
           <span class="tab" :class="{ active: settingsTab === 'caps' }" @click="settingsTab = 'caps'; loadCapabilities()">能力边界</span>
           <span class="tab" :class="{ active: settingsTab === 'health' }" @click="settingsTab = 'health'; loadOps()">体检</span>
+          <span class="tab" :class="{ active: settingsTab === 'plan' }" @click="settingsTab = 'plan'; loadPlanView()">自主计划</span>
           <span class="tab" :class="{ active: settingsTab === 'status' }" @click="settingsTab = 'status'">状态说明</span>
           <span class="spacer"></span>
           <button class="ghost tiny" @click="showSettings = false">关闭 ✕</button>
@@ -5399,6 +5442,116 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
+          </template>
+
+          <!-- 自主计划：蓝图/切片/覆盖 的只读视图（此前只有 /v1/plan 接口，界面看不到） -->
+          <template v-else-if="settingsTab === 'plan'">
+            <div class="panel-title">自主计划（只读）</div>
+            <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:10px">
+              全自主跑的进度靠三样东西看：<b>计划长什么样</b>（能力清单与依赖）、
+              <b>下一刀切在哪</b>（切片与优先序）、<b>上一轮观测结果</b>（覆盖）。
+              这个视图不执行探针、不花 token；要真跑观测点下面的按钮（会写回蓝图）。
+            </div>
+            <div class="row" style="gap:8px;align-items:center;margin-bottom:10px">
+              <button class="ghost tiny" :disabled="planBusy" @click="loadPlanView()">
+                {{ planBusy ? '读取中…' : '刷新' }}</button>
+              <span class="dim" style="font-size:11px">
+                仓库：{{ form.repo || '（未选）' }}</span>
+            </div>
+
+            <div v-if="planView && !planView.ok" class="dim" style="font-size:12px">
+              {{ planView.reason || '还没有蓝图' }}
+            </div>
+            <template v-else-if="planView">
+              <div class="row" style="gap:14px;font-size:12px;flex-wrap:wrap;margin-bottom:8px">
+                <span>版本 <b>v{{ planView.version }}</b></span>
+                <span>能力 <b>{{ (planView.caps || []).length }}</b></span>
+                <span>剩余函数 <b>{{ planView.funcs_left }}</b></span>
+                <span>预算 <b>¥{{ planView.total_budget_cny }}</b></span>
+              </div>
+
+              <div class="panel-title" style="font-size:13px">① 下一刀切在哪（{{ (planView.slices || []).length }} 片）</div>
+              <table v-if="planView.slices && planView.slices.length">
+                <tr><th style="width:150px">切片 id</th><th>标题</th><th style="width:60px">能力</th>
+                    <th style="width:60px">函数</th><th>落点模块</th></tr>
+                <tr v-for="s in planView.slices" :key="s.id">
+                  <td class="mono" style="font-size:10.5px">{{ s.id }}</td>
+                  <td style="font-size:11.5px">{{ s.title }}</td>
+                  <td>{{ (s.caps || []).length }}</td>
+                  <td>{{ s.funcs }}</td>
+                  <td class="dim" style="font-size:10.5px">{{ (s.modules || []).join(', ') }}</td>
+                </tr>
+              </table>
+              <div v-else class="dim" style="font-size:11.5px">没有待办切片（可能已全部完成）。</div>
+
+              <div class="panel-title" style="font-size:13px;margin-top:14px">② 下次该做（优先序）</div>
+              <div v-for="n in (planView.next || [])" :key="n.cap" class="panel"
+                   style="margin-top:5px;padding:6px 8px;font-size:11.5px">
+                <div class="row" style="gap:8px;align-items:center">
+                  <b class="mono" style="font-size:11px">{{ n.cap }}</b>
+                  <span class="spacer"></span>
+                  <button class="ghost tiny" :disabled="planTrace.busy && planTrace.cap === n.cap"
+                          @click="loadPlanTrace(n.cap)">追溯</button>
+                </div>
+                <div class="dim" style="margin-top:3px">{{ n.why }}</div>
+              </div>
+              <div v-if="!(planView.next || []).length" class="dim" style="font-size:11.5px">没有可推进的能力。</div>
+
+              <div v-if="planTrace.cap" class="panel" style="margin-top:8px;padding:8px">
+                <div class="row" style="gap:8px;align-items:center">
+                  <b class="mono" style="font-size:11px">追溯 {{ planTrace.cap }}</b>
+                  <span class="spacer"></span>
+                  <button class="ghost tiny" @click="planTrace = { cap: '', data: null, busy: false }">收起</button>
+                </div>
+                <div v-if="planTrace.busy" class="dim" style="font-size:11px">读取中…</div>
+                <pre v-else-if="planTrace.data" class="approval-diff"
+                     style="margin-top:6px;font-size:10.5px;white-space:pre-wrap;max-height:220px;overflow:auto">{{ JSON.stringify(planTrace.data, null, 1) }}</pre>
+              </div>
+
+              <div class="panel-title" style="font-size:13px;margin-top:14px">③ 做不到的 / 闭合问题</div>
+              <div v-if="(planView.blocked || []).length">
+                <div class="dim" style="font-size:11px;margin-bottom:3px">被依赖卡住（永远轮不到）：</div>
+                <div v-for="b in planView.blocked" :key="b[0]" style="font-size:11.5px">
+                  <span class="mono" style="font-size:10.5px">{{ b[0] }}</span>
+                  <span class="dim"> — {{ b[1] }}</span>
+                </div>
+              </div>
+              <div v-if="(planView.problems || []).length" style="margin-top:6px">
+                <div class="dim" style="font-size:11px;margin-bottom:3px">切片闭合问题（依赖不在已完成+前序+本片里）：</div>
+                <div v-for="(p, i) in planView.problems" :key="'p' + i"
+                     style="font-size:11.5px;color:#ffb4ae">{{ p }}</div>
+              </div>
+              <div v-if="!(planView.blocked || []).length && !(planView.problems || []).length"
+                   class="dim" style="font-size:11.5px">没有卡住的能力，切片闭合。</div>
+
+              <div class="panel-title" style="font-size:13px;margin-top:14px">④ 上一轮观测（覆盖）</div>
+              <div v-if="planView.last_coverage && planView.last_coverage.at" style="font-size:11.5px">
+                <div>时间：{{ planView.last_coverage.at }}
+                  · 通过 {{ planView.last_coverage.done }} / {{ planView.last_coverage.total }}</div>
+                <div class="dim" style="margin-top:3px">
+                  <span v-for="(n, k) in (planView.last_coverage.statuses || {})" :key="k"
+                        style="margin-right:10px">{{ k }}: {{ n }}</span>
+                </div>
+              </div>
+              <div v-else class="dim" style="font-size:11.5px">还没观测过。点下面的按钮跑一次。</div>
+              <div class="row" style="gap:8px;align-items:center;margin-top:8px">
+                <button class="btn" :disabled="planCoverBusy" @click="runPlanCover()">
+                  {{ planCoverBusy ? '观测中…' : '跑覆盖观测' }}</button>
+                <span class="dim" style="font-size:11px">本地执行探针、不花 token，会写回蓝图与观测记录</span>
+              </div>
+              <div v-if="planCoverRes" style="margin-top:8px;font-size:12px">
+                <div v-if="planCoverRes.ok" style="color:#9be9a8">✓ 已观测并写回</div>
+                <div v-else style="color:#ffb4ae">✗ {{ planCoverRes.reason || '观测没跑起来' }}</div>
+                <pre v-if="planCoverRes.report" class="approval-diff"
+                     style="margin-top:6px;font-size:10.5px;white-space:pre-wrap;max-height:240px;overflow:auto">{{ planCoverRes.report }}</pre>
+              </div>
+
+              <details style="margin-top:14px">
+                <summary class="dim" style="font-size:11.5px;cursor:pointer">蓝图摘要（人审那一页）</summary>
+                <pre class="approval-diff"
+                     style="margin-top:6px;font-size:10.5px;white-space:pre-wrap;max-height:280px;overflow:auto">{{ planView.summary }}</pre>
+              </details>
+            </template>
           </template>
 
           <!-- 状态说明：原来顶栏那两个看不懂的药丸，含义写在这里 -->

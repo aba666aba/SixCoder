@@ -27,18 +27,23 @@ PASS: list[str] = []
 FAIL: list[str] = []
 
 # —— 设计上只给工具/CLI/夜班用的端点（不是"忘了接"）——
+# 每条都要写清"为什么界面不需要"，而不是"还没做"——后者属于 TODO_UI。
 API_ONLY = {
     "/v1/fs/tree": "编辑器走 /v1/repo/tree；fs/* 是工具通道（探针/CLI 用）",
     "/v1/fs/search": "同上：工作区文件搜索由工具通道用，编辑器用 repo/tree",
-    "/v1/plan": "规划/蓝图接口，供 CLI 与夜班编排用",
-    "/v1/plan/cover": "同上",
-    "/v1/plan/trace": "同上",
-    "/v1/remote/tool": "远端工具循环入口，由夜班/CLI 驱动",
-    "/v1/web-version": "前端版本探针，由页面内联逻辑消费",
-    "/v1/settings/remote/models/primary": "设主模型由 POST /v1/settings/remote 整体保存覆盖",
-    "/v1/git/branches": "Git 客户端当前只做 status/commit/checkout；分支面板待接",
-    "/v1/git/diff": "同上：diff 视图待接",
-    "/v1/git/log": "同上：历史视图待接",
+    "/v1/remote/tool": "远端工具循环入口，由夜班/CLI 驱动（界面不该直接调工具循环）",
+    "/v1/web-version":
+        "诊断接口：人工/CI 用来确认前端 bundle 指纹（排查『界面是不是旧版』），"
+        "界面自身不需要调自己版本",
+    "/v1/settings/remote/models/primary":
+        "单独切主模型的快捷入口（CLI/API 用）；界面上切主模型走 POST /v1/settings/remote "
+        "整体保存（见 loadRemote 的保存路径），两条路等价",
+    # —— Git 只读接口：**产品决定不做界面**，不是"待接" ——
+    # 用户明确要求移除编辑器里的 Git 按钮（避免误操作），所以没有分支/diff/历史视图；
+    # 接口保留给 CLI 与脚本做只读查询（gitops 仍是夜班提交代码的通道）。
+    "/v1/git/branches": "产品决定不做 Git 界面（用户要求移除编辑器 Git 按钮）；接口留给 CLI/脚本只读查询",
+    "/v1/git/diff": "同上：无 diff 视图，接口留给 CLI/脚本",
+    "/v1/git/log": "同上：无历史视图，接口留给 CLI/脚本",
 }
 
 # —— 该接、但还没接（打 WARN，不计失败）——

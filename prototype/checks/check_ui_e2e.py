@@ -7,7 +7,12 @@
   · 切 Tab 能渲染出对应面板（不是空白/错位）；
   · UI 审美：选预设 → 保存 → **真的写进 settings**；
   · 半自动：填值 → 存入 → 列表可见且**值不回显**；
-  · 能力边界：插件适配与判据开放两份清单都在。
+  · 能力边界：插件适配与判据开放两份清单都在；
+  · 部署通道：填目标 → 保存 → 字段与凭据引用真落盘；**明文密码不许进配置文件**；
+  · 多机编排：建计划 → 保存 → targets/steps/health_check/rollback 真落盘；
+  · 编排执行：开关未启用 / 白名单外命令 / 白名单内提交，三种都必须给出可见反馈
+    （刻意不开"自动批准"的测试后门——闸门要验，但不能被开后门验）；
+  · 自主计划：面板渲染 + 未选仓库的可读提示 + 空蓝图不许 500。
 
 用临时 settings（不污染本机配置）、随机端口、headless 系统浏览器；跑完关服务。
 浏览器不可用时如实 SKIP（不算通过），不假装验证过。
@@ -100,7 +105,7 @@ def main() -> int:
             pg.click("text=帮助")
             pg.wait_for_timeout(600)
             tabs = pg.locator(".tab").all_inner_texts()
-            for name in ("UI 审美", "半自动回填", "多机编排", "能力边界"):
+            for name in ("UI 审美", "半自动回填", "多机编排", "能力边界", "自主计划"):
                 check(f"Tab 存在：{name}", name in tabs, str(tabs))
 
             # ① UI 审美：选预设 → 保存 → 真落盘
@@ -240,7 +245,53 @@ def main() -> int:
                     break
             check("执行·白名单内必须有明确反馈（不静默）", got, t3[-260:])
 
-            # ⑧ 体检：真跑链路走查，出结果（不强求全绿，只要求跑出结论）
+            # ⑧ 自主计划：未选仓库时给出可读提示；接口在"没有蓝图"时不许 500
+            pg.click(".tab:has-text('自主计划')")
+            pg.wait_for_timeout(900)
+            t4 = pg.locator("body").inner_text()
+            check("自主计划面板渲染", "自主计划" in t4 and "下一刀切在哪" in t4, t4[-220:])
+            check("未选仓库时有可读提示",
+                  "先选一个仓库目录" in t4 or "还没有蓝图" in t4, t4[-220:])
+            try:
+                import urllib.parse
+                import urllib.request
+                _q = urllib.parse.urlencode({"repo": str(Path(tempfile.mkdtemp(prefix="plan-")))})
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/v1/plan?{_q}", timeout=20) as _r:
+                    _d = json.loads(_r.read().decode("utf-8"))
+                check("plan 接口对空蓝图不报错",
+                      _r.status == 200 and _d.get("ok") is False and bool(_d.get("reason")),
+                      f"{_r.status} {str(_d)[:120]}")
+            except Exception as exc:                     # noqa: BLE001
+                check("plan 接口对空蓝图不报错", False, f"{type(exc).__name__}: {exc}")
+
+            # 有蓝图时也要能返回完整结构（空状态通过不代表有数据不崩）
+            try:
+                import urllib.parse
+                import urllib.request
+                from core import blueprint as _bpm
+                ws2 = Path(tempfile.mkdtemp(prefix="plan2-"))
+                caps = [_bpm.Cap.from_dict({
+                    "id": "cap.e2e.one", "desc": "自检用能力",
+                    "probe": {"kind": "cli", "entry": "main.py", "stdout_has": "ok"},
+                    "deps": [], "funcs_est": 10, "modules": ["main.py"]})]
+                _bpm.save(_bpm.Blueprint(goal="e2e 蓝图", caps=caps), ws2)
+                _q2 = urllib.parse.urlencode({"repo": str(ws2)})
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/v1/plan?{_q2}", timeout=25) as _r2:
+                    _d2 = json.loads(_r2.read().decode("utf-8"))
+                ok2 = (_r2.status == 200 and _d2.get("ok") is True
+                       and len(_d2.get("caps") or []) == 1
+                       and isinstance(_d2.get("slices"), list)
+                       and isinstance(_d2.get("next"), list)
+                       and isinstance(_d2.get("blocked"), list)
+                       and "summary" in _d2)
+                check("plan 接口有蓝图时结构完整", ok2,
+                      f"{_r2.status} keys={list(_d2.keys())[:8]}")
+            except Exception as exc:                     # noqa: BLE001
+                check("plan 接口有蓝图时结构完整", False, f"{type(exc).__name__}: {exc}")
+
+            # ⑨ 体检：真跑链路走查，出结果（不强求全绿，只要求跑出结论）
             pg.click(".tab:has-text('体检')")
             pg.wait_for_timeout(700)
             pg.click("button:has-text('跑链路走查')")
