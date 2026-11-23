@@ -933,6 +933,56 @@ async function loadCapabilities() {
   } catch (e) { errMsg.value = '[FAIL] 读能力边界：' + e.message }
 }
 
+/* ---------------- 引擎体检（链路走查 / 闭环验收 / 运维单元） ----------------
+   这三块此前都只有 API：装好软件的用户既没法自证"引擎健康"，也用不上运维单元。
+   体检面板把它们收口成一个入口（2026-11-23）。 */
+const wcResult = ref(null)
+const wcBusy = ref(false)
+async function runWalkthrough() {
+  wcBusy.value = true
+  wcResult.value = null
+  try { wcResult.value = await api('/v1/walkthrough') }
+  catch (e) { errMsg.value = '[FAIL] 链路走查：' + e.message }
+  finally { wcBusy.value = false }
+}
+
+const opsCfg = ref({ enabled: false, units: [], capability: {} })
+const opsExec = reactive({ unit: '', password: '', busy: false, result: null })
+async function loadOps() {
+  try {
+    opsCfg.value = await api('/v1/ops')
+    if (!opsExec.unit && opsCfg.value.units?.length) opsExec.unit = opsCfg.value.units[0].id
+  } catch (e) { errMsg.value = '[FAIL] 读运维单元：' + e.message }
+}
+async function toggleOpsEnabled() {
+  try {
+    const units = (opsCfg.value.units || []).map(u => ({
+      id: u.id, target: u.target, steps: u.steps || [],
+      health_check: u.health_check || '', rollback: u.rollback || [],
+      enabled: u.enabled !== false, note: u.note || '',
+    }))
+    opsCfg.value = await api('/v1/ops', {
+      method: 'POST',
+      body: JSON.stringify({ units, enabled: !opsCfg.value.enabled }),
+    })
+  } catch (e) { errMsg.value = '[FAIL] 切换运维通道：' + e.message }
+}
+async function runOpsExec() {
+  if (!opsExec.unit) { errMsg.value = '先选一个运维单元'; return }
+  opsExec.busy = true
+  opsExec.result = null
+  const body = { unit: opsExec.unit, timeout: 600 }
+  if (opsExec.password) body.password = opsExec.password
+  try {
+    opsExec.result = await api('/v1/ops/exec', {
+      method: 'POST', body: JSON.stringify(body) })
+    opsExec.password = ''
+  } catch (e) {
+    opsExec.result = { ok: false, why: e.message }
+    opsExec.password = ''
+  } finally { opsExec.busy = false }
+}
+
 const HELP_POINTS = [
   '写出要改的**文件路径**（如 calc.py、service.py）：规划器靠它识别模块清单，写得越明确，计划越稳。',
   '一句话一个行为：要什么函数/类、参数、返回值，以及**异常怎么处理**（如"金额为 0 时抛 ValueError"）。',
@@ -1017,6 +1067,7 @@ function openSettingsAt(tab) {
   if (settingsTab.value === 'human') loadHumanOnce()
   if (settingsTab.value === 'orch') loadOrch()
   if (settingsTab.value === 'caps') loadCapabilities()
+  if (settingsTab.value === 'health') loadOps()
 }
 const showLoginModal = ref(false)
 const buildId = ref('')
@@ -4485,6 +4536,7 @@ onUnmounted(() => {
           <span class="tab" :class="{ active: settingsTab === 'human' }" @click="settingsTab = 'human'; loadHumanOnce()">半自动回填</span>
           <span class="tab" :class="{ active: settingsTab === 'orch' }" @click="settingsTab = 'orch'; loadOrch()">多机编排</span>
           <span class="tab" :class="{ active: settingsTab === 'caps' }" @click="settingsTab = 'caps'; loadCapabilities()">能力边界</span>
+          <span class="tab" :class="{ active: settingsTab === 'health' }" @click="settingsTab = 'health'; loadOps()">体检</span>
           <span class="tab" :class="{ active: settingsTab === 'status' }" @click="settingsTab = 'status'">状态说明</span>
           <span class="spacer"></span>
           <button class="ghost tiny" @click="showSettings = false">关闭 ✕</button>
@@ -5195,6 +5247,97 @@ onUnmounted(() => {
               <div class="dim" style="font-size:10px;margin-top:4px">
                 凭据：{{ s.auth }} ·
                 <a :href="s.docs" target="_blank" style="color:var(--accent)">公开文档</a>
+              </div>
+            </div>
+          </template>
+
+          <!-- 体检：链路走查 / 闭环验收 / 运维单元（此前都只有 API，用户点不到） -->
+          <template v-else-if="settingsTab === 'health'">
+            <div class="panel-title">引擎体检</div>
+            <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:12px">
+              装好软件后你可以自己确认引擎是否健康：链路走查看各模块是否连通，
+              闭环验收看能力是否真的在工作，运维单元让"重启 / 健康检查 / 失败回滚"一次审完。
+              前两项只读或内存态，不改你的配置、不连真实服务器。
+            </div>
+
+            <div class="panel-title" style="font-size:13px">① 链路走查（只读，不连服务器）</div>
+            <button class="btn" :disabled="wcBusy" @click="runWalkthrough()">
+              {{ wcBusy ? '走查中…' : '跑链路走查' }}</button>
+            <div v-if="wcResult" style="margin-top:10px;font-size:12px">
+              <div :style="{ color: wcResult.ok ? '#9be9a8' : '#ffb4ae', fontWeight: 600 }">
+                {{ wcResult.ok ? '✓ 链路通' : '✗ 有断点' }}
+                （通过 {{ wcResult.passed }}/{{ wcResult.total }}<span v-if="wcResult.skipped">，跳过 {{ wcResult.skipped }}</span>）
+              </div>
+              <div v-for="s in wcResult.steps" :key="s.name" class="panel"
+                   style="margin-top:6px;padding:6px 8px">
+                <span v-if="s.status === 'skip'" class="dim">－</span>
+                <span v-else :style="{ color: s.status === 'fail' ? '#ffb4ae' : '#9be9a8' }">
+                  {{ s.status === 'fail' ? '✗' : '✓' }}</span>
+                <b>{{ s.name }}</b> <span class="dim">{{ s.detail }}</span>
+              </div>
+            </div>
+
+            <div style="margin-top:18px;border-top:1px solid var(--line);padding-top:14px">
+              <div class="panel-title" style="font-size:13px">② 闭环验收</div>
+              <div class="dim" style="font-size:11px;line-height:1.6;margin-bottom:6px">
+                机验只覆盖结构/产物/DOM/CSS；审美与真链路仍人在环，结果里会明确列出。
+              </div>
+              <button class="btn" :disabled="verifyBusy" @click="runVerify()">
+                {{ verifyBusy ? '验收中…' : '跑闭环验收' }}</button>
+              <div v-if="verifyResult" style="margin-top:10px;font-size:12px">
+                <div :style="{ color: verifyResult.ok ? '#9be9a8' : '#ffb4ae', fontWeight: 600 }">
+                  {{ verifyResult.ok ? '✓ 验收通过' : '✗ 有未通过项' }}
+                  （{{ verifyResult.passed }}/{{ verifyResult.total }}）
+                </div>
+                <div v-for="it in verifyResult.items" :key="it.name" class="panel"
+                     style="margin-top:6px;padding:6px 8px">
+                  <span :style="{ color: it.ok ? '#9be9a8' : '#ffb4ae' }">{{ it.ok ? '✓' : '✗' }}</span>
+                  <b>{{ it.name }}</b> <span class="dim">{{ it.detail }}</span>
+                  <div v-if="it.human_review" class="dim" style="font-size:11px;margin-top:3px">
+                    人在环：{{ it.human_review }}</div>
+                </div>
+              </div>
+            </div>
+
+            <div style="margin-top:18px;border-top:1px solid var(--line);padding-top:14px">
+              <div class="panel-title" style="font-size:13px">③ 运维单元（一次协商 + 一次人审覆盖整组）</div>
+              <div class="row" style="gap:8px;margin-bottom:8px;align-items:center">
+                <span class="dim" style="font-size:12px">通道：{{ opsCfg.enabled ? '已启用' : '未启用' }}</span>
+                <button class="ghost tiny" @click="toggleOpsEnabled()">切换</button>
+                <span class="dim" style="font-size:11px">（单元 {{ (opsCfg.units || []).length }} 个）</span>
+              </div>
+              <table v-if="opsCfg.units && opsCfg.units.length" style="margin-bottom:8px">
+                <tr><th>单元</th><th>目标</th><th>步骤</th><th>健康检查</th></tr>
+                <tr v-for="u in opsCfg.units" :key="u.id">
+                  <td class="mono" style="font-size:11px">{{ u.id }}</td>
+                  <td style="font-size:11px">{{ u.target }}<span v-if="u.target_host" class="dim"> ({{ u.target_host }})</span></td>
+                  <td>{{ (u.steps || []).length }}</td>
+                  <td style="font-size:11px">{{ u.health_check || '—' }}</td>
+                </tr>
+              </table>
+              <div v-else class="dim" style="font-size:11px;margin-bottom:8px">
+                还没有运维单元。单元通过 API/CLI 配置（目标须先在「部署通道」登记）。
+              </div>
+              <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+                <select v-model="opsExec.unit" style="width:180px">
+                  <option v-for="u in opsCfg.units" :key="u.id" :value="u.id">{{ u.id }}</option>
+                </select>
+                <input v-model="opsExec.password" type="password" placeholder="一次性密码（需要时填）"
+                       style="width:200px" />
+                <button class="primary tiny" :disabled="opsExec.busy" @click="runOpsExec()">
+                  {{ opsExec.busy ? '执行中…' : '提交执行' }}</button>
+              </div>
+              <div v-if="opsExec.result" style="margin-top:8px;font-size:12px">
+                <div :style="{ color: opsExec.result.ok ? '#9be9a8' : '#ffb4ae' }">
+                  {{ opsExec.result.ok ? '✓ ' : '✗ ' }}{{ opsExec.result.why }}
+                </div>
+                <div v-for="s in (opsExec.result.steps || [])" :key="s.command"
+                     class="dim" style="font-size:11px;margin-top:2px">
+                  {{ s.command }} → rc={{ s.rc }} {{ s.ok ? '' : '（失败）' }}
+                </div>
+                <div v-if="opsExec.result.health" class="dim" style="font-size:11px;margin-top:2px">
+                  健康检查：{{ opsExec.result.health.ok ? '通过' : '失败' }}
+                </div>
               </div>
             </div>
           </template>
