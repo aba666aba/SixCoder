@@ -29,8 +29,9 @@ FAIL: list[str] = []
 # —— 设计上只给工具/CLI/夜班用的端点（不是"忘了接"）——
 # 每条都要写清"为什么界面不需要"，而不是"还没做"——后者属于 TODO_UI。
 API_ONLY = {
-    "/v1/fs/tree": "编辑器走 /v1/repo/tree；fs/* 是工具通道（探针/CLI 用）",
-    "/v1/fs/search": "同上：工作区文件搜索由工具通道用，编辑器用 repo/tree",
+    "/v1/fs/tree":
+        "工具通道（探针/CLI 要递归+limit 的扁平树）；编辑器用 /v1/repo/tree 的懒加载单层树。"
+        "两者跳过目录集合已对齐（2026-11-23 补 venv/env/target）",
     "/v1/remote/tool": "远端工具循环入口，由夜班/CLI 驱动（界面不该直接调工具循环）",
     "/v1/web-version":
         "诊断接口：人工/CI 用来确认前端 bundle 指纹（排查『界面是不是旧版』），"

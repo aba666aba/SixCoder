@@ -208,6 +208,7 @@ def repo_tree(repo: str, path: str = ""):
 
 
 _TREE_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", ".venv",
+                   "venv", "env", "target",           # 2026-11-23：与 fs/tree 的 _SKIP_DIRS 对齐
                    ".sixcoder", ".mypy_cache", ".ruff_cache", "dist", "build", ".idea"}
 
 

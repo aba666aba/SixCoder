@@ -447,6 +447,15 @@ button.ghost.sel { border-color: var(--accent); color: var(--accent); }
   background: rgba(255,255,255,.015);
   padding: 4px 2px; max-height: 260px; overflow: auto;
 }
+/* 全仓搜索结果行：点一下跳到命中行（/v1/fs/search） */
+.fs-hit {
+  padding: 3px 6px; border-radius: 4px; cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.fs-hit:hover {
+  background: rgba(79,140,255,.13);
+  border-left-color: var(--accent);
+}
 .tree-node { line-height: 1.5; }
 .tree-row {
   display: flex; align-items: center; gap: 5px;

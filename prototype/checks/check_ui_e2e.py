@@ -291,7 +291,56 @@ def main() -> int:
             except Exception as exc:                     # noqa: BLE001
                 check("plan 接口有蓝图时结构完整", False, f"{type(exc).__name__}: {exc}")
 
-            # ⑨ 体检：真跑链路走查，出结果（不强求全绿，只要求跑出结论）
+            # ⑨ 全仓关键词搜索（/v1/fs/search）：编辑器该有 Ctrl+Shift+F，此前只有 API
+            # 搜索面板在左栏，得先关掉设置弹窗（模态遮罩会挡住左栏，点了会 click timeout）
+            pg.click("button:has-text('关闭')")
+            pg.wait_for_timeout(600)
+            ws_s = Path(tempfile.mkdtemp(prefix="e2esearch-"))
+            (ws_s / "alpha.py").write_text(
+                "def helper():\n    return 1\n\nTOKEN_E2E_SEARCH = 42\n", encoding="utf-8")
+            (ws_s / "beta.py").write_text("print('nothing here')\n", encoding="utf-8")
+            pg.locator("input[placeholder='仓库路径']").fill(str(ws_s))
+            pg.wait_for_timeout(500)
+            pg.click("[data-testid='fs-search-toggle']")
+            pg.wait_for_timeout(300)
+            pg.fill("[data-testid='fs-search-input']", "TOKEN_E2E_SEARCH")
+            pg.press("[data-testid='fs-search-input']", "Enter")
+            pg.wait_for_timeout(1500)
+            t5 = pg.locator("body").inner_text()
+            hits_txt = " ".join(pg.locator(".fs-hit").all_inner_texts())
+            check("全仓搜索有命中且显示文件:行号",
+                  "alpha.py" in hits_txt and "命中" in t5, (hits_txt or t5[-200:])[:220])
+            # beta.py 会出现在左侧**文件树**里（正常），但绝不该出现在搜索结果里
+            check("搜索结果里没有未命中的文件", "beta.py" not in hits_txt,
+                  (hits_txt or "(空)")[:200])
+            pg.locator(".fs-hit").first.click()
+            pg.wait_for_timeout(1200)
+            check("点搜索结果能打开该文件",
+                  "alpha.py" in pg.locator(".editor-head").inner_text(),
+                  pg.locator(".editor-head").inner_text()[:120])
+
+            # 编辑器树与工具通道的跳过集合必须对齐（否则用户项目的 venv/ 会整棵树冒出来）
+            (ws_s / "venv").mkdir(exist_ok=True)
+            (ws_s / "venv" / "injected.py").write_text("pass\n", encoding="utf-8")
+            (ws_s / "target").mkdir(exist_ok=True)
+            try:
+                import urllib.parse
+                import urllib.request
+                _q3 = urllib.parse.urlencode({"repo": str(ws_s)})
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/v1/repo/tree?{_q3}", timeout=20) as _r3:
+                    _d3 = json.loads(_r3.read().decode("utf-8"))
+                _names = [i.get("name") for i in (_d3.get("items") or [])]
+                check("编辑器树跳过 venv/target（与工具通道对齐）",
+                      "venv" not in _names and "target" not in _names
+                      and "alpha.py" in _names, str(_names))
+            except Exception as exc:                     # noqa: BLE001
+                check("编辑器树跳过 venv/target（与工具通道对齐）", False,
+                      f"{type(exc).__name__}: {exc}")
+
+            # ⑩ 体检：真跑链路走查，出结果（不强求全绿，只要求跑出结论）
+            pg.click("text=帮助")                       # 重新打开设置（上面为搜索关过）
+            pg.wait_for_timeout(700)
             pg.click(".tab:has-text('体检')")
             pg.wait_for_timeout(700)
             pg.click("button:has-text('跑链路走查')")

@@ -1197,6 +1197,34 @@ const treeExpanded = ref({})        // { 相对目录路径: true }
 const treeLoading = ref(false)
 const treeError = ref('')
 
+/* 全仓关键词搜索（/v1/fs/search）：编辑器该有的 Ctrl+Shift+F。
+   后端 docstring 写的就是"编辑器用：返回命中文件+行号+整行文本"，
+   但此前界面只能靠自然语言导航找符号，搜不了关键词——这是第 7 次
+   "后端做完、前端没入口"。 */
+const fsSearch = reactive({
+  on: false, q: '', caseSensitive: false, busy: false,
+  hits: [], scanned: 0, truncated: false, searched: false, err: '',
+})
+async function runFsSearch() {
+  const q = fsSearch.q.trim()
+  if (!form.repo) { fsSearch.err = '先选一个仓库目录'; return }
+  if (!q) { fsSearch.err = '输入要搜的关键词'; return }
+  fsSearch.busy = true
+  fsSearch.err = ''
+  try {
+    const p = new URLSearchParams({ repo: form.repo, q, limit: '200' })
+    if (fsSearch.caseSensitive) p.set('case', 'true')
+    const d = await api('/v1/fs/search?' + p.toString())
+    fsSearch.hits = d.hits || []
+    fsSearch.scanned = d.files || 0
+    fsSearch.truncated = !!d.truncated
+    fsSearch.searched = true
+  } catch (e) {
+    fsSearch.err = e.message
+    fsSearch.hits = []
+  } finally { fsSearch.busy = false }
+}
+
 // 换了仓库就清掉旧的树缓存并重新加载（避免显示上一个仓库的文件）
 watch(() => form.repo, () => {
   treeNodes.value = {}
@@ -3670,8 +3698,42 @@ onUnmounted(() => {
             文件
             <span class="spacer"></span>
             <span class="dim mono" style="font-size:10px">{{ treeRoot || '未选仓库' }}</span>
+            <button class="ghost tiny" data-testid="fs-search-toggle"
+                    :title="'全仓关键词搜索（命中文件+行号+整行文本）'"
+                    @click="fsSearch.on = !fsSearch.on">{{ fsSearch.on ? '关闭搜索' : '🔍 搜索' }}</button>
             <button class="ghost tiny" @click="loadTree('')">刷新</button>
           </div>
+
+          <!-- 全仓关键词搜索：点结果直接跳到那一行 -->
+          <div v-if="fsSearch.on" class="panel" style="margin-bottom:6px;padding:6px 8px">
+            <div class="row" style="gap:6px;align-items:center">
+              <input v-model="fsSearch.q" data-testid="fs-search-input"
+                     placeholder="全仓关键词（回车搜索）" style="flex:1;min-width:90px"
+                     @keyup.enter="runFsSearch()" />
+              <button class="ghost tiny" data-testid="fs-search-btn" :disabled="fsSearch.busy"
+                      @click="runFsSearch()">{{ fsSearch.busy ? '…' : '搜' }}</button>
+            </div>
+            <label class="dim" style="font-size:10.5px;display:flex;align-items:center;gap:4px;margin-top:4px">
+              <input type="checkbox" v-model="fsSearch.caseSensitive" style="width:auto" />区分大小写
+            </label>
+            <div v-if="fsSearch.err" class="alert-inline" style="margin-top:4px">{{ fsSearch.err }}</div>
+            <div v-if="fsSearch.searched && !fsSearch.err" class="dim" style="font-size:10.5px;margin-top:4px">
+              {{ fsSearch.hits.length }} 处命中（已扫描 {{ fsSearch.scanned }} 个文件<span
+                v-if="fsSearch.truncated">，结果已截断</span>）
+            </div>
+            <div v-if="fsSearch.hits.length" style="max-height:240px;overflow:auto;margin-top:4px">
+              <div v-for="(h, i) in fsSearch.hits" :key="i" class="fs-hit"
+                   :title="h.path + ':' + h.line"
+                   @click="openTarget({ path: h.path, line: h.line })">
+                <div class="mono dim" style="font-size:10px">{{ h.path }}:{{ h.line }}</div>
+                <div style="font-size:10.5px;white-space:pre;overflow:hidden;text-overflow:ellipsis">{{ h.text }}</div>
+              </div>
+            </div>
+            <div v-else-if="fsSearch.searched && !fsSearch.busy" class="dim" style="font-size:10.5px;margin-top:4px">
+              没有命中。
+            </div>
+          </div>
+
           <div v-if="treeError" class="alert-inline">{{ treeError }}</div>
           <div class="tree-root">
             <div v-if="!form.repo" class="empty">先在上方填仓库路径或点「浏览…」</div>
