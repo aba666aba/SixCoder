@@ -175,9 +175,28 @@ def find_by_provide(token: str) -> str | None:
 
 
 def _run_verify(cwd: Path, argv: list[str], timeout: int = 60) -> dict:
-    """在工具目录里真跑复验命令。返回 {ok, rc, output}。不吞异常。"""
+    """在工具目录里真跑复验命令。返回 {ok, rc, output}。不吞异常。
+
+    内置 Python 的 `._pth` 下，`python -c` 的 cwd **不在 sys.path**，因此
+    `python -c "import entry"` 会 ModuleNotFound（2026-11-23 实测：工具明明装对了，
+    复验却失败 → 整包被回滚）。这里对 `-c` 和 `script.py` 两种形态显式注入工具目录。
+    """
+    argv = [str(x) for x in argv]
+    _cwd = str(Path(cwd).resolve())
+    head = Path(argv[0]).name.lower() if argv else ""
+    if head in ("python", "python.exe", "python3", "py") and len(argv) >= 2:
+        if argv[1] == "-c" and len(argv) >= 3:
+            argv = [argv[0], "-c",
+                    f"import sys; sys.path.insert(0, {_cwd!r})\n" + argv[2], *argv[3:]]
+        elif argv[1].endswith(".py"):
+            _sp = str((Path(cwd) / argv[1]).resolve())
+            argv = [argv[0], "-c",
+                    "import sys, runpy\n"
+                    f"sys.path.insert(0, {_cwd!r})\n"
+                    f"sys.argv = {([_sp, *argv[2:]])!r}\n"
+                    f"runpy.run_path({_sp!r}, run_name='__main__')\n"]
     try:
-        cp = subprocess.run([str(x) for x in argv], cwd=str(cwd),
+        cp = subprocess.run(argv, cwd=str(cwd),
                             capture_output=True, text=True, timeout=timeout,
                             encoding="utf-8", errors="replace")
         out = ((cp.stdout or "") + (cp.stderr or "")).strip()
