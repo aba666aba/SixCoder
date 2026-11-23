@@ -79,7 +79,21 @@ def main() -> int:
         return {"ok": True}
 
     ws4 = make_ws(BROKEN_APP)
+
+    # 修复片的"契约合成"直连远端 LLM；自检不该打网络、也不该依赖本机远端配置。
+    # 注入一个最小真实契约文件，只验"修复回路"本身（派单 → 复查 → 结论），
+    # 与"契约合成质量"解耦（那是 company/contractgen 的职责）。
+    _orig_cfs = auto.contract_for_slice
+
+    def _fake_cfs(ws, sl, brief, **kw):
+        q = Path(ws) / ".sixcoder" / "tmp" / "c_repair.md"
+        q.parent.mkdir(parents=True, exist_ok=True)
+        q.write_text("# 契约：修复片\n\n- ghost_fn() -> dict\n", encoding="utf-8")
+        return {"ok": True, "path": str(q)}
+
+    auto.contract_for_slice = _fake_cfs
     ok = auto._repair_workspace(ws4, emit=_emit, runner=good_runner)
+    auto.contract_for_slice = _orig_cfs
     check("修好后返回 True", ok is True)
     check("发出 workspace_repaired 事件",
           any(e[0] == "workspace_repaired" for e in events if isinstance(e, tuple)),
@@ -93,7 +107,9 @@ def main() -> int:
         return {"ok": True}          # 什么都不修
 
     ws5 = make_ws(BROKEN_APP)
+    auto.contract_for_slice = _fake_cfs
     ok2 = auto._repair_workspace(ws5, emit=_emit, runner=bad_runner)
+    auto.contract_for_slice = _orig_cfs
     check("两轮修不好返回 False", ok2 is False)
     check("发出 workspace_still_broken（事件流里有一次）",
           any(isinstance(e, tuple) and e[0] == "workspace_still_broken" for e in events),
