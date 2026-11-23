@@ -148,3 +148,6 @@ projects/*
 /data/
 /.tmp_home3/
 /.tmp_scgit/
+
+# 一次性诊断脚本（不入库）
+/.tmp_probe/
