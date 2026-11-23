@@ -155,7 +155,11 @@ def differential(ws: Path, rel: str, ref_rel: str, cases: list, funcs: list[str]
                  timeout: int = 60) -> dict:
     """跑差分：返回 {ok, checked, divergences}。"""
     runner = ws / "_diff_run.py"
-    runner.write_text(RUNNER, encoding="utf-8")
+    # 前置一行把工作区塞进 sys.path：内置 Python 的 `._pth` 下，`python runner.py` 的
+    # **脚本目录不进 sys.path** → 下面的 `importlib.import_module(impl_mod)` 会
+    # ModuleNotFound（2026-11-23 实测：差分测试全红，误判成"实现有分歧"）。
+    runner.write_text(f"import sys; sys.path.insert(0, {str(ws.resolve())!r})\n" + RUNNER,
+                      encoding="utf-8")
     impl_mod = Path(rel).stem
     ref_mod = Path(ref_rel).stem
     # 关键：同一秒内改写文件且字节数不变时，CPython 会复用旧 pyc，导致"对着旧代码通过"
