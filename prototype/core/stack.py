@@ -692,7 +692,7 @@ def _register_ecosystem_adapters() -> list:
 
     ## 为什么必须有这一步
 
-    data/ecosystem/ 下有 8 个栈包（cli_tool / electron / frontend_spa /
+    prototype/stacks/ 下有 8 个栈包（cli_tool / electron / frontend_spa /
     go_service / microservice / node_express / py_lib / spring_boot），
     每个都写好了 adapter（识别 + 探针约定）。
 
@@ -813,10 +813,17 @@ def detect(ws) -> str:
 def _looks_like_frontend(ws: Path) -> bool:
     """前端项目的实物特征。
 
-    判据（满足任一即算）：
-      · vite.config.{js,ts,mjs} / next.config.{js,mjs} / svelte.config.js
-      · package.json 里 dependencies/devDependencies 含 react / vue / svelte
-    为什么不用"有 index.html"：FastAPI 模板也可能带一个，误判代价大。
+    三条判据（满足任一即算）：
+      1. 有构建配置：vite.config.* / next.config.* / svelte.config.js
+      2. package.json 的依赖里有 react / vue / svelte 等前端框架
+      3. **package.json + index.html 同时存在**（2026-11-24 补）
+         —— 单个 package.json 不够（Express 后端也有），
+         但 package.json + 根目录 index.html 是典型的 Vite/CRA 骨架形态。
+         实测：check_ecosystem 用这个组合测"前端项目不被 electron 抢判"，
+         早先只认 1 和 2，导致这条自检失败 —— 说明这个组合确实是有效特征。
+
+    为什么"只有 index.html"不算（FastAPI 模板也可能带一个，误判代价大）：
+    必须和 package.json 一起出现才认。
     """
     ws = Path(ws)
     for name in ("vite.config.js", "vite.config.ts", "vite.config.mjs",
@@ -826,6 +833,9 @@ def _looks_like_frontend(ws: Path) -> bool:
     pkg = ws / "package.json"
     if not pkg.is_file():
         return False
+    # 判据 3：package.json + index.html 组合
+    if (ws / "index.html").is_file():
+        return True
     try:
         data = json.loads(pkg.read_text(encoding="utf-8-sig"))
     except Exception:                                    # noqa: BLE001

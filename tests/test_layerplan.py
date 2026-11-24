@@ -109,7 +109,11 @@ def test_frontend_plan_only_components():
     got = plan.targets(ctx, "modules")
     assert "src/util.ts" in got, got
     assert "src/App.jsx" not in got, "骨架文件不交给远端写"
-    assert plan.targets(ctx, "models") == [], "生态包通用计划只有 modules 一层"
+    # 组件类栈**不区分层名**（与 fullgen 旧的前端分支一致）：
+    # 前端没有 models/services/api 那套分层，用层名筛只会全空。
+    assert plan.targets(ctx, "services") == got, "组件类栈应忽略层名"
+    # 但只返回组件后缀，不返回 .py
+    assert "app/models.py" not in got, "组件类栈不该返回 Python 文件"
 
 
 def test_unknown_stack_returns_none():

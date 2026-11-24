@@ -230,11 +230,25 @@ def ecosystem_plan(name: str, description: str = "") -> Optional[SimplePlan]:
     避免"没有骨架却声称能生成"。
     """
     def _targets(ctx, layer):
-        # **只回答本计划声明的那一层**（2026-11-24 修正）。
-        # 早先这里不看 layer 参数，问任何层名都返回同一批文件 ——
-        # 于是 plan.targets(ctx, "models") 也会返回组件列表，
-        # 让 FastAPI 的三层语义和生态包的单层语义混在一起。
-        if layer != "modules":
+        # 层名语义（2026-11-24 二次修正，被 check_ecosystem 抓出来的回归）：
+        #
+        # · **组件类栈**（electron / frontend_spa）：**不区分层名**。
+        #   旧实现 fullgen._layer_targets 的前端分支就是这样 ——
+        #   无论问 services 还是 models，都返回蓝图里的 .jsx/.tsx/.vue。
+        #   我在 P0 把它改成"只认 modules"，直接让 check_ecosystem 的
+        #   "electron 落点走组件分支"失败。
+        #   为什么旧行为是对的：前端根本没有 models/services/api 这套分层，
+        #   用层名去筛只会全部筛空。
+        #
+        # · 其他生态包：只认本计划声明的 modules 层。
+        try:
+            from . import ecosystem as _eco2
+            _ad, _ = _eco2.load_adapter(name)
+        except Exception:                            # noqa: BLE001
+            _ad = None
+        _is_component = str(getattr(_ad, "module_file_fmt", "") or "").endswith(
+            (".jsx", ".tsx", ".vue"))
+        if not _is_component and layer != "modules":
             return []
         # 单层：把蓝图声明的业务模块都算进来，骨架文件由生态包负责
         try:
@@ -242,18 +256,53 @@ def ecosystem_plan(name: str, description: str = "") -> Optional[SimplePlan]:
             tpl_dir = _eco.pack_dir(name) / "templates"
         except Exception:                            # noqa: BLE001
             tpl_dir = None
+        # 骨架文件清单（相对包 templates/ 的路径）。
+        #
+        # **只用来排除"和骨架完全同路径"的文件**（如 src/main.jsx、src/App.jsx）。
+        # 不能只比文件名 —— 实测（check_ecosystem）：业务页面 src/pages/Home.jsx
+        # 与骨架模板 templates/src/pages/Home.jsx 同名，按文件名排除会把它
+        # 一起排掉，导致"该写的前端页面一个都不写"。
         skeleton = set()
         if tpl_dir is not None and tpl_dir.is_dir():
             for f in tpl_dir.rglob("*"):
                 if f.is_file():
                     skeleton.add(f.relative_to(tpl_dir).as_posix())
+        # 骨架文件分两类处理（2026-11-24：被三处测试/自检来回夹出来的规则）：
+        #
+        #   A. **入口/装配文件**（main.jsx / App.jsx / main.py / cli.py /
+        #      vite.config.js / package.json / index.html …）——**永远不让远端写**。
+        #      它们是引擎的装配产物，远端改了会和骨架约定冲突
+        #      （实测：远端若改 cli.py 的子命令分发，退出码约定就失守）。
+        #
+        #   B. **起步占位页**（如 src/pages/Home.jsx）——蓝图显式声明了就放行。
+        #      这类文件只是"给你一个能跑的空页面"，业务要做首页时当然要覆盖它。
+        #
+        # 区分办法：A 类按文件名（叶子名）判断，与目录无关；
+        # B 类按完整相对路径判断。
+        _ENTRY_NAMES = {
+            "main.py", "cli.py", "app.py", "__main__.py",
+            "main.jsx", "main.tsx", "main.js", "main.ts",
+            "App.jsx", "App.tsx", "App.vue",
+            "vite.config.js", "vite.config.ts", "vite.config.mjs",
+            "index.html", "package.json", "package-lock.json",
+            "main.cjs", "preload.cjs", "electron-builder.json",
+        }
+        entry_files = {rel for rel in skeleton
+                       if rel.rsplit("/", 1)[-1] in _ENTRY_NAMES}
+        declared = set(ctx.module_paths())
+
         out = []
         for m in ctx.module_paths():
             rel = str(m or "").strip()
             if not rel:
                 continue
-            if rel in skeleton:
-                continue                             # 骨架文件不由远端写
+            if rel in entry_files:
+                continue                             # A 类：入口永远由骨架提供
+            if rel in skeleton and rel not in declared:
+                continue                             # B 类：没被声明就不动它
+            if _is_component and not rel.endswith(
+                    (".jsx", ".tsx", ".vue", ".js", ".ts")):
+                continue                             # 组件类栈只写组件文件
             out.append(rel)
         return out
 

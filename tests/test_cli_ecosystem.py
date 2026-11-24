@@ -34,7 +34,7 @@ from core import ecosystem, layerplan, stack   # noqa: E402
 
 def test_pack_has_cli_skeleton_template():
     """骨架必须真的在生态包里（合并方案的核心）。"""
-    tpl = ROOT / "prototype" / "data" / "ecosystem" / "cli_tool" / "templates"
+    tpl = ROOT / "prototype" / "stacks" / "cli_tool" / "templates"
     assert (tpl / "cli.py").is_file(), "缺 cli_tool/templates/cli.py"
     src = (tpl / "cli.py").read_text(encoding="utf-8")
     # 模板必须**原样就能编译**（不能依赖引擎替换占位符 ——

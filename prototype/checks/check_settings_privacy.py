@@ -64,7 +64,13 @@ def main() -> int:
         ck("filter 有 " + pat, pat in flt)
     # 生态包**必须进安装版**：否则装好的软件认不出 frontend_spa/electron/spring_boot 等栈，
     # 等于功能缺失。早期为缩小体积排除了它，2026-11-23 已改为随包分发。
-    ck("生态包不被排除（装好的软件要能用）", "!data/ecosystem/**" not in flt, flt)
+    # 2026-11-24：生态包从 data/ecosystem 改名为 stacks/（在 prototype 根下）。
+    # 这条断言必须同时检查两个路径 —— 只检查旧路径会让它**永远通过**
+    # （旧字符串已经不存在了），那是静默失效。
+    _bad_old = "!data/ecosystem/**" in flt
+    _bad_new = "!stacks/**" in flt
+    ck("生态包不被排除（装好的软件要能用）", not _bad_old and not _bad_new,
+       "old=%s new=%s" % (_bad_old, _bad_new))
     ck("仍保留 data/axe.min.js", "!data/axe.min.js" not in flt)
     extras = cfg["extraResources"]
     ck("extraResources 放的是模板文件（不覆盖用户 settings.json）", any(

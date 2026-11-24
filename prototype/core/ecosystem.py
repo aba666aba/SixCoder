@@ -6,7 +6,7 @@
 "栈适配器 + 探针 + 检测器"，引擎规范化装进本地生态库，复验通过才启用。
 
 ## 一个生态包 = 一个目录
-    data/ecosystem/<name>/
+    stacks/<name>/
       manifest.json     # 声明 kind/provides/needs/verify/adapter_class/files
       adapter.py        # 可选：StackAdapter 子类（前端/桌面等"栈"类必填）
       probe_<kind>.py   # 可选：新探针实现（只在子进程执行，不进主进程）
@@ -35,7 +35,14 @@ import sys
 import time
 from pathlib import Path
 
-ECO_ROOT = Path(__file__).resolve().parents[1] / "data" / "ecosystem"
+# 2026-11-24 从 data/ecosystem 改名成 stacks/：
+# 原路径放在 data/ 下，被当成"数据目录"跳过了 —— 实际是插件体系
+# （manifest + adapter + templates）。改名是为了让人一眼看出这是栈包。
+# 兼容：旧路径若存在（老克隆）仍然回退，避免升级后找不到包。
+ECO_ROOT = Path(__file__).resolve().parents[1] / "stacks"
+_LEGACY_ECO_ROOT = Path(__file__).resolve().parents[1] / "data" / "ecosystem"
+if not ECO_ROOT.is_dir() and _LEGACY_ECO_ROOT.is_dir():
+    ECO_ROOT = _LEGACY_ECO_ROOT
 MANIFEST = "manifest.json"
 NAME_RE_STR = r"^[a-z][a-z0-9_]{0,63}$"
 PACK_KINDS = ("stack", "probe", "detector")

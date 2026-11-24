@@ -3,7 +3,7 @@
 ## 背景
 
 做 P2 时先写了一套自己的前端骨架模板，后来发现**生态包已经提供了**
-（prototype/data/ecosystem/frontend_spa/templates/，连 react-router-dom 都配好了），
+（prototype/stacks/frontend_spa/templates/，连 react-router-dom 都配好了），
 于是撤销重复实现，只保留真正的缺口修复。
 
 ## 保留下来的两个修复

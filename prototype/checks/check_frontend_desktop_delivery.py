@@ -3,7 +3,7 @@
 背景（真实缺口，不是设计想象）：
   生态包 frontend_spa/electron 在开发目录里早就写好、check_ecosystem.py 全绿，
   但**用户装的安装版根本用不上**，两处断点：
-    1. packaging/electron-builder.json 的 filter 明确排除了 `data/ecosystem/**`
+    1. packaging/electron-builder.json 的 filter 明确排除了生态包目录
        → 安装包里没有这些包 → cli.py night 的 load_all() 加载不到 → 退回只有
        FastAPI/Django 两栈，前端/桌面项目仍按后端处理（全绿却全错）。
     2. requirements.txt 没有 playwright → core/browser.py 第一行 import 就失败
@@ -46,9 +46,10 @@ def main() -> int:
             filt = []
             for res in cfg.get("extraResources", []):
                 filt += res.get("filter", [])
-            check("filter 不再排除 data/ecosystem/**",
-                  not any("ecosystem" in str(x) for x in filt),
-                  str([x for x in filt if "ecosystem" in x]))
+            # 2026-11-24：生态包从 data/ecosystem 改名成 stacks/。
+            # 断言同时看两个路径 —— 只看旧名会让它永远通过（旧字符串已不存在）。
+            _bad = [x for x in filt if ("ecosystem" in str(x)) or str(x).startswith("!stacks/")]
+            check("filter 不再排除生态包目录", not _bad, str(_bad))
             check("prototype 整包作为 extraResources 分发",
                   any(r.get("from") == "../prototype" for r in cfg.get("extraResources", [])))
         except json.JSONDecodeError as exc:
