@@ -69,8 +69,13 @@ jobs:
           python packaging/build_installer.py 2>&1 | Tee-Object -FilePath build.log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
-            Write-Output "::error::构建失败，退出码 $code"
-            Get-Content build.log -Tail 60
+            # 把失败的**最后几行**直接写进 annotation。
+            # Actions 日志接口要认证，未登录读不到；artifact 也要认证才能下。
+            # annotation 是公开的，所以这是唯一能让失败原因自己可见的通道。
+            $tail = (Get-Content build.log -Tail 12 -ErrorAction SilentlyContinue) -join " | "
+            if ($tail.Length -gt 900) { $tail = $tail.Substring($tail.Length - 900) }
+            Write-Output "::error::构建失败（退出码 $code）。末尾输出：$tail"
+            Get-Content build.log -Tail 80
             throw "构建失败"
           }
 
