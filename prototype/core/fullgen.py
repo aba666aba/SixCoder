@@ -55,6 +55,20 @@ def _layer_targets(ws, bp, name: str, fixed) -> list[str]:
         _ad = _st.from_workspace(ws)
     except Exception:                                    # noqa: BLE001
         _ad = None
+
+    # P0（2026-11-24）：先走可插拔的生成计划；取不到才回退到下面的旧 if 分支。
+    # 为什么保留旧分支：这是"生成骨架"重构的第一刀，行为必须逐字不变。
+    # 旧分支留在这里既是回退路径，也是这段逻辑的对照物 —— 等 P1/P2 补完
+    # 新形态、且快照证明没差异之后，再单独一刀删掉。
+    try:
+        from . import layerplan as _lp
+        _plan = _lp.plan_for(ws, _ad)
+        if _plan is not None:
+            _ctx = _lp.LayerContext(ws=ws, blueprint=bp)
+            return _plan.targets(_ctx, name)
+    except Exception:                                    # noqa: BLE001
+        pass                                             # 计划层坏了就按旧逻辑跑
+
     is_django = getattr(_ad, "name", "") == "django"
     # **组件类栈**（前端 SPA / Electron …）判定不写死栈名：看适配器的落点模板
     # 是不是组件后缀。这样以后再加 Vue/Native 生态包不用再改这里（2026-11-19）。
