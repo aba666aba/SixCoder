@@ -186,6 +186,27 @@ def scan() -> list[dict]:
                     items.append({**base, "kind": "比较阈值", "value": str(n),
                                   "key": _key(p, "比较阈值", str(n), base["snip"])})
             # 4) 禁令语句
+            #
+            # **排除"文本内容"不是"系统限制"的情形**（2026-11-24 修）：
+            #
+            # 这条规则本意是抓"代码里硬编码的禁令"（如受保护区检查、
+            # 禁止改测试的语句），靠"引号里含不许/禁止"来识别。
+            # 但它把**提示词与判据描述**也一起抓了：
+            #
+            #   "不许把未实现当完成"   <- judges.py 里判据的 description
+            #   "### 红线（绝对不许违反）" <- feedback.py 拼给模型看的提示文本
+            #   "只给引擎支持的选项，不要编造" <- clarify.py 的提示词
+            #
+            # 这些是**给模型/用户看的文字**，不是引擎的硬约束 ——
+            # 判成"限制必须有依据"属于误报（实测 7 条里 5 条是这类）。
+            #
+            # 识别办法：该行若是 "裸字符串字面量"（整行就是一个字符串/
+            # 字符串拼接），说明它是在拼文案，不是执行限制判断。
+            _stripped = line.strip()
+            _is_text_block = bool(re.fullmatch(
+                r'["\'].*["\']\s*[,)]?', _stripped)) or _stripped.startswith('"')
+            if _is_text_block:
+                continue
             for m in PROHIBIT.finditer(line):
                 txt = m.group(0).strip("\"'")
                 items.append({**base, "kind": "禁令", "value": txt[:40], "text": txt,

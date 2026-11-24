@@ -891,6 +891,21 @@ def set_remote_settings(req: RemoteSettingsReq):
         patch[k] = v
     if raw.get("clear_key"):
         patch["api_key"] = ""
+        # **同时清掉厂商卡片里的 key**（2026-11-24 修）。
+        #
+        # 实测 bug：UI 弹窗写的是「确定清除已保存的远端 key？清除后远端协助不可用」，
+        # 但只清平铺 remote.api_key 时，remote.available() 会走 2026-11-21 加的兜底——
+        # "厂商卡片里填了 key 也算已配置" -> 清完仍然 available=True，与 UI 承诺相反。
+        #
+        # 取舍：clear_key 的语义就是"清干净"。要保留某把 key 就别点清除。
+        # 注意空 api_key 仍然不清（那是防误删，见函数 docstring），只有显式
+        # clear_key=true 才走到这里。
+        try:
+            from core import settings_store as _ss_clear
+            _ss_clear.clear_provider_keys()
+        except Exception:                            # noqa: BLE001
+            pass                                     # 清厂商 key 失败不该让整个请求 500
+
     if "api_key" in patch:
         patch["configured_at"] = db_mod.now()
     changed = []

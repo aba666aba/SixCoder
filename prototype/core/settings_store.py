@@ -680,6 +680,43 @@ def save_providers(provs: list[dict]) -> list[dict]:
     return clean
 
 
+
+
+def clear_provider_keys() -> dict:
+    """清空所有厂商卡片上的 key（厂商级 api_key + 每条 key 的 api_key）。
+
+    ## 为什么需要这个函数（2026-11-24 修真实 bug）
+
+    `save_providers()` 写 key 时是**双写**的：厂商卡片的 api_key 会同步回平铺字段
+    `remote.api_key`（见该函数第 675 行）。但清除时只清了平铺字段，
+    于是：
+
+      用户点「清除远端 key」 -> remote.api_key = ""
+      -> remote.available() 走 2026-11-21 的兜底："厂商卡片有 key 也算已配置"
+      -> 仍然 available=True
+
+    而 UI 弹窗承诺的是「清除后远端协助不可用」。用户的合理预期被打破。
+
+    ## 语义
+
+    显式调动本函数 = 用户明确要求"清干净"。想保留某把 key 就别点清除。
+    （空 api_key 不清是另一条防误删规则，与本函数无关。）
+    """
+    data = load()
+    remote = data.setdefault("remote", {})
+    remote["api_key"] = ""
+    cleared = 0
+    for p in (remote.get("providers") or []):
+        if str(p.get("api_key") or "").strip():
+            p["api_key"] = ""
+            cleared += 1
+        for k in (p.get("keys") or []):
+            if str(k.get("api_key") or "").strip():
+                k["api_key"] = ""
+                cleared += 1
+    save(data)
+    return {"ok": True, "cleared": cleared}
+
 def current_provider() -> dict:
     """正在使用的那个厂商。"""
     ps = providers()

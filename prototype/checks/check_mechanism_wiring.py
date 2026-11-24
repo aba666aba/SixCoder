@@ -135,6 +135,13 @@ def main() -> int:
     print("[B] 死机制：core 公开函数在全仓找不到调用点")
     called: set[str] = set()
     imported: set[str] = set()
+    # 回调用法（2026-11-24 修）：函数名作为参数传出去也算被使用。
+    #
+    # 之前只认 f() 这种直接调用，于是 reg.register(CtxJudge(
+    # "cli.exit_code", judge_exit_code, ...)) 被判成死机制 ——
+    # 但 judge_exit_code 明明被注册进判据表、闸门会调它。
+    # 判据注册/事件订阅/策略表这类回调模式在 core 里很常见。
+    passed_as_arg: set[str] = set()
     for p, tree in trees:
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -145,6 +152,9 @@ def main() -> int:
                     called.add(f.attr)
                     if isinstance(f.value, ast.Name):
                         imported.add(f.value.id)
+                for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                    if isinstance(arg, ast.Name):
+                        passed_as_arg.add(arg.id)
             elif isinstance(node, ast.Attribute):
                 called.add(node.attr)
             elif isinstance(node, ast.ImportFrom):
@@ -167,6 +177,8 @@ def main() -> int:
             if node.name.startswith("_"):
                 continue
             if node.name in called:
+                continue
+            if node.name in passed_as_arg:
                 continue
             # 被 `模块.函数()` 调用：`模块名` 出现在 imported 里 → 算有调用
             if p.stem in imported:

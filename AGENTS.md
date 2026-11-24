@@ -47,11 +47,11 @@ prototype/
 │   ├── cli_tool/          manifest + adapter.py + templates/
 │   ├── electron/          同上（8 个骨架文件）
 │   ├── frontend_spa/      同上（6 个骨架文件）
-│   ├── go_service/        只有 adapter，无模板
-│   ├── microservice/      只有 adapter，无模板
-│   ├── node_express/      只有 adapter，无模板
-│   ├── py_lib/            只有 adapter，无模板
-│   └── spring_boot/       只有 adapter，无模板
+│   ├── go_service/        同上（go.mod + main.go）
+│   ├── microservice/      同上（celery_app.py + app/ 分层）
+│   ├── node_express/      同上（server.js + routes/）
+│   ├── py_lib/            同上（lib/__init__.py 懒加载导出）
+│   └── spring_boot/       同上（pom.xml + Application.java）
 ├── checks/          232 个自检脚本（check_*.py）
 ├── tools/           辅助工具（gate_snapshot.py 等）
 └── archive/         归档的旧代码（.removed_* 移进来）
@@ -88,11 +88,11 @@ docs/                文档
 | `cli_tool` | Y | Y（1 层） | 22 / **3** | **Y** | cli |
 | `electron` | Y | Y（1 层） | 19 / 0 | **Y** | — |
 | `frontend_spa` | Y | Y（1 层） | 19 / 0 | **Y** | browser |
-| `go_service` | Y | N | 19 / 0 | — | cli |
-| `microservice` | Y | N | 19 / 0 | — | sql |
-| `node_express` | Y | N | 19 / 0 | — | cli |
-| `py_lib` | Y | N | 19 / 0 | — | py_call |
-| `spring_boot` | Y | N | 19 / 0 | — | cli |
+| `go_service` | Y | **Y**（1 层） | 19 / 0 | **Y** | cli |
+| `microservice` | Y | **Y**（1 层） | 19 / 0 | **Y** | sql |
+| `node_express` | Y | **Y**（1 层） | 19 / 0 | **Y** | cli |
+| `py_lib` | Y | **Y**（1 层） | 19 / 0 | **Y** | py_call |
+| `spring_boot` | Y | **Y**（1 层） | 19 / 0 | **Y** | cli |
 
 **「专属」= 只对这一个栈生效的判据。** 「总」= 加上 19 条通用判据
 （`probe.*` 7 条 + `lang.*` 2 条 + anti_cheat/assertions/completeness 等 10 条）。
@@ -342,31 +342,58 @@ python tools/gate_snapshot.py --verify                 # 7 个闸门快照
 
 ### 6.1 自检不全是绿的
 
-全部 229 个自检：**214 通过 / 15 失败**。
+全部 229 个自检，**用正确的 UTF-8 环境跑**：
 
-这 15 个**在改动前的 HEAD 上就全部失败**（用 `git stash` 验证过），
-与近期改动无关：
-
-```
-check_business_flow / check_capconf / check_clarify /
-check_cost_attribution / check_devdoc / check_exepack /
-check_httpflow / check_invariants / check_mechanism_wiring /
-check_multilang_dev / check_night_requirement / check_remote_http /
-check_reuse / check_shell_tray / check_walkthrough
+```bash
+$env:PYTHONIOENCODING="utf-8"; $env:PYTHONUTF8="1"
 ```
 
-**不要去「修」它们直到你确认自己想要什么行为** —— 它们可能是
-历史上的半成品自检，也可能是真 bug。先看具体 FAIL 信息再判断。
+**不用 UTF-8 环境会有 7 个假失败** —— 它们是 `UnicodeEncodeError: 'gbk'`，
+脚本本身是好的（`Get-ChildItem` 循环里跑就崩，单独跑就过）。
 
-### 6.2 5 个生态包没有骨架模板
+**2026-11-24 全部修完**，之前记录的 15 个失败逐条处理：
 
-`go_service` / `microservice` / `node_express` / `py_lib` / `spring_boot`
+| 类别 | 数量 | 处理 |
+|---|---|---|
+| UTF-8 假失败（`UnicodeEncodeError: 'gbk'`） | 7 | 环境问题，设 `PYTHONIOENCODING` 即可，脚本本身没问题 |
+| 新增文件未登记 | 2 | 补 `开发文档.md` 架构地图（6 个 core 文件）+ 修 `check_mechanism_wiring` 的回调识别 |
+| `check_invariants` 误判 | 1 | 把提示词文字（如 `"不许把未实现当完成"`）当成"禁令"，已修检测器 + 补 2 条真实依据 |
+| `check_remote_http` 真 bug | 1 | `clear_key` 只清平铺字段不清厂商卡片，与 UI 承诺相反，已修 |
+| `check_devdoc` 计数 | 1 | 227 → 229 |
+| 其余 | 3 | 详见下 |
 
-- **验收已通**（通用探针判据能跑它们的 probe）
-- **骨架没有**（`templates/` 为空），生成这类项目时走旧逻辑
+**跑全量自检的注意事项**：
 
-补骨架前先看各包 adapter 的 `entry_path` / `module_file_fmt`，
-那里已有结构暗示，不要凭空发明。
+```bash
+# 有些 check 需要后端在跑（check_remote_http 等）
+python -m uvicorn server:app --host 127.0.0.1 --port 8798 &
+$env:SIXCODER_BASE_URL = "http://127.0.0.1:8798"
+```
+
+全量跑一遍大约 15-20 分钟，**不要用在同步工具调用里等它**——
+放后台跑（`run_in_background`），或者只跑相关的子集。
+
+### 6.2 生态包骨架已全部补齐（2026-11-24）
+
+8 个包现在都有 `templates/`：
+
+| 包 | 骨架文件 | 验证深度 |
+|---|---|---|
+| `cli_tool` | cli.py + commands/ | **真跑**：--help/子命令/退出码/坏模块 |
+| `electron` | 8 个（main.cjs + preload + React 渲染进程） | 结构 |
+| `frontend_spa` | 6 个（vite + React） | **真构建**：npm install + vite build + 浏览器渲染 |
+| `microservice` | 7 个（celery_app.py + app/{api,services,tasks}） | **py_compile 全过** |
+| `node_express` | 3 个（server.js + routes/ + package.json） | **node --check 通过** |
+| `py_lib` | lib/__init__.py（懒加载导出） | **真 import**：空库可导入、加模块能取符号 |
+| `spring_boot` | 3 个（pom.xml + Application.java + properties） | **mvn validate exit=0** |
+| `go_service` | 2 个（go.mod + main.go） | **仅文本检查**（本机无 go） |
+
+**唯一没有真跑验证的是 go_service**——本机没装 Go 工具链。
+它的骨架是文本层面检查的（package main / func main / net/http）。
+**如果你有 Go 环境，应该跑一次 `go build ./...` 确认。**
+
+测试：`tests/test_ecosystem_skeletons.py`（9 条）钉住
+"每个包有模板 + 复制后能被 detect 认出 + 能跑"。
 
 ### 6.3 `_sandbox/` 占 58 MB
 
