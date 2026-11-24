@@ -102,11 +102,17 @@ def main() -> int:
                   if "/v1/" in r.url else None)
             pg.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle", timeout=30000)
 
-            pg.click("text=帮助")
+            # 2026-11-23 拆分：帮助与设置成了两个独立按钮。
+            # 这里验的「UI 审美 / 半自动回填 / 多机编排 / 能力边界 / 自主计划」全在**设置**组，
+            # 所以要点「⚙ 设置」，不能再点「帮助」（点帮助只会看到只读说明）。
+            pg.click("text=⚙ 设置")
             pg.wait_for_timeout(600)
             tabs = pg.locator(".tab").all_inner_texts()
             for name in ("UI 审美", "半自动回填", "多机编排", "能力边界", "自主计划"):
                 check(f"Tab 存在：{name}", name in tabs, str(tabs))
+            # 反向断言：设置组里**不该**有只读说明页，也不该再出现「远端模型」（独立浮层）
+            for name in ("需求帮助", "权限说明", "远端模型"):
+                check(f"设置组不该有：{name}", name not in tabs, str(tabs))
 
             # ① UI 审美：选预设 → 保存 → 真落盘
             pg.click(".tab:has-text('UI 审美')")
@@ -365,7 +371,7 @@ def main() -> int:
                       f"{type(exc).__name__}: {exc}")
 
             # ⑩ 体检：真跑链路走查，出结果（不强求全绿，只要求跑出结论）
-            pg.click("text=帮助")                       # 重新打开设置（上面为搜索关过）
+            pg.click("text=⚙ 设置")                     # 重新打开**设置**（上面为搜索关过）
             pg.wait_for_timeout(700)
             pg.click(".tab:has-text('体检')")
             pg.wait_for_timeout(700)
@@ -378,6 +384,18 @@ def main() -> int:
                 check("体检走查出结论", False, "45s 内没出结果")
 
             # ⑪ 状态说明：前端版本自检（磁盘最新 bundle vs 浏览器实际加载的那个）
+            # 「状态说明」属于**帮助**组，要先切回帮助弹窗（2026-11-23 拆分后两组分开）。
+            # 注意三点：
+            #   · 选择器要精确到**顶栏按钮**：弹窗里还有「需求帮助」tab，`text=帮助` 会命中两个；
+            #   · 设置弹窗还开着时遮罩会挡住顶栏，必须先关掉；页面上有多个「关闭」按钮，用 ESC 最稳；
+            #   · 体检那一步点过「跑链路走查」，等它出结果后再切，避免打断。
+            pg.keyboard.press("Escape")
+            pg.wait_for_timeout(400)
+            if pg.locator(".modal-mask").count():
+                pg.mouse.click(5, 5)                      # 点遮罩空白处兜底
+                pg.wait_for_timeout(400)
+            pg.click(".topbar button.menu-btn:has-text('帮助')")
+            pg.wait_for_timeout(600)
             pg.click(".tab:has-text('状态说明')")
             pg.wait_for_timeout(1500)
             t6 = pg.locator("body").inner_text()
@@ -405,4 +423,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

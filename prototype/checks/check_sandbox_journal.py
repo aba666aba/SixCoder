@@ -1,7 +1,7 @@
 """沙箱备份规模自检（用户两次追问的结论：会不会爆炸、能不能只留三份）。
 
 2026-11-20 用户口径演进：
-  ① 先问"开发者模式保存文件备份会不会导致文件数目爆炸" → 实测同一文件存 30 次
+  ① 先问"精修模式保存文件备份会不会导致文件数目爆炸" → 实测同一文件存 30 次
      就是 29 个**完整副本**，而原来**没有任何清理**（80KB 文件每天存 50 次 ≈ 4MB/天）；
   ② 再定策略"不要保留太多备份，只能撤销三次，循环覆盖原有备份即可"。
 
@@ -106,6 +106,39 @@ def main() -> int:
     finally:
         shutil.rmtree(ws, ignore_errors=True)
 
+    # 2026-11-23 真 bug（偶发，全量自检里撞出来、单独复跑又绿）：
+    # 旧 token = 时分秒 + (毫秒 % 100000)，**同一毫秒内连续两次备份 token 完全相同**
+    # → 备份文件同名互相覆盖，journal.jsonl 却追加两行指向同一文件
+    # → prune 按行序留 3 份时实际只剩 2 份，撤销栈比承诺少一层。
+    # 用 40 轮连续写压测（旧版约 13% 的轮次只剩 2 份）。
+    print("[6] 同一毫秒内连续备份：token 必须唯一（旧版会覆盖）")
+    bad_rounds = []
+    for trial in range(40):
+        ws = Path(tempfile.mkdtemp(prefix="jrn-hot-"))
+        try:
+            for i in range(30):
+                tools.write_file(ws, "app.py", f"# rev {i}\n" + "x = 1\n" * 50, backup=True)
+            n_files = len(journal_files(ws))
+            n_lines = 0
+            jf = next((p for p in ws.rglob("journal.jsonl")), None)
+            if jf is not None and jf.is_file():
+                n_lines = len([ln for ln in jf.read_text(encoding="utf-8").splitlines() if ln.strip()])
+            if n_files != Sandbox.KEEP_PER_FILE or n_lines != n_files:
+                bad_rounds.append((trial, n_files, n_lines))
+        finally:
+            shutil.rmtree(ws, ignore_errors=True)
+    ck("40 轮连续写都恰好留 3 份、journal 行数一致", not bad_rounds, bad_rounds[:4])
+
+    # 直接钉住 token 唯一性（不依赖时钟精度，逐次比对）
+    ws = Path(tempfile.mkdtemp(prefix="jrn-tok-"))
+    try:
+        (ws / "app.py").write_text("# seed\n", encoding="utf-8")
+        sb = tools.sandbox(ws)
+        toks = [sb.backup(ws / "app.py") for _ in range(12)]
+        ck("连续 12 次 backup 的 token 互不相同", len(set(toks)) == len(toks), toks[:6])
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
     print()
     if FAILS:
         print(f"{len(FAILS)} 项失败: " + ", ".join(FAILS))
@@ -115,4 +148,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     sys.exit(main())

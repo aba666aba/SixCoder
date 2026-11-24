@@ -181,7 +181,8 @@ async function doProbe(deep = false) {
 }
 
 /* ---------------- 设置 / 帮助 ---------------- */
-const showSettings = ref(false)
+const showSettings = ref(false)      // 设置弹窗：只有可配置项
+const showHelp = ref(false)          // 帮助弹窗：只有说明文字 + 待办处理区      // 设置弹窗：**只有可配置项**
 
 /* 远端模型（DeepSeek）：key 只存本机设置文件，界面只显示掩码 */
 const remote = ref({ available: false, reason: '', remote: {}, usage: {} })
@@ -579,6 +580,11 @@ async function clearRegressions() {
     errMsg.value = '已清空 ' + (d.cleared || 0) + ' 组回归用例'
   } catch (e) { errMsg.value = '[FAIL] ' + e.message }
 }
+// 帮助组与设置组共用 settingsTab，靠 showHelp / showSettings 决定"显示哪一半"。
+// 帮助组：需求帮助 / 输入说明 / 权限说明 / 提交规范 / 状态说明 / 待办
+// 设置组：工具链 / 部署通道 / UI 审美 / 半自动回填 / 多机编排 / 能力边界 / 体检 / 自主计划
+const HELP_TABS = ['help', 'fields', 'mode', 'commit', 'status', 'todo']
+const SET_TABS = ['deploy', 'uistyle', 'human', 'orch', 'caps', 'health', 'plan']
 const settingsTab = ref('help')
 
 /* ---------------- UI 审美样式库（类型枚举 + 用户自填配色） ----------------
@@ -1146,6 +1152,7 @@ const showRemotePanel = ref(false)   // 顶栏「远端」按钮弹出的**下�
 // 各打开入口先调 closeOverlays(自己的名字)，自己的开关逻辑照旧。
 function closeOverlays(except = '') {
   if (except !== 'settings') showSettings.value = false
+  if (except !== 'help') showHelp.value = false
   if (except !== 'provider') providerModal.value = null
   if (except !== 'remote') showRemotePanel.value = false
   if (except !== 'login') showLoginModal.value = false
@@ -1154,11 +1161,19 @@ function closeOverlays(except = '') {
   if (except !== 'menu') openMenu.value = ''
 }
 
+function openHelp(section) {
+  // 打开**帮助**弹窗（只读说明 + 待办）。帮助组与设置组共用 settingsTab，
+  // 靠 showHelp / showSettings 决定显示哪一半。
+  closeOverlays('help')
+  settingsTab.value = HELP_TABS.includes(section) ? section : 'help'
+  showHelp.value = true
+  openMenu.value = ''
+}
+
 function openSettingsAt(tab) {
   closeOverlays('settings')
-  settingsTab.value = tab || 'help'
+  settingsTab.value = SET_TABS.includes(tab) ? tab : 'deploy'
   showSettings.value = true
-  if (settingsTab.value === 'remote') loadRemote()
   if (settingsTab.value === 'deploy') loadDeploy()
   if (settingsTab.value === 'uistyle') loadUIStyles()
   if (settingsTab.value === 'human') loadHumanOnce()
@@ -1383,7 +1398,7 @@ async function closeTab(path, force = false) {
   }
 }
 
-/* 编辑器里的悬浮对话框（开发者模式唯一的输入口，2026-11-20 用户口径）。
+/* 编辑器里的悬浮对话框（精修模式唯一的输入口，2026-11-20 用户口径）。
    模型源开关的记忆放 localStorage：开发者一半时间用本地省钱、一半用远端啃硬骨头，
    每次打开都要重选一遍会很烦。 */
 const edChat = reactive({
@@ -1570,7 +1585,7 @@ function openEditorChat() {
     if (el) el.focus()
   })
 }
-/* ---------------- 开发者模式：运行与调试（2026-11-20） ----------------
+/* ---------------- 精修模式：运行与调试（2026-11-20） ----------------
    运行：按文件语言自动选工具链真跑，输出/诊断在底部面板；诊断行可点跳到编辑器。
    调试：Python 用真断点（bdb）单步/看变量；其他语言明确标注不支持，不误导。 */
 const run = reactive({
@@ -1658,9 +1673,84 @@ function jumpToDiag(d) {
     syncGutter({ target: edRef.value })
   })
 }
+/* ---------------- 右栏（按模式换内容，2026-11-23） ----------------
+   造物模式：节点 / 闸门证据 / 产物文件 / 自认可审计（跑夜班时看）
+   精修模式：符号大纲（当前文件）+ 引用查找（改代码时用）
+   审阅模式：零 token 审计 + 生成文档（交付前检查）
+   三套内容互斥显示，每个模式只看到当时用得上的那一组。 */
+const outline = reactive({ symbols: [], lines: 0, active: 0, activeName: '', refs: [],
+                           busy: false, err: '' })
+const auditRun = reactive({ done: false, busy: false, summary: '', bySeverity: {}, errors: [] })
+const docGen = reactive({ busy: false, msg: '' })
+
+async function loadOutline() {
+  if (!form.repo || !ed.path) { outline.symbols = []; return }
+  outline.busy = true; outline.err = ''
+  try {
+    const q = new URLSearchParams({ repo: form.repo, path: ed.path })
+    const d = await api('/v1/editor/outline?' + q.toString())
+    outline.symbols = d.symbols || []
+    outline.lines = d.lines || 0
+  } catch (e) {
+    outline.err = '读大纲失败：' + e.message
+    outline.symbols = []
+  } finally { outline.busy = false }
+}
+
+async function findRefsOfActive() {
+  const sym = outline.activeName
+  if (!sym) return
+  outline.refs = []
+  try {
+    const q = new URLSearchParams({ repo: form.repo, q: sym })
+    const d = await api('/v1/editor/symbols?' + q.toString())
+    outline.refs = (d.hits || []).map((h) => ({ file: h.path || h.file || '', line: h.line || 0 }))
+  } catch (e) { outline.err = '查引用失败：' + e.message }
+}
+
+async function openRefHit(r) {
+  if (!r.file) return
+  try {
+    await openFile({ path: r.file, is_dir: false })   // openFile 收的是文件节点（{path}）
+    nextTick(() => gotoLine(r.line, outline.activeName))
+  } catch (e) { outline.err = '打开失败：' + e.message }
+}
+
+async function runAudit() {
+  if (!form.repo) { auditRun.errors = [{ auditor: 'repo', error: '先选项目文件夹' }]; return }
+  auditRun.busy = true
+  try {
+    const q = new URLSearchParams({ repo: form.repo })
+    const d = await api('/v1/audit?' + q.toString())
+    auditRun.summary = d.summary || ''
+    auditRun.bySeverity = d.by_severity || {}
+    auditRun.errors = d.errors || []
+    auditRun.done = true
+  } catch (e) {
+    auditRun.errors = [{ auditor: 'audit', error: e.message }]
+    auditRun.done = true
+  } finally { auditRun.busy = false }
+}
+
+async function genStage3Docs() {
+  if (!form.repo) { docGen.msg = '先选项目文件夹'; return }
+  docGen.busy = true; docGen.msg = ''
+  try {
+    const d = await api('/v1/docs/stage3', { method: 'POST', body: JSON.stringify({ repo: form.repo }) })
+    const wrote = d.wrote || {}
+    const names = Object.keys(wrote).filter((k) => !String(wrote[k]).startsWith('失败'))
+    docGen.msg = names.length ? '已生成：' + names.join(' / ') : '生成失败：' + JSON.stringify(wrote)
+  } catch (e) {
+    docGen.msg = '生成失败：' + e.message
+  } finally { docGen.busy = false }
+}
+
+// 切换文件时刷新大纲（只在精修模式有意义，其它模式不必白白请求）
+watch(() => ed.path, () => { if (developerMode()) loadOutline() })
+watch(() => form.repo, () => { if (developerMode()) loadOutline() })
+
 async function startDebug() {
-  if (!run.debug) { errMsg.value = run.reason || '当前文件不支持断点调试'; return }
-  run.open = true; run.busy = true
+  if (!run.debug) { errMsg.value = run.reason || '当前文件不支持断点调试'; return }  run.open = true; run.busy = true
   run.stdout = ''; run.stderr = ''; run.paused = null; run.watch = {}; run.ok = null
   try {
     const d = await api('/v1/editor/debug/start', { method: 'POST', body: JSON.stringify({
@@ -1772,7 +1862,7 @@ async function openFile(node, force = false) {
 
 async function saveFile() {
   if (!ed.open || ed.binary || !form.repo) return
-  if (!canWriteFile()) { ed.err = '当前模式不允许写文件（只读模式下只能看）'; return }
+  if (!canWriteFile()) { ed.err = '当前模式不允许写文件（审阅模式下只能看）'; return }
   if (ed.text === ed.original) { ed.savedAt = '没有改动'; return }
   ed.saving = true; ed.err = ''
   try {
@@ -1801,6 +1891,22 @@ function onEditorKey(e) {
   } else if (e.key === 'Escape') {
     e.preventDefault(); closeEditor()
   }
+}
+
+// ESC 关闭弹窗（2026-11-23）：帮助/设置/登录这些覆盖层以前**只能用鼠标点关闭**，
+// 键盘用户按 ESC 没反应。优先级从"上层"往下：先关最上面那层，一次只关一层。
+function onGlobalEscape(e) {
+  if (e.key !== 'Escape') return
+  if (providerModal.value) { closeProviderModal(); return }        // 厂商二级弹窗
+  if (showHelp.value || showSettings.value) {                      // 帮助 / 设置（同一个遮罩）
+    showHelp.value = false; showSettings.value = false; return
+  }
+  if (showLoginModal.value) { showLoginModal.value = false; return }
+  if (showClear.value) { showClear.value = false; return }
+  if (showRemotePanel.value) { showRemotePanel.value = false; return }
+  if (showGitPanel.value) { showGitPanel.value = false; return }
+  if (showTcPanel.value) { showTcPanel.value = false; return }
+  if (openMenu.value) { openMenu.value = ''; return }
 }
 
 /* 行号列跟随 textarea 滚动（两个独立滚动容器，不同步会错位） */
@@ -1933,8 +2039,16 @@ function alignInsertion(ins, textBeforeCursor) {
 /* ---------------- AI 代码导航：跳到文件/函数、调试指定函数 ---------------- */
 
 // 把光标移到编辑器第 n 行并滚动到可见（诊断跳转 / 符号跳转共用）
-function gotoLine(n) {
+// 2026-11-23：多了两个可选参 —— 右栏「符号大纲」点一个函数时，除了跳行还要记下
+// 当前符号名（供「引用查找」用）。老调用点只传 n，行为不变。
+function gotoLine(n, name) {
   const line = Math.max(1, Number(n) || 1)
+  if (name !== undefined) {
+    outline.active = line
+    outline.activeName = name || ''
+    outline.refs = []
+    midView.value = 'code'
+  }
   nextTick(() => {
     if (!edRef.value) return
     const lines = ed.text.split('\n')
@@ -1983,7 +2097,7 @@ function activeSymbol() { return nav.symbolPick || selectedSymbol() }
 // 选中函数名点按钮：在当前文件精确定位 + 直接启动调试
 async function debugSymbol(symbol, path = ed.path) {
   if (!ed.open || !form.repo || !symbol) { errMsg.value = '先打开文件并选中一个函数名'; return }
-  if (canReadFile() === false) { errMsg.value = '只读模式不能运行/调试'; return }
+  if (canReadFile() === false) { errMsg.value = '审阅模式不能运行/调试'; return }
   nav.busy = true
   try {
     const d = await api('/v1/editor/debug/symbol', { method: 'POST', body: JSON.stringify({
@@ -2166,14 +2280,6 @@ function toggleMenu(name) {
   openMenu.value = openMenu.value === name ? '' : name
 }
 
-function openHelp(section) {
-  closeOverlays('settings')
-  settingsTab.value = section
-  showSettings.value = true
-  openMenu.value = ''
-  if (section === 'remote') loadRemote()
-}
-
 async function loadLoginState() {
   loginSupported.value = !!(shellApi && shellApi.getLoginItem)
   if (!loginSupported.value) return
@@ -2214,7 +2320,7 @@ const FIELD_HELP = [
       { field: '文件路径（撤回）', where: '中栏·工作台→Git', how: '相对仓库的路径。更省事的做法：直接点上方「改动文件」列表里那一行的「撤回」/「沙箱撤回」。', demo: 'calc.py' },
       { field: '新分支名', where: '中栏·工作台→Git', how: '点「新建并切换」使用；不能含空格与 ~^:?*[\\ 等字符。', demo: 'feature/divide' },
       { field: '切换到的分支 / 合并源分支', where: '中栏·工作台→Git', how: '填已存在的分支名。合并会把源分支合进当前分支（--no-ff），冲突时会列出冲突文件。', demo: 'master' },
-      { field: '远端仓库地址', where: '中栏·工作台→Git', how: '本地裸仓库路径或 https/ssh 地址。点「设置远端」写入 origin；远端相关按钮需要「甲方模式」或「开发者模式」。', demo: 'E:\\remotes\\ledger.git' }
+      { field: '远端仓库地址', where: '中栏·工作台→Git', how: '本地裸仓库路径或 https/ssh 地址。点「设置远端」写入 origin；远端相关按钮需要「造物模式」或「精修模式」。', demo: 'E:\\remotes\\ledger.git' }
     ]
   },
   {
@@ -2350,11 +2456,11 @@ function connect(taskId) {
      POST /v1/demo → POST /v1/tasks    # 端口，给自动化用
    真实水平看 projects/ 里的 DELIVERY.md / TRACE.md，或用 tools/bench_night.py 做多次基准。 */
 
-/* ---------------- 夜班（甲方模式的正常用法）----------------
-   甲方模式 = 写代码的完全体：提需求 → 系统内部做完所有决策 → 早上看交付报告。
+/* ---------------- 夜班（造物模式的正常用法）----------------
+   造物模式 = 写代码的完全体：提需求 → 系统内部做完所有决策 → 早上看交付报告。
    与「发送」的单任务不同，夜班会反复体检/派工/开发/机械验收，直到收敛或预算耗尽。
-   协作方式由 core/policy.py 决定：甲方模式代码默认由远端写（本地 7B 兜底），
-   开发者模式必须由人给实现方案。界面只负责把这件事摆到手边。 */
+   协作方式由 core/policy.py 决定：造物模式代码默认由远端写（本地 7B 兜底），
+   精修模式必须由人给实现方案。界面只负责把这件事摆到手边。 */
 const night = reactive({ plan: '', taskId: '', busy: false, info: null,
                          // 全自主模式：只给一句话目标，系统自己规划切片/验收对象/预算分配
                          // （对应 core/auto.py：蓝图 → 切片 → 逐片生成 → 覆盖观测 → 重规划）
@@ -2373,7 +2479,7 @@ const night = reactive({ plan: '', taskId: '', busy: false, info: null,
                          // 日志换文件（新的一夜/换仓库）就重置，避免重复或漏行。
                          logOffset: 0, logPath: '', logTimer: null,
                          // 目标代码规模：不同规模的约束完全不同（core/scale.py）。
-                         // 甲方模式的硬要求：提需求时就写明，不写就不是"明确的需求"。
+                         // 造物模式的硬要求：提需求时就写明，不写就不是"明确的需求"。
                          scale: 'S',
                          scaleTiers: [
                            { id: 'S', label: 'S 级 · < 10 万行（小项目/单团队）',
@@ -2836,8 +2942,8 @@ function detLine() {
 const ops = reactive({ op: '', running: false, busy: false, log: '', elapsed: 0,
                        note: '', desc: '', timer: null })
 
-/* ---------------- 打包 exe（甲方模式交付的最后一步，2026-11-22 用户口径）----------------
-   "甲方模式能不能根据需要直接生成 exe"：夜班产出的是源码目录，这里把它打成一个
+/* ---------------- 打包 exe（造物模式交付的最后一步，2026-11-22 用户口径）----------------
+   "造物模式能不能根据需要直接生成 exe"：夜班产出的是源码目录，这里把它打成一个
    双击就能跑的可执行文件。PyInstaller 要 1-3 分钟，所以走独立进程 + 状态轮询。 */
 const pack = reactive({ busy: false, state: 'idle', exe: '', entry: '', kind: '',
                         log: '', logTail: '', timer: null, auto: true, note: '' })
@@ -3215,7 +3321,7 @@ async function gitDo(op, args = {}) {
   }
 }
 
-/* ---------------- 权限模式：甲方模式 / 开发者模式 / 只读模式 ---------------- */
+/* ---------------- 权限模式：造物模式 / 精修模式 / 审阅模式 ---------------- */
 const modes = ref([])
 const currentMode = ref(null)
 const capabilityLabels = ref({})
@@ -3225,7 +3331,7 @@ function can(cap) {
   return !!currentMode.value && (currentMode.value.capabilities || []).includes(cap)
 }
 
-/* 开发者模式：关键节点要人点"通过"，这里轮询待审单据 */
+/* 精修模式：关键节点要人点"通过"，这里轮询待审单据 */
 const pendingApprovals = ref([])
 let approvalTimer = null
 
@@ -3260,7 +3366,7 @@ function startApprovalPolling() {
   loadQuestions()
 }
 
-/* ---------------- 待人回答（本地模型主动提问，开发者模式） ----------------
+/* ---------------- 待人回答（本地模型主动提问，精修模式） ----------------
    与"审批"不同：审批是"这个动作能不能做"（是/否），提问是"我该怎么做"（要内容）。
    答案会作为 human 证据入账，同一问题以后不再问。 */
 const questions = ref([])
@@ -3304,14 +3410,14 @@ async function setMode(id) {
     const target = modes.value.find((m) => m.id === id || m.name === id)
     await api('/v1/mode', { method: 'POST', body: JSON.stringify({ mode: target?.id || id }) })
     await loadModes()
-    // 模式切换自动换中栏：开发者模式有打开文件 → 代码 IDE；其余模式 → 工作台。
+    // 模式切换自动换中栏：精修模式有打开文件 → 代码 IDE；其余模式 → 工作台。
     // 只切视图，标签和未保存内容都留在 edTabs 里。
     stashActiveTab()
     midView.value = (currentMode.value?.id === 'developer' && edTabs.value.length) ? 'code' : 'work'
   } catch (e) { errMsg.value = e.message }
 }
 
-/* ---------------- 代码审查 / 改进意见（只读模式：只有这一个动作） ----------------
+/* ---------------- 代码审查 / 改进意见（审阅模式：只有这一个动作） ----------------
    2026-11-20 用户口径："审查模式只有一个审查按钮即可不需要文本框，只是实现审查功能"。
    所以这里不再要求"预期功能"：没有预期就走确定性规则 + 与现有规格比对；
    有预期（例如从历史任务带过来的需求）才拿它当验收口径。 */
@@ -3432,6 +3538,7 @@ onMounted(async () => {
   document.addEventListener('visibilitychange', onVisibilityChange)
   // 编辑器快捷键（Ctrl+S 保存 / Esc 关闭）：只在编辑器打开时接管
   window.addEventListener('keydown', onEditorKey)
+  window.addEventListener('keydown', onGlobalEscape)
   // 运维任务可能在关掉界面前就启动了：打开界面立刻读一次状态，别显示成"没在跑"
   startOpsTimer()
 })
@@ -3451,6 +3558,7 @@ onUnmounted(() => {
   window.removeEventListener('pagehide', saveSession)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('keydown', onEditorKey)
+  window.removeEventListener('keydown', onGlobalEscape)
 })
 </script>
 
@@ -3471,7 +3579,19 @@ onUnmounted(() => {
                 :title="remote.available ? '远端厂商已配置（点此切换）' : '配置远端厂商'">
           远端 <span class="dot" :class="remote.available ? 'on' : 'off'"></span>
         </button>
-        <button class="ghost menu-btn" @click="openHelp('help')">帮助</button>
+        <!-- 帮助 / 设置分成两个独立按钮（2026-11-23 用户口径）：
+             以前它们共用一个弹窗，「帮助」打开的面板里塞着全部可配置项，
+             用户点「帮助」却掉进设置页，两件事混在一起。
+             现在：帮助 = 纯说明；设置 = 全部可配置项。远端另有独立浮层，不再重复出现在设置里。 -->
+        <button class="ghost menu-btn" :class="{ active: showHelp && settingsTab === 'help' }"
+                @click="openHelp('help')" title="使用说明（只读，不提供配置）">帮助</button>
+        <button class="ghost menu-btn" :class="{ active: showHelp && settingsTab === 'todo' }"
+                @click="openHelp('todo')" v-if="pendingApprovals.length || questions.length"
+                :title="'有 ' + (pendingApprovals.length + questions.length) + ' 项等你处理'">
+          待办 <span class="badge b-warn">{{ pendingApprovals.length + questions.length }}</span>
+        </button>
+        <button class="ghost menu-btn" :class="{ active: showSettings }"
+                @click="openSettingsAt('deploy')" title="设置：部署 / UI / 编排 / 体检 等">⚙ 设置</button>
         <button class="ghost menu-btn" @click="openLogin()"
                 :title="openAtLogin ? '已开启开机自启' : '开机自启未开启'">
           登录选项 <span class="dot" :class="openAtLogin ? 'on' : 'off'"></span>
@@ -3484,12 +3604,12 @@ onUnmounted(() => {
         <option v-for="m in modes" :key="m.id" :value="m">{{ m.name }}</option>
       </select>
       <span v-if="questions.length" class="pill b-warn"
-            style="cursor:pointer" @click="openSettingsAt('help')"
+            style="cursor:pointer" @click="openSettingsAt('todo')"
             :title="'有 ' + questions.length + ' 个问题在等你回答'">
         待答 {{ questions.length }}
       </span>
       <span v-if="pendingApprovals.length" class="pill b-warn"
-            style="cursor:pointer" @click="openSettingsAt('help')"
+            style="cursor:pointer" @click="openSettingsAt('todo')"
             :title="'有 ' + pendingApprovals.length + ' 个待审节点等你通过'">
         待审 {{ pendingApprovals.length }}
       </span>
@@ -3976,8 +4096,8 @@ onUnmounted(() => {
             </details>
           </template>
 
-          <!-- ============ 开发者模式：主界面不放需求框 ============
-               用户口径（2026-11-20）：开发者模式的输入只有一个地方 —— 用自带编辑器打开文件后
+          <!-- ============ 精修模式：主界面不放需求框 ============
+               用户口径（2026-11-20）：精修模式的输入只有一个地方 —— 用自带编辑器打开文件后
                浮出来的那个对话框。主界面再放一个文本框会让人不知道"到底在跟谁说话"。 -->
           <div v-else-if="!isReadonlyMode" class="dev-hint">
             <div class="dev-hint-title">在编辑器里对话</div>
@@ -3998,7 +4118,7 @@ onUnmounted(() => {
             </details>
           </div>
 
-          <!-- ============ 只读模式：只有一个审查按钮 ============ -->
+          <!-- ============ 审阅模式：只有一个审查按钮 ============ -->
           <div v-else class="row" style="gap:10px;align-items:center">
             <button class="primary-lg" :disabled="reviewBusy || !can('review.run')"
                     title="确定性规则 + 与现有规格比对，只出意见，不改任何文件"
@@ -4064,7 +4184,7 @@ onUnmounted(() => {
                         font-size:10.5px;white-space:pre-wrap;background:var(--panel2)">{{ pack.logTail }}</pre>
           </div>
 
-          <!-- 夜班进度 + 交付报告（甲方模式的主舞台） -->
+          <!-- 夜班进度 + 交付报告（造物模式的主舞台） -->
           <div v-if="isClientMode && (night.lines.length || night.delivery || night.info || night.detStatus)" style="margin-top:8px">
             <div class="row" style="gap:6px;flex-wrap:wrap">
               <span v-if="night.info?.state" class="badge"
@@ -4110,7 +4230,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div v-if="!can('agent.run')" class="dim" style="font-size:10.5px;margin-top:6px">
-            只读模式：只有右侧「审查」可用（它不写任何文件）。要改代码请把顶栏模式切到「甲方模式」或「开发者模式」。
+            审阅模式：只有右侧「审查」可用（它不写任何文件）。要改代码请把顶栏模式切到「造物模式」或「精修模式」。
           </div>
           <div v-if="taskInfo" class="dim mono" style="margin-top:6px;font-size:11px">
             当前任务：{{ taskInfo.id }} ·
@@ -4343,7 +4463,7 @@ onUnmounted(() => {
             <pre v-if="run.stderr" class="run-pre err">{{ run.stderr }}</pre>
           </div>
         </div>
-        <!-- 悬浮对话框：只有用编辑器打开文件才会出现（开发者模式唯一的输入口） -->
+        <!-- 悬浮对话框：只有用编辑器打开文件才会出现（精修模式唯一的输入口） -->
         <div v-if="!ed.binary" class="ed-chat" :class="{ open: edChat.open }">
           <div class="ed-chat-bar">
             <button class="ghost tiny" @click="edChat.open = !edChat.open">
@@ -4419,17 +4539,22 @@ onUnmounted(() => {
         </div>
 
       <!-- ============ 右栏 ============ -->
+      <!-- 2026-11-23 用户口径：右栏**按模式换内容**。原来四个面板无条件常显，
+           但「节点 / 闸门证据 / 产物文件 / 自认可审计」只在**造物模式**（跑夜班）有意义；
+           精修模式要的是"当前文件的符号与引用"，审阅模式要的是"审计结果"。
+           不必要的东西不摆出来 —— 每个模式只看到当时用得上的那一组。 -->
       <div class="col col-right" v-show="!rightCollapsed">
-        <div class="panel">
+        <!-- ===== 造物模式：夜班观察窗 ===== -->
+        <div class="panel" v-show="isClientMode">
           <div class="panel-title">节点</div>
-          <div v-if="!nodes.length" class="empty">暂无</div>
-          <table v-else>
-            <tr><th>节点</th><th>kind</th><th>文件</th><th>状态</th><th style="width:78px">处置</th></tr>
-            <tr v-for="n in nodes" :key="n.id">
-              <td class="mono">{{ String(n.id).split('-').pop() }}</td>
-              <td class="mono dim">{{ n.kind }}</td>
-              <td class="mono wrap">{{ n.path }}</td>
-              <td><span class="badge" :class="{
+            <div v-if="!nodes.length" class="empty">暂无</div>
+            <table v-else>
+              <tr><th>节点</th><th>kind</th><th>文件</th><th>状态</th><th style="width:78px">处置</th></tr>
+              <tr v-for="n in nodes" :key="n.id">
+                <td class="mono">{{ String(n.id).split('-').pop() }}</td>
+                <td class="mono dim">{{ n.kind }}</td>
+                <td class="mono wrap">{{ n.path }}</td>
+                <td><span class="badge" :class="{
                 'b-ok': n.status === 'done' || n.status === 'accepted',
                 'b-bad': n.status === 'stuck' || n.status === 'needs_human',
                 'b-acc': n.status === 'running', 'b-dim': n.status === 'pending' || n.status === 'dropped' }">
@@ -4443,7 +4568,7 @@ onUnmounted(() => {
           </table>
         </div>
 
-        <div class="panel" style="max-height:230px">
+        <div class="panel" style="max-height:230px" v-show="isClientMode">
           <div class="panel-title">闸门证据 <span class="badge b-dim" style="margin-left:6px">evidence_kind 决定通过是否算数</span></div>
           <div v-if="!gateRows.length" class="empty">暂无</div>
           <table v-else>
@@ -4456,7 +4581,7 @@ onUnmounted(() => {
           </table>
         </div>
 
-        <div class="panel grow">
+        <div class="panel grow" v-show="isClientMode">
           <div class="panel-title">
             产物文件
             <span class="badge b-dim" style="margin-left:6px">{{ fileList.length }}</span>
@@ -4470,7 +4595,7 @@ onUnmounted(() => {
           <pre v-if="fileView" style="max-height:220px">{{ fileView.content }}</pre>
         </div>
 
-        <div class="panel">
+        <div class="panel" v-show="isClientMode">
           <div class="panel-title">自认可审计（docs/13）</div>
           <div class="cards">
             <div class="card">
@@ -4489,6 +4614,96 @@ onUnmounted(() => {
             {{ JSON.stringify(audit.evidence_by_kind) }}
           </div>
         </div>
+
+        <!-- ===== 精修模式：当前文件的符号与引用（改代码时用得上） ===== -->
+        <template v-if="developerMode()">
+          <div class="panel grow">
+            <div class="panel-title">
+              符号大纲
+              <span class="badge b-dim">{{ outline.symbols.length }}</span>
+              <span class="spacer"></span>
+              <button class="ghost tiny" :disabled="!ed.path" @click="loadOutline()">刷新</button>
+            </div>
+            <div v-if="!ed.path" class="empty">用编辑器打开一个文件后显示</div>
+            <div v-else-if="!outline.symbols.length" class="empty">这个文件里没有可识别的函数/类</div>
+            <div v-else class="files">
+              <div v-for="s in outline.symbols" :key="s.name + s.line"
+                   class="file-row" style="cursor:pointer"
+                   :title="s.signature || s.name"
+                   @click="gotoLine(s.line, s.name)">
+                <span class="mono" style="color:var(--accent)">{{ s.name }}</span>
+                <span class="dim mono" style="font-size:10.5px">{{ s.kind }} :{{ s.line }}</span>
+              </div>
+            </div>
+            <div v-if="ed.path" class="dim" style="font-size:10.5px;margin-top:6px">
+              {{ ed.path }} · 共 {{ outline.lines }} 行
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">
+              引用查找
+              <span class="spacer"></span>
+              <button class="ghost tiny" :disabled="!outline.active" @click="findRefsOfActive()">查这个符号</button>
+            </div>
+            <div v-if="!outline.active" class="dim" style="font-size:11px">
+              在大纲里点一个符号，再点「查这个符号」看它在哪些文件被用到。
+            </div>
+            <div v-else>
+              <div class="dim" style="font-size:11px;margin-bottom:4px">
+                「{{ outline.activeName }}」出现在：
+              </div>
+              <div v-if="!outline.refs.length" class="empty">没有别的文件用到它</div>
+              <div v-for="r in outline.refs" :key="r.file + r.line" class="file-row mono"
+                   style="font-size:11px;cursor:pointer" @click="openRefHit(r)">
+                {{ r.file }}:{{ r.line }}
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- ===== 审阅模式：审计结果（只读，不写代码） ===== -->
+        <template v-if="isReadonlyMode">
+          <div class="panel">
+            <div class="panel-title">
+              零 token 审计
+              <span class="spacer"></span>
+              <button class="ghost tiny" :disabled="auditRun.busy || !form.repo"
+                      @click="runAudit()">{{ auditRun.busy ? '扫描中…' : '扫描' }}</button>
+            </div>
+            <div v-if="!form.repo" class="empty">先在左上角选一个项目文件夹</div>
+            <div v-else-if="!auditRun.done" class="dim" style="font-size:11px">
+              点「扫描」跑一遍确定性检查（架构违规 / 空壳测试 / 临时方案 / TODO）——<b>不花一分钱</b>。
+            </div>
+            <div v-else>
+              <div class="dim" style="font-size:11px;margin-bottom:6px">{{ auditRun.summary }}</div>
+              <div v-for="sev in ['P0', 'P1', 'P2', 'P3']" :key="sev">
+                <template v-if="(auditRun.bySeverity[sev] || []).length">
+                  <div class="badge" :class="sev === 'P0' ? 'b-bad' : (sev === 'P1' ? 'b-warn' : 'b-dim')"
+                       style="margin:6px 0 2px">{{ sev }} · {{ auditRun.bySeverity[sev].length }}</div>
+                  <div v-for="(it, idx) in auditRun.bySeverity[sev].slice(0, 8)" :key="idx"
+                       class="dim" style="font-size:11px;margin-left:8px;line-height:1.7">
+                    <span class="mono">{{ it.path }}{{ it.line ? ':' + it.line : '' }}</span>
+                    {{ it.message || '' }}
+                  </div>
+                </template>
+              </div>
+              <div v-if="auditRun.errors.length" class="badge b-warn" style="margin-top:6px">
+                {{ auditRun.errors.length }} 个审计器没跑成（不等于通过）
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">生成文档</div>
+            <div class="dim" style="font-size:11px;margin-bottom:6px">
+              按代码生成三份：MODULES（模块与接口）/ ARCHITECTURE（依赖与违规）/ HANDOVER（交接单）。
+            </div>
+            <button class="ghost tiny" :disabled="docGen.busy || !form.repo"
+                    @click="genStage3Docs()">{{ docGen.busy ? '生成中…' : '生成三份文档' }}</button>
+            <div v-if="docGen.msg" class="dim" style="font-size:11px;margin-top:6px">{{ docGen.msg }}</div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -4696,30 +4911,43 @@ onUnmounted(() => {
     </div>
 
     <!-- ============ 设置 / 帮助 ============ -->
-    <div v-if="showSettings" class="modal-mask" @click.self="showSettings = false">
+    <div v-if="showSettings || showHelp" class="modal-mask"
+         @click.self="showSettings = false; showHelp = false">
       <div class="modal">
         <div class="modal-head">
-          <span class="tab" :class="{ active: settingsTab === 'help' }" @click="settingsTab = 'help'">需求帮助</span>
-          <span class="tab" :class="{ active: settingsTab === 'fields' }" @click="settingsTab = 'fields'">输入说明</span>
-          <span class="tab" :class="{ active: settingsTab === 'mode' }" @click="settingsTab = 'mode'">权限模式</span>
-          <span class="tab" :class="{ active: settingsTab === 'commit' }" @click="settingsTab = 'commit'">提交规范</span>
-          <span class="tab" :class="{ active: settingsTab === 'tc' }" @click="settingsTab = 'tc'">工具链</span>
-          <span class="tab" :class="{ active: settingsTab === 'remote' }" @click="settingsTab = 'remote'">远端模型</span>
-          <span class="tab" :class="{ active: settingsTab === 'deploy' }" @click="settingsTab = 'deploy'; loadDeploy()">部署通道</span>
-          <span class="tab" :class="{ active: settingsTab === 'uistyle' }" @click="settingsTab = 'uistyle'; loadUIStyles()">UI 审美</span>
-          <span class="tab" :class="{ active: settingsTab === 'human' }" @click="settingsTab = 'human'; loadHumanOnce()">半自动回填</span>
-          <span class="tab" :class="{ active: settingsTab === 'orch' }" @click="settingsTab = 'orch'; loadOrch()">多机编排</span>
+          <!-- 2026-11-23 用户口径：帮助组**只留文字说明**，不再挂可配置控件。
+               帮助与设置是**两个按钮、两组 tab**：点「帮助」只显示上面一组，
+               点「⚙ 设置」只显示下面一组。远端不在这里（已有顶栏独立浮层）。 -->
+          <template v-if="showHelp">
+            <span class="tab" :class="{ active: settingsTab === 'help' }" @click="settingsTab = 'help'">需求帮助</span>
+            <span class="tab" :class="{ active: settingsTab === 'fields' }" @click="settingsTab = 'fields'">输入说明</span>
+            <span class="tab" :class="{ active: settingsTab === 'mode' }" @click="settingsTab = 'mode'">权限说明</span>
+            <span class="tab" :class="{ active: settingsTab === 'commit' }" @click="settingsTab = 'commit'">提交规范</span>
+            <span class="tab" :class="{ active: settingsTab === 'status' }" @click="settingsTab = 'status'; loadWebVersion()">状态说明</span>
+            <!-- 待办：唯一需要"动手处理"的分组（顶栏「待审 N / 待答 N」徽标跳到这里）。 -->
+            <span class="tab" :class="{ active: settingsTab === 'todo' }" @click="settingsTab = 'todo'">
+              待办
+              <span class="badge b-warn" v-if="(pendingApprovals.length + questions.length)">
+                {{ pendingApprovals.length + questions.length }}
+              </span>
+            </span>
+          </template>
+          <template v-if="showSettings">
+            <span class="tab" :class="{ active: settingsTab === 'deploy' }" @click="settingsTab = 'deploy'; loadDeploy()">部署通道</span>
+            <span class="tab" :class="{ active: settingsTab === 'uistyle' }" @click="settingsTab = 'uistyle'; loadUIStyles()">UI 审美</span>
+            <span class="tab" :class="{ active: settingsTab === 'human' }" @click="settingsTab = 'human'; loadHumanOnce()">半自动回填</span>
+            <span class="tab" :class="{ active: settingsTab === 'orch' }" @click="settingsTab = 'orch'; loadOrch()">多机编排</span>
           <span class="tab" :class="{ active: settingsTab === 'caps' }" @click="settingsTab = 'caps'; loadCapabilities()">能力边界</span>
-          <span class="tab" :class="{ active: settingsTab === 'health' }" @click="settingsTab = 'health'; loadOps()">体检</span>
-          <span class="tab" :class="{ active: settingsTab === 'plan' }" @click="settingsTab = 'plan'; loadPlanView()">自主计划</span>
-          <span class="tab" :class="{ active: settingsTab === 'status' }" @click="settingsTab = 'status'; loadWebVersion()">状态说明</span>
+            <span class="tab" :class="{ active: settingsTab === 'health' }" @click="settingsTab = 'health'; loadOps()">体检</span>
+            <span class="tab" :class="{ active: settingsTab === 'plan' }" @click="settingsTab = 'plan'; loadPlanView()">自主计划</span>
+          </template>
           <span class="spacer"></span>
-          <button class="ghost tiny" @click="showSettings = false">关闭 ✕</button>
+          <button class="ghost tiny" @click="showSettings = false; showHelp = false">关闭 ✕</button>
         </div>
 
         <div class="modal-body">
           <!-- 需求帮助 -->
-          <template v-if="settingsTab === 'help'">
+          <template v-if="showHelp && settingsTab === 'help'">
             <!-- ① 先给一句话：这套系统怎么用 -->
             <div class="panel-title">三步开始（先看这个）</div>
             <ol class="help-list">
@@ -4729,7 +4957,7 @@ onUnmounted(() => {
             </ol>
             <div class="dim" style="font-size:11.5px;margin-top:6px">
               关键点：<b>验收权在本地</b>。远端（或本地模型）写出来的东西，必须过完机械判据才算数；
-              过不了就带着失败证据自己改，改到全绿为止（甲方模式最多 4 轮），不需要你中途插手。
+              过不了就带着失败证据自己改，改到全绿为止（造物模式最多 4 轮），不需要你中途插手。
             </div>
 
             <!-- ② 需求怎么写 -->
@@ -4792,7 +5020,7 @@ onUnmounted(() => {
           </template>
 
           <!-- 输入说明：所有输入框怎么填都写在这里，界面上一律不预填 -->
-          <template v-else-if="settingsTab === 'fields'">
+          <template v-if="showHelp && settingsTab === 'fields'">
             <div class="dim" style="font-size:12px;margin-bottom:10px">
               界面上所有输入框默认都是空的，只留字段名。下表说明每个字段填什么、示例长什么样。
             </div>
@@ -4810,17 +5038,79 @@ onUnmounted(() => {
             </template>
           </template>
 
-          <!-- 权限模式 -->
-          <template v-else-if="settingsTab === 'mode'">
+          <!-- 待办（2026-11-23）：唯一"要动手处理"的分组。
+               从原「权限模式」帮助页搬来——顶栏「待审 N / 待答 N」徽标就跳到这里。
+               拆开的原因：帮助组要保持"只看不改"，处理区是操作区，两者不该混。 -->
+          <template v-if="showHelp && settingsTab === 'todo'">
+            <div class="panel-title">待办</div>
+            <div class="dim" style="font-size:11.5px;margin-bottom:10px">
+              这里是你需要动手的地方：审批关键节点、回答本地模型的提问。处理完会自动消失。
+            </div>
+
+            <div class="panel-title" style="margin-top:10px">
+              待审节点
+              <span class="badge b-warn" v-if="pendingApprovals.length">{{ pendingApprovals.length }}</span>
+              <span class="badge b-dim" v-else>无</span>
+            </div>
+            <div class="dim" style="font-size:11.5px;margin-bottom:8px">
+              精修模式下这些节点<b>不会自动放行</b>：写文件 / 提交 / 推送 / 上报远端 / 收尾交付。
+              没人处理时超时按拒绝算（不会因为"没人回答"就当成通过）。
+            </div>
+            <div v-if="!pendingApprovals.length" class="dim" style="font-size:11.5px">
+              当前没有等待中的节点。
+            </div>
+            <div v-for="t in pendingApprovals" :key="t.id" class="approval-card">
+              <div class="mono" style="font-size:12px">
+                <span class="badge b-warn">{{ keyNodeLabels[t.node] || t.node }}</span>
+                {{ t.title }}
+                <span class="dim" style="font-size:11px">（已等 {{ t.seconds_waiting }}s）</span>
+              </div>
+              <pre class="approval-diff">{{ t.detail }}</pre>
+              <div class="row">
+                <button class="primary" @click="decideApproval(t, 'approved')">通过</button>
+                <button class="ghost" @click="decideApproval(t, 'rejected')">拒绝</button>
+              </div>
+            </div>
+
+            <div class="panel-title" style="margin-top:14px">
+              待人回答
+              <span class="badge b-warn" v-if="questions.length">{{ questions.length }}</span>
+              <span class="badge b-dim" v-else>无</span>
+            </div>
+            <div class="dim" style="font-size:11.5px;margin-bottom:8px">
+              本地模型<b>遇到关键问题会停下来问</b>，不会自己胡写。答案作为 <b>human 证据</b>入账，
+              同一问题以后不再问；没有选项也能直接打字回答。
+            </div>
+            <div v-if="!questions.length" class="dim" style="font-size:11.5px">
+              当前没有待人回答的问题。
+            </div>
+            <div v-for="q in questions" :key="q.qid" class="approval-card">
+              <div class="mono" style="font-size:12px">
+                <span class="badge b-warn">提问</span>
+                {{ q.question }}
+              </div>
+              <div v-if="q.why" class="dim" style="font-size:11px;margin-top:2px">为什么问：{{ q.why }}</div>
+              <div v-if="q.node" class="dim mono" style="font-size:10.5px">节点：{{ q.node }}</div>
+              <div class="row" style="margin-top:6px;gap:6px;flex-wrap:wrap">
+                <button v-for="opt in (q.options || [])" :key="opt" class="primary"
+                        @click="answerQuestion(q, opt)">{{ opt }}</button>
+              </div>
+              <div class="row" style="margin-top:6px;gap:6px">
+                <input v-model="answers[q.qid]" placeholder="或自己写一句回答…" style="flex:1"
+                       @keyup.enter="answerQuestion(q)" />
+                <button class="ghost" @click="answerQuestion(q)">提交回答</button>
+              </div>
+            </div>
+          </template>
+
+          <!-- 权限模式（帮助组：**只放说明，不放可配置控件**，2026-11-23 用户口径） -->
+          <template v-if="showHelp && settingsTab === 'mode'">
             <div class="panel-title">当前模式：{{ currentMode?.name }}</div>
             <div class="dim" style="font-size:12px;margin-bottom:4px">{{ currentMode?.desc }}</div>
             <div class="dim" style="font-size:11.5px;margin-bottom:10px">
               边界：{{ currentMode?.boundary }}
             </div>
-            <div class="row">
-              <select v-model="currentMode" @change="setMode(currentMode.id)" style="max-width:240px">
-                <option v-for="m in modes" :key="m.id" :value="m">{{ m.name }}</option>
-              </select>
+            <div style="margin-bottom:10px">
               <span class="badge" :class="autoApprove() ? 'b-ok' : 'b-warn'">
                 {{ autoApprove() ? '人工处置全部放行' : '关键节点需人工审核' }}
               </span>
@@ -4829,7 +5119,20 @@ onUnmounted(() => {
               <li v-for="x in (currentMode?.extras || [])" :key="x">{{ x }}</li>
             </ul>
 
-            <div class="panel-title" style="margin-top:14px">三种模式</div>
+            <div class="panel-title" style="margin-top:14px">三种模式怎么选</div>
+            <div class="dim" style="font-size:11.5px;margin-bottom:8px">
+              模式决定"能不能写"和"要不要人批"。**切换请用顶栏的模式选择器**（这里只做说明）：
+            </div>
+            <ul class="dim" style="font-size:11.5px;margin:0 0 0 18px">
+              <li><b>造物模式</b>——从 0 做出一个东西。你只描述要什么，夜里跑完早上看交付报告。适合小工具、小网页。</li>
+              <li><b>精修模式</b>——在软件里直接改代码：编辑器 + AI 浮窗（解释/改写/补测试）+ 运行调试。关键节点必须你点头。</li>
+              <li><b>审阅模式</b>——只读不写：审计代码、检查文档、按代码生成说明文档。接手别人的交付物时用。</li>
+            </ul>
+
+            <div class="dim" style="font-size:11.5px;margin-top:10px">
+              待审节点与待人回答的问题会显示在<b>顶栏的「待审 N」「待答 N」</b>徽标上，
+              点开即可处理——不再放在这个帮助页里（那里只放说明）。
+            </div>
             <table>
               <tr><th style="width:96px">模式</th><th style="width:104px">人工审核</th>
                   <th>能做什么</th><th style="width:200px">边界</th></tr>
@@ -4846,62 +5149,12 @@ onUnmounted(() => {
               </tr>
             </table>
 
-            <template v-if="developerMode()">
-              <div class="panel-title" style="margin-top:14px">
-                待审节点
-                <span class="badge b-warn" v-if="pendingApprovals.length">{{ pendingApprovals.length }}</span>
-                <span class="badge b-dim" v-else>无</span>
-              </div>
-              <div class="dim" style="font-size:11.5px;margin-bottom:8px">
-                开发者模式下这些节点<b>不会自动放行</b>：写文件 / 提交 / 推送 / 上报远端 / 收尾交付。
-                没人处理时超时按拒绝算（不会因为"没人回答"就当成通过）。
-              </div>
-              <div v-if="!pendingApprovals.length" class="dim" style="font-size:11.5px">
-                当前没有等待中的节点。
-              </div>              <div v-for="t in pendingApprovals" :key="t.id" class="approval-card">
-                <div class="mono" style="font-size:12px">
-                  <span class="badge b-warn">{{ keyNodeLabels[t.node] || t.node }}</span>
-                  {{ t.title }}
-                  <span class="dim" style="font-size:11px">（已等 {{ t.seconds_waiting }}s）</span>
-                </div>
-                <pre class="approval-diff">{{ t.detail }}</pre>
-                <div class="row">
-                  <button class="primary" @click="decideApproval(t, 'approved')">通过</button>
-                  <button class="ghost" @click="decideApproval(t, 'rejected')">拒绝</button>
-                </div>
-              </div>
-
-              <!-- 待人回答：本地模型"不猜、发问"时的问题列表（与上面的审批分开） -->
-              <div class="panel-title" style="margin-top:14px">
-                待人回答
-                <span class="badge b-warn" v-if="questions.length">{{ questions.length }}</span>
-                <span class="badge b-dim" v-else>无</span>
-              </div>
-              <div class="dim" style="font-size:11.5px;margin-bottom:8px">
-                本地模型<b>遇到关键问题会停下来问</b>，不会自己胡写。答案作为 <b>human 证据</b>入账，
-                同一问题以后不再问；没有选项也能直接打字回答。
-              </div>
-              <div v-if="!questions.length" class="dim" style="font-size:11.5px">
-                当前没有待人回答的问题。
-              </div>
-              <div v-for="q in questions" :key="q.qid" class="approval-card">
-                <div class="mono" style="font-size:12px">
-                  <span class="badge b-warn">提问</span>
-                  {{ q.question }}
-                </div>
-                <div v-if="q.why" class="dim" style="font-size:11px;margin-top:2px">为什么问：{{ q.why }}</div>
-                <div v-if="q.node" class="dim mono" style="font-size:10.5px">节点：{{ q.node }}</div>
-                <div class="row" style="margin-top:6px;gap:6px;flex-wrap:wrap">
-                  <button v-for="opt in (q.options || [])" :key="opt" class="primary"
-                          @click="answerQuestion(q, opt)">{{ opt }}</button>
-                </div>
-                <div class="row" style="margin-top:6px;gap:6px">
-                  <input v-model="answers[q.qid]" placeholder="或自己写一句回答…" style="flex:1"
-                         @keyup.enter="answerQuestion(q)" />
-                  <button class="ghost" @click="answerQuestion(q)">提交回答</button>
-                </div>
-              </div>
-            </template>
+            <div class="panel-title" style="margin-top:14px">待审节点与待人回答在哪</div>
+            <div class="dim" style="font-size:11.5px;margin-bottom:6px">
+              精修模式下，写文件 / 提交 / 推送 / 上报远端 / 收尾交付这些节点<b>不会自动放行</b>；
+              本地模型遇到关键问题也会停下来问。两者都会在<b>顶栏显示「待审 N」「待答 N」徽标</b>，
+              点徽标即可处理。本页只做说明，不提供操作入口。
+            </div>
             <div class="panel-title" style="margin-top:14px">模式 → 界面上哪些按钮可用</div>
             <div class="dim" style="font-size:11.5px;margin-bottom:6px">
               权限模式管"能不能"，界面按钮只管"这次做什么"。下面这张表就是两者的对应关系。
@@ -4909,21 +5162,21 @@ onUnmounted(() => {
             <table>
               <tr><th style="width:110px">模式</th><th>发送</th><th>审查</th><th>Git 提交·分支</th><th>Git 远端</th></tr>
               <tr>
-                <td class="mono">只读模式</td>
+                <td class="mono">审阅模式</td>
                 <td><span class="badge b-bad">禁用</span></td>
                 <td><span class="badge b-ok">可用</span></td>
                 <td><span class="badge b-bad">禁用</span></td>
                 <td><span class="badge b-bad">禁用</span></td>
               </tr>
               <tr>
-                <td class="mono">开发者模式</td>
+                <td class="mono">精修模式</td>
                 <td><span class="badge b-ok">可用</span></td>
                 <td><span class="badge b-ok">可用</span></td>
                 <td><span class="badge b-ok">可用</span></td>
                 <td><span class="badge b-bad">禁用</span></td>
               </tr>
               <tr>
-                <td class="mono">甲方模式</td>
+                <td class="mono">造物模式</td>
                 <td><span class="badge b-ok">可用</span></td>
                 <td><span class="badge b-ok">可用</span></td>
                 <td><span class="badge b-ok">可用</span></td>
@@ -4942,7 +5195,7 @@ onUnmounted(() => {
           </template>
 
           <!-- 提交规范 -->
-          <template v-else-if="settingsTab === 'commit'">
+          <template v-if="showHelp && settingsTab === 'commit'">
             <div class="panel-title">提交信息怎么选前缀</div>
             <div class="dim" style="font-size:12px;margin-bottom:10px">
               Git 面板里先选一个类型，再填一句话描述，引擎拼成
@@ -4969,84 +5222,9 @@ onUnmounted(() => {
           </template>
 
           <!-- 远端模型：DeepSeek key 可随时更新，改完下一次请求即生效 -->
-          <template v-else-if="settingsTab === 'remote'">
-            <div class="panel-title">远端协助（DeepSeek）</div>
-            <div class="dim" style="font-size:12px;margin-bottom:10px">
-              本地模型卡住时可以"出方案"交给远端：远端只回符号级编辑，本地用确定性渲染器落盘并重跑全部闸门，
-              远端声明不算数。key 只存在本机设置文件，界面上永远只显示掩码。
-            </div>
-            <table>
-              <tr><td class="dim" style="width:140px">状态</td>
-                  <td><span class="badge" :class="remote.available ? 'b-ok' : 'b-dim'">
-                    {{ remote.available ? '可用' : '未配置' }}</span>
-                    <span v-if="remote.reason" class="dim" style="margin-left:8px;font-size:11.5px">{{ remote.reason }}</span>
-                  </td></tr>
-              <tr><td class="dim">当前 key</td>
-                  <td class="mono">{{ remote.remote?.key_masked || '—' }}
-                    <span class="dim" style="font-size:11px">（来源：{{ remote.remote?.key_source || '无' }}）</span></td></tr>
-            </table>
-            <div v-if="remoteUsage" class="panel" style="margin-top:10px;padding:8px 10px;font-size:12px">
-              <div style="font-weight:600;margin-bottom:4px">用量与花费</div>
-              <div class="dim" style="font-size:11.5px;line-height:1.7">
-                调用 {{ remoteUsage.calls }} 次 ｜ 花费 ¥{{ Number(remoteUsage.cost_cny || 0).toFixed(4) }}
-                ｜ 缓存命中 {{ Math.round((remoteUsage.cache_hit_rate || 0) * 100) }}%
-              </div>
-            </div>
-            <div class="panel-title" style="margin-top:12px">更新密钥</div>
-            <div class="row" style="gap:8px;align-items:center">
-              <input v-model="remoteForm.api_key" type="password" placeholder="sk-...（留空则不修改）" style="flex:1" />
-              <button class="ghost tiny" @click="remoteForm.api_key && saveRemote({api_key: remoteForm.api_key})">保存 key</button>
-              <button class="ghost tiny" :disabled="remoteTest.busy" @click="testRemote()">
-                {{ remoteTest.busy ? '测试中…' : '测试连接' }}</button>
-              <button class="ghost tiny" @click="revealRemoteKey()">{{ remoteForm.api_key ? '隐藏' : '显示' }}</button>
-            <button class="ghost tiny" @click="clearRemoteKey()">清除</button>
-            </div>
-            <div v-if="remoteTest.detail" style="margin-top:6px;font-size:11.5px"
-                 :style="{ color: remoteTest.ok === false ? '#ffb4ae' : (remoteTest.ok ? '#9be9a8' : 'var(--dim)') }">
-              {{ remoteTest.ok === true ? '✓ ' : (remoteTest.ok === false ? '✗ ' : '') }}{{ remoteTest.detail }}
-            </div>
-            <div class="panel-title" style="margin-top:12px">全局连接参数（兜底 / 兼容旧配置）</div>
-            <div class="dim" style="font-size:11px;margin-bottom:6px;line-height:1.6">
-              这里是<b>全局</b>配置，只作为档案没填时的兜底。DeepSeek 档案永远走官方地址、不继承这里；
-              OpenAI 兼容档案才继承。要给某个模型单独配网址 / key，请到顶栏「远端模型」里点开它。
-            </div>
-            <div class="row" style="gap:8px;align-items:center">
-              <input v-model="remoteForm.model" placeholder="deepseek-flash" style="width:180px" />
-              <input v-model="remoteForm.base_url" placeholder="https://api.deepseek.com" style="flex:1" />
-              <select v-model="remoteForm.compat" style="width:130px">
-                <option value="deepseek">DeepSeek</option>
-                <option value="openai">OpenAI 兼容</option>
-              </select>
-              <button class="ghost tiny" @click="saveRemote({model: remoteForm.model, base_url: remoteForm.base_url, compat: remoteForm.compat})">保存</button>
-            </div>
-            <div class="panel-title" style="margin-top:14px">用量（本地累计，含缓存命中）</div>
-            <table>
-              <tr><td class="dim" style="width:140px">调用次数</td><td class="mono">{{ remote.usage?.calls ?? 0 }}</td></tr>
-              <tr><td class="dim">prompt / completion</td>
-                  <td class="mono">{{ remote.usage?.prompt_tokens ?? 0 }} / {{ remote.usage?.completion_tokens ?? 0 }}</td></tr>
-              <tr><td class="dim">缓存命中率</td>
-                  <td class="mono">{{ ((remote.usage?.cache_hit_rate ?? 0) * 100).toFixed(0) }}%
-                    <span class="dim" style="font-size:11px">（DeepSeek 前缀缓存，命中部分约 1/10 价）</span></td></tr>
-              <tr><td class="dim">同证据复用</td><td class="mono">{{ remote.usage?.cached_replies ?? 0 }} 次（0 token）</td></tr>
-              <tr><td class="dim">reasoning tokens</td><td class="mono">{{ remote.usage?.reasoning_tokens ?? 0 }}</td></tr>
-            <tr><td class="dim">高峰（全价）</td>
-                <td class="mono">{{ remote.usage?.peak?.calls ?? 0 }} 次 · ¥{{ (remote.usage?.peak?.cost_cny ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">闲时（半价）</td>
-                <td class="mono">{{ remote.usage?.offpeak?.calls ?? 0 }} 次 · ¥{{ (remote.usage?.offpeak?.cost_cny ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">总花费</td><td class="mono">¥{{ (remote.usage?.cost_cny ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">缓存省下</td><td class="mono">¥{{ (remote.usage?.cache_saved_cny ?? 0).toFixed(4) }}</td></tr>
-            <tr><td class="dim">高峰时段</td>
-                <td class="mono">{{ (remote.usage?.window?.ranges || []).join('、') || '09:00-12:00、14:00-18:00' }}
-                  （北京时间工作日；其余半价）</td></tr>
-            </table>
-            <div class="dim" style="font-size:11.5px;margin-top:8px">
-              命令行等价操作：<code>python cli.py remote --key sk-...</code>；
-              交接用法：<code>python cli.py handoff &lt;task&gt; --node N --remote --apply</code>
-            </div>
-          </template>
 
           <!-- 部署通道：预留服务器 + 一次性密码（密码不落盘、不回显） -->
-          <template v-else-if="settingsTab === 'deploy'">
+          <template v-if="showSettings && settingsTab === 'deploy'">
             <div class="panel-title">受控部署通道</div>
             <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.6">
               人预先登记服务器、认证方式和命令白名单，远端只能在这里面"提议"命令。
@@ -5142,7 +5320,7 @@ onUnmounted(() => {
           </template>
 
           <!-- UI 审美样式库：审美判据在人眼里，引擎只列举类型让用户挑，颜色自己填 -->
-          <template v-else-if="settingsTab === 'uistyle'">
+          <template v-else-if="showSettings && settingsTab === 'uistyle'">
             <div class="panel-title">UI 审美 · 挑一个风格</div>
             <div class="dim" style="font-size:12px;margin-bottom:10px;line-height:1.6">
               引擎判不了"好不好看"，所以不替你拍板。这里把页面/背景/菜单/按钮的类型全部列出来，
@@ -5214,7 +5392,7 @@ onUnmounted(() => {
           </template>
 
           <!-- 半自动回填：人填一次 → 引擎代跑（值不落盘/不回显） -->
-          <template v-else-if="settingsTab === 'human'">
+          <template v-else-if="showSettings && settingsTab === 'human'">
             <div class="panel-title">半自动回填 · 外部真链路</div>
             <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:10px">
               验证码 / 短信 OTP / 第三方登录这类判据在别人服务器上，引擎拿不到，全人工又太碎。
@@ -5276,7 +5454,7 @@ onUnmounted(() => {
           </template>
 
           <!-- 多机编排：一次协商 + 一次人审覆盖整批主机 -->
-          <template v-else-if="settingsTab === 'orch'">
+          <template v-else-if="showSettings && settingsTab === 'orch'">
             <div class="panel-title">多机编排</div>
             <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:10px">
               一个计划绑定多台预留服务器，共用一组步骤：<b>一次三方协商 + 一次人审覆盖整批</b>
@@ -5377,7 +5555,7 @@ onUnmounted(() => {
           </template>
 
           <!-- 能力边界：插件适配 + 判据开放（只读清单，诚实标人在环） -->
-          <template v-else-if="settingsTab === 'caps'">
+          <template v-else-if="showSettings && settingsTab === 'caps'">
             <div class="panel-title">能力边界 · 哪些能机判、哪些必须人管</div>
             <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:12px">
               下面两份清单来自公开开发文档：上面是常用软件的插件桥（能验什么产物），
@@ -5451,7 +5629,7 @@ onUnmounted(() => {
           </template>
 
           <!-- 体检：链路走查 / 闭环验收 / 运维单元（此前都只有 API，用户点不到） -->
-          <template v-else-if="settingsTab === 'health'">
+          <template v-else-if="showSettings && settingsTab === 'health'">
             <div class="panel-title">引擎体检</div>
             <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:12px">
               装好软件后你可以自己确认引擎是否健康：链路走查看各模块是否连通，
@@ -5545,7 +5723,7 @@ onUnmounted(() => {
           </template>
 
           <!-- 自主计划：蓝图/切片/覆盖 的只读视图（此前只有 /v1/plan 接口，界面看不到） -->
-          <template v-else-if="settingsTab === 'plan'">
+          <template v-else-if="showSettings && settingsTab === 'plan'">
             <div class="panel-title">自主计划（只读）</div>
             <div class="dim" style="font-size:12px;line-height:1.6;margin-bottom:10px">
               全自主跑的进度靠三样东西看：<b>计划长什么样</b>（能力清单与依赖）、
@@ -5655,7 +5833,7 @@ onUnmounted(() => {
           </template>
 
           <!-- 状态说明：原来顶栏那两个看不懂的药丸，含义写在这里 -->
-          <template v-else-if="settingsTab === 'status'">
+          <template v-if="showHelp && settingsTab === 'status'">
             <div class="panel-title">当前状态</div>
             <table>
               <tr><td class="dim" style="width:150px">前端版本</td>

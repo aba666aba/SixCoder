@@ -196,6 +196,22 @@ check("测试红 → ok=False", res3.ok is False,
 check("测试红 → verified=0（不冒充）", res3.verified == 0, str(res3.verified))
 check("理由点名未计入验收通过", "未计入验收通过" in res3.reason, res3.reason[:200])
 
+# 2026-11-23 真 bug：`lang._typecheck_sources` 对 p.parts（**绝对路径**）判 `.tmp`，
+# 于是产物仓只要落在任何 `.tmp*` 目录下（自检自己在 prototype/.tmp/ 里跑），
+# 所有 .c 源文件被静默跳过 → 报"找不到源文件"→ 判"测不了"。与 enterprise._iter_py 同源。
+_tmp_root = Path(__file__).resolve().parents[1] / ".tmp"
+_tmp_root.mkdir(exist_ok=True)
+with tempfile.TemporaryDirectory(dir=str(_tmp_root)) as td:
+    wc2 = Path(td)
+    (wc2 / "add.c").write_text("int add(int a, int b) { return a + b; }\n", encoding="utf-8")
+    check("仓在 .tmp 目录下也扫得到 .c（旧版误判测不了）",
+          len(LG._typecheck_sources(wc2, "c")) == 1, str(LG._typecheck_sources(wc2, "c")))
+with tempfile.TemporaryDirectory(dir=str(_tmp_root)) as td:
+    wc3 = Path(td)
+    (wc3 / ".tmp_junk").mkdir()
+    (wc3 / ".tmp_junk" / "junk.c").write_text("bad", encoding="utf-8")
+    check("仓内 .tmp* 子目录仍然跳过", LG._typecheck_sources(wc3, "c") == [])
+
 print()
 if FAILS:
     print(f"FAILED: {len(FAILS)} 项 —— " + "；".join(FAILS))

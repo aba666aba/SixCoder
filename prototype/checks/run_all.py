@@ -18,6 +18,18 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 TMP_ROOT = ROOT / ".tmp"
 
+# 中文 Windows 的 stdout 是 GBK：**本脚本自己的汇总打印**就带「✓」这类字符，
+# 旧版跑到失败汇总那一行才 UnicodeEncodeError 崩掉（2026-11-23 实测：全量 229 个
+# 脚本跑完 220 PASS / 9 FAIL，最后一行 traceback 把整轮结论吞了）。入口先切编码。
+sys.path.insert(0, str(ROOT))
+try:
+    from core.console import encode_stdout, utf8_env
+except Exception:                                          # noqa: BLE001
+    encode_stdout = utf8_env = None                      # type: ignore[assignment]
+
+if encode_stdout is not None:
+    encode_stdout()
+
 
 def _ensure_tmp() -> None:
     """子进程也写工作区内的临时目录（沙箱外不可写）。"""
@@ -56,6 +68,10 @@ def _child_env(idx: int) -> dict:
     """
     import os
     env = dict(os.environ)
+    # 子进程也要 UTF-8：父进程自己切好了，子进程仍会用 cp936 打开 stdout，
+    # 于是"父进程正常、子进程崩溃"——最难查的一类假红（2026-11-23）。
+    if utf8_env is not None:
+        env = utf8_env(env)
     base = env.get("CODEBUDDY_SAFE_DELETE_BULK_STATE_DIR")
     if base:
         d = Path(base) / f"check_{idx:03d}"
@@ -152,4 +168,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

@@ -169,6 +169,14 @@ pre.ok-border { border-color: rgba(63,185,80,.45); }
 }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+/* 分组标签：把 modal 顶部的 tab 分成「帮助 / 待办 / 设置」三组（2026-11-23）。
+   只是视觉分隔，不可点击——帮助组"只看不改"，设置组才是可配置项。 */
+.tab-group-label {
+  color: var(--dim); font-size: 10px; letter-spacing: .8px; opacity: .7;
+  padding: 0 4px 0 10px; margin-left: 4px; border-left: 1px solid var(--line);
+  text-transform: uppercase; user-select: none; white-space: nowrap;
+}
+.tab-group-label:first-of-type { border-left: 0; padding-left: 0; margin-left: 0; }
 
 /* ---------- 审查结果 ---------- */
 .finding {
@@ -261,7 +269,7 @@ button.danger:hover { filter: brightness(1.12); }
   font-family: var(--mono); font-size: 11.5px;
 }
 
-/* 开发者模式：待审节点卡片（写文件/提交/推送/上报远端/收尾交付） */
+/* 精修模式：待审节点卡片（写文件/提交/推送/上报远端/收尾交付） */
 .approval-card {
   border: 1px solid var(--warn);
   background: rgba(210,153,34,.08);
@@ -694,7 +702,7 @@ details.adv > summary {
 }
 details.adv > summary:hover { color: var(--text); }
 
-/* ---------- 开发者模式：主界面提示（输入在编辑器里） ---------- */
+/* ---------- 精修模式：主界面提示（输入在编辑器里） ---------- */
 .dev-hint {
   border: 1px solid var(--line); border-radius: 8px; padding: 14px;
   background: rgba(255,255,255,.012);
@@ -741,7 +749,7 @@ details.adv > summary:hover { color: var(--text); }
   font-size: 10px; color: var(--dim); flex-wrap: wrap;
 }
 
-/* ---------- 开发者模式：运行 / 调试输出面板 ---------- */
+/* ---------- 精修模式：运行 / 调试输出面板 ---------- */
 .run-panel {
   flex: 0 0 auto; max-height: 40vh; min-height: 150px;
   display: flex; flex-direction: column; overflow: hidden;

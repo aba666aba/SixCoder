@@ -11,6 +11,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 中文 Windows 下 stdout 是 GBK，本脚本要打印「✓」「→」「①」等字符，
+# 旧版详情里出现一个希腊字母就崩溃（2026-11-23 实测：git commit 的 "❎"）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    from core.console import encode_stdout, utf8_env
+except Exception:                                          # noqa: BLE001
+    encode_stdout = utf8_env = None                      # type: ignore[assignment]
+
+if encode_stdout is not None:
+    encode_stdout()
+
 RUNNER = r'''
 import importlib, json, os, sqlite3, sys, tempfile, traceback
 ws = sys.argv[1]
@@ -195,8 +206,10 @@ def quality(ws: Path) -> dict:
 def main() -> int:
     ws = Path(sys.argv[1])
     print(f"验收目标: {ws}")
+    env = utf8_env() if utf8_env is not None else {}
     proc = subprocess.run([sys.executable, "-c", RUNNER, str(ws)], capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", timeout=180)
+                          text=True, encoding="utf-8", errors="replace", timeout=180,
+                          env={**__import__("os").environ, **env})
     line = [ln for ln in (proc.stdout or "").strip().splitlines() if ln.strip()]
     res = json.loads(line[-1]) if line else {"ok": False, "checks": []}
     passed = sum(1 for c in res["checks"] if c["ok"])
@@ -215,4 +228,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

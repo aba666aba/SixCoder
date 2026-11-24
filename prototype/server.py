@@ -134,7 +134,7 @@ def set_mode(req: ModeReq):
             "key_nodes": list(mode.key_nodes), "boundary": mode.boundary}
 
 
-# ---------------------------------------------------------------- 人工审核（开发者模式）
+# ---------------------------------------------------------------- 人工审核（精修模式）
 class ApprovalReq(BaseModel):
     decision: str = "approved"
     by: str = "ui"
@@ -142,7 +142,7 @@ class ApprovalReq(BaseModel):
 
 @app.get("/v1/approvals")
 def list_approvals():
-    """待审单据：开发者模式下前端轮询这个，弹出"通过/拒绝"。"""
+    """待审单据：精修模式下前端轮询这个，弹出"通过/拒绝"。"""
     mode = permissions.current_mode()
     return {"mode": mode.id, "name": mode.name, "auto_approve": mode.auto_approve,
             "pending": approval.pending()}
@@ -454,7 +454,7 @@ class RemoteSettingsReq(BaseModel):
     max_output_tokens: Optional[int] = None
     max_prompt_chars: Optional[int] = None
     escalate_after: Optional[int] = None    # 同一档连续失败几次才升下一档
-    dev_remote: Optional[bool] = None       # 开发者模式是否允许调用远端（甲方强制开、只读强制关）
+    dev_remote: Optional[bool] = None       # 精修模式是否允许调用远端（甲方强制开、只读强制关）
     local_first: Optional[bool] = None       # 阶梯第 0 档是否用本地模型（省钱）
     active_model: Optional[str] = None      # 当前使用的那**一个**模型档案 id（空 = 自动解析）
     pricing: Optional[dict] = None          # 旧价目表（美元）；新逻辑用 models[].pricing
@@ -1203,6 +1203,53 @@ def run_walkthrough(verify: bool = False):
     return _w.walkthrough(include_verify=verify)
 
 
+# ---------------------------------------------------------------- 阶段③：只读审计 + 文档生成
+#
+# 为什么补这两个端点（2026-11-23）：盘查发现第③段"审阅模式"只有 walkthrough 一个入口，
+# 而 archrules / lint / debt / testweight / detectors 这些审计模块**早就写好了**、
+# 却只被自检脚本调用，用户根本碰不到。文档也只有 README + LICENSE。
+# 这不是缺实现，是**缺接线**——能力在代码里，没接到产品面上。
+
+@app.get("/v1/audit")
+def run_audit(repo: str = ""):
+    """只读审计：零 token 跑一遍确定性检查，返回结构化发现（不改任何东西）。"""
+    _guard("file.read")
+    from core import audit as _audit
+    ws = _fs_base(repo) if repo.strip() else None
+    if ws is None or not ws.is_dir():
+        raise HTTPException(400, f"仓库不存在：{repo}")
+    return _audit.audit(ws)
+
+
+@app.get("/v1/audit/report")
+def audit_report(repo: str = ""):
+    """审计的人读版（Markdown 文本），前端可直接渲染。"""
+    _guard("file.read")
+    from core import audit as _audit
+    ws = _fs_base(repo) if repo.strip() else None
+    if ws is None or not ws.is_dir():
+        raise HTTPException(400, f"仓库不存在：{repo}")
+    res = _audit.audit(ws)
+    return {"ok": res["ok"], "summary": res["summary"],
+            "markdown": _audit.render_report(res)}
+
+
+@app.post("/v1/docs/stage3")
+def docs_stage3(req: dict):
+    """生成阶段③的三份开发者文档：MODULES / ARCHITECTURE / HANDOVER。
+
+    **只写这三份文档文件**，不碰源码、不改配置。项目名可不传（取目录名）。
+    """
+    _guard("file.write")                    # 审阅模式禁止写盘，语义正确
+    from core import docs as _docs
+    repo = str((req or {}).get("repo") or "").strip()
+    ws = _fs_base(repo) if repo else None
+    if ws is None or not ws.is_dir():
+        raise HTTPException(400, f"仓库不存在：{repo}")
+    project = str((req or {}).get("project") or "").strip()
+    return _docs.write_stage3_docs(ws, project)
+
+
 # ---------------------------------------------------------------- 远端工具循环（§13.4 第 3/4 步）
 class RemoteToolReq(BaseModel):
     """远端（或前端）调用工具循环的请求：在给定工作区跑一轮只读工具往返。"""
@@ -1253,10 +1300,10 @@ class NightReq(BaseModel):
     fresh: bool = False            # 全自主模式：忽略已有蓝图重新推导（默认续跑）
     target: str = ""
     model: str = ""
-    plan: str = ""                 # 开发者模式：人给的实现方案（权威）
+    plan: str = ""                 # 精修模式：人给的实现方案（权威）
     use_remote: bool = True
     # 目标代码规模：不同规模的约束完全不同（core/scale.py）。
-    # 甲方模式要求提需求时写明；没写就按实测推断，并在交付报告里注明。
+    # 造物模式要求提需求时写明；没写就按实测推断，并在交付报告里注明。
     scale: str = ""                # S / M / L / XL
     remote_profile: str = ""       # 右上角「远端模型」：只走这个档案（flash / pro），空 = 整条阶梯
 
@@ -1266,7 +1313,7 @@ _NIGHT: dict[str, dict] = {}
 
 @app.post("/v1/night")
 def create_night(req: NightReq):
-    """夜班（公司制）：甲方模式提需求 → 系统内部做完所有决策 → 早上给交付报告。
+    """夜班（公司制）：造物模式提需求 → 系统内部做完所有决策 → 早上给交付报告。
 
     与 `/v1/tasks` 的区别：task 是"一个需求 → 一对测试/实现节点"；
     night 是"一个需求 → 反复体检/派工/开发/机械验收，直到收敛或预算耗尽"。
@@ -1275,7 +1322,7 @@ def create_night(req: NightReq):
     _guard("agent.run")
     pol = policy.current()
     if pol.code_escalation == policy.OFF:
-        raise HTTPException(403, f"{pol.name}不写文件，不能跑夜班；请切到甲方模式或开发者模式")
+        raise HTTPException(403, f"{pol.name}不写文件，不能跑夜班；请切到造物模式或精修模式")
     repo = Path(req.repo)
     if not repo.exists():
         raise HTTPException(400, f"仓库不存在：{req.repo}")
@@ -1340,7 +1387,7 @@ def create_night(req: NightReq):
                                  "system_budget_cny": _snap.get("system_budget_cny"),
                                  "stop_threshold_cny": _snap.get("stop_threshold_cny"),
                                  "scale_warning": scope.get("warning", "")})
-            # 没写规模就把"该问的问题"显式抛给前端（甲方模式：需求里要有明确规模）
+            # 没写规模就把"该问的问题"显式抛给前端（造物模式：需求里要有明确规模）
             if scope.get("warning"):
                 emit("notice", {"message": scope["warning"], "kind": "scale"})
             res = company.night(repo, req.requirement, model,
@@ -1365,7 +1412,7 @@ def create_night(req: NightReq):
             "policy": policy.describe(pol), "stream": f"/v1/tasks/{task_id}/stream"}
 
 
-# ---------------------------------------------------------------- 文件读写（开发者模式编辑器）
+# ---------------------------------------------------------------- 文件读写（精修模式编辑器）
 
 # 噪音目录：编辑器树里一律不显示（这些不是"代码"，列出来只会淹没真正的文件）
 _SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", "env",
@@ -1477,7 +1524,7 @@ class EditorFillReq(BaseModel):
     selected: str = ""        # 有选中就改写这段，否则按续写处理
     model: str = ""           # 空 = 自动挑本地最强
     instruction: str = ""     # 可选：用户额外要求（例如"补全这个函数的错误处理"）
-    source: str = "local"     # local = 本地 Ollama ｜ remote = 远端（开发者模式自己选）
+    source: str = "local"     # local = 本地 Ollama ｜ remote = 远端（精修模式自己选）
 
 
 class EditorAssistReq(BaseModel):
@@ -1540,7 +1587,7 @@ def _editor_complete(prompt: str, *, source: str, model: str,
             model = ollama.pick_default() or model
 
     if use_remote:
-        # 远端：走 core.remote 的最强档。开发者模式在这里是"人已经看着代码点了发送"，
+        # 远端：走 core.remote 的最强档。精修模式在这里是"人已经看着代码点了发送"，
         # 属于明确意图，不需要再走审批闸门（gate_remote_call 在作者链路里负责那件事）。
         t0 = time.time()
         try:
@@ -1665,7 +1712,7 @@ def editor_assist(req: EditorAssistReq):
             "lang": lang, "source": r["source"], "ms": r["ms"], "tokens": r["tokens"]}
 
 
-# ---------------------------------------------------------------- 开发者模式：运行与调试
+# ---------------------------------------------------------------- 精修模式：运行与调试
 
 class CodeRunReq(BaseModel):
     repo: str
@@ -1791,6 +1838,28 @@ def editor_debug_stop(req: DebugCmdReq):
 # 用户口径（2026-11-20）：让 AI 也能「跳到我想去的文件/函数」和「调试指定函数」。
 # 触发两条：① 编辑器选中函数名点按钮 → /symbol/locate；
 #           ② AI 对话里说中文 → /navigate（本地规则解析，不花 token，抠不出就返回候选）。
+
+@app.get("/v1/editor/outline")
+def editor_outline(repo: str, path: str):
+    """当前文件的**符号大纲**（右栏"精修模式"用）：函数/类 + 行号，供点击跳转。
+
+    与 `/v1/editor/symbols` 的区别：那个是**全仓按名字搜**（跨文件找定义）；
+    这个是**单个文件内部的结构**（我已在这个文件里，想快速跳到某个函数）。
+    两者都走 codelocate，判据只有一份。
+    """
+    _guard("file.read")
+    ws = _run_ws(repo)
+    from core import tools as _tools
+    p = _tools.safe_path(ws, path)
+    if not p.is_file():
+        raise HTTPException(404, f"文件不存在：{path}")
+    syms = _codelocate.symbols_in_file(p)
+    total = len(p.read_text(encoding="utf-8", errors="replace").splitlines())
+    return {"ok": True, "path": path, "lines": total,
+            "symbols": [{"name": s.get("name"), "kind": s.get("kind"),
+                         "line": s.get("line"), "signature": s.get("signature") or ""}
+                        for s in syms]}
+
 
 @app.get("/v1/editor/symbols")
 def editor_symbols(repo: str, q: str, kind: str | None = None, limit: int = 60):
@@ -1958,7 +2027,7 @@ def _doc_from_json(d: dict):
 def night_clarify(req: ClarifyReq):
     """需求澄清协商：远端先问清楚，确认"能做完"才允许开工。
 
-    为什么必须有这一步（2026-11-20 用户口径）：甲方模式的承诺是"提需求 → 早上看交付
+    为什么必须有这一步（2026-11-20 用户口径）：造物模式的承诺是"提需求 → 早上看交付
     报告"，但技术栈/范围/验收口径没定时，远端只能自己猜 —— 猜错的代价是整夜的钱。
     所以动手前让它把待定项列成多选，人点完、它再自评"这些细节够不够开工"。
 
@@ -2193,7 +2262,7 @@ def create_night_detached(req: DetachedNightReq):
     _guard("agent.run")
     pol = policy.current()
     if pol.code_escalation is policy.OFF:
-        raise HTTPException(403, f"{pol.name}不写文件，不能跑夜班；请切到甲方模式或开发者模式")
+        raise HTTPException(403, f"{pol.name}不写文件，不能跑夜班；请切到造物模式或精修模式")
     repo = Path(req.repo)
     if not repo.is_dir():
         raise HTTPException(400, f"仓库不存在：{req.repo}")
@@ -2281,7 +2350,7 @@ def _pack_procs(repo: str) -> list[dict]:
 
 @app.post("/v1/night/package")
 def night_package(req: PackReq):
-    """把产物仓打成 exe（甲方模式交付的最后一步）。
+    """把产物仓打成 exe（造物模式交付的最后一步）。
 
     为什么单开一条 detached 路径：PyInstaller 要 1-3 分钟，塞进请求线程会占住后端，
     关窗还会被杀；按既有的「独立进程 + 状态文件轮询」模型走。
@@ -2801,7 +2870,7 @@ class AnswerReq(BaseModel):
 
 @app.get("/v1/questions")
 def list_questions(repo: str):
-    """待人回答的问题（开发者模式里本地模型主动提问）。"""
+    """待人回答的问题（精修模式里本地模型主动提问）。"""
     from core import questions
     return {"questions": questions.pending(Path(repo))}
 
@@ -2904,7 +2973,7 @@ class NodeResolveReq(BaseModel):
 def resolve_node(task_id: str, node_id: str, req: NodeResolveReq):
     """人工处置一个 stuck（有节点没通过）节点：接受 / 丢弃（都写 human 证据）。
 
-    与"等人工审批"（开发者模式的 needhuman）不是一回事：
+    与"等人工审批"（精修模式的 needhuman）不是一回事：
     needhuman 是**事前**要人点头才继续；stuck 是**事后**节点没通过、等人裁量。
     """
     _guard("agent.run")
@@ -3158,6 +3227,13 @@ else:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     db.init()
     stale = db.recover_stale()
     try:

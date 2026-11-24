@@ -323,6 +323,34 @@ def main() -> int:
         check("inspect 真跑：needs_work_state 因工程声明未兑现判 True",
               CO.needs_work_state(st, "app/main.py"))
 
+    # 2026-11-23 真 bug：`_iter_py` 的 `.tmp` 跳过看的是**整条绝对路径**，
+    # 于是产物仓只要放在任何 `.tmp*` 目录下（自检自己就在 prototype/.tmp/ 里跑），
+    # 所有源文件被静默跳过 → 健康端点判据把"已注册"报成"没注册"。
+    # **漏报变误报**，比漏报更糟。三条一起钉：仓内正常、仓在 .tmp 下、仓内 .tmp 子目录仍跳过。
+    print("[C12] 源文件遍历：.tmp 跳过只看仓内相对路径")
+    with tempfile.TemporaryDirectory(dir=str(Path(__file__).resolve().parents[1] / ".tmp")) as td:
+        w = Path(td)
+        (w / "main.py").write_bytes(b'@router.get("/health")\n')
+        check("仓根下的源文件扫得到",
+              E._check_health(w, S("health", "GET /health")) == [])
+    with tempfile.TemporaryDirectory(dir=str(Path(__file__).resolve().parents[1])) as td:
+        w = Path(td)          # 父目录是 prototype/，所在盘符路径本身可能含 .tmp
+        (w / "main.py").write_bytes(b'@router.get("/health")\n')
+        rel = w.relative_to(Path(__file__).resolve().parents[1])
+        check("仓所在的父目录名不影响遍历（旧版会误判没注册）",
+              E._check_health(w, S("health", "GET /health")) == [], str(rel))
+    with tempfile.TemporaryDirectory(dir=str(Path(__file__).resolve().parents[1] / ".tmp")) as td:
+        w = Path(td)
+        (w / ".tmp_junk").mkdir()
+        (w / ".tmp_junk" / "x.py").write_bytes(b'@router.get("/health")\n')
+        check("仓内 .tmp* 子目录仍然跳过（不许扫临时产物）",
+              E._check_health(w, S("health", "GET /health")) != [])
+    with tempfile.TemporaryDirectory(dir=str(Path(__file__).resolve().parents[1] / ".tmp")) as td:
+        w = Path(td)
+        (w / "main.py").write_bytes('# 中文注释\n@router.get("/health")\n'.encode("gbk"))
+        check("非 UTF-8（GBK）源文件也能读到端点，不因坏字节整文失配",
+              E._check_health(w, S("health", "GET /health")) == [])
+
     print()
     if FAILS:
         print(f"失败 {len(FAILS)} 项 / 共 {TOTAL[0]} 条断言：{FAILS}")
@@ -332,4 +360,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())
