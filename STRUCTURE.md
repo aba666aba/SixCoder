@@ -19,7 +19,7 @@ SixCoder/
 │  ├─ cli.py                 命令行入口（night / run / remote / plan / clean ...）
 │  ├─ iterate_cli.py         迭代驱动器（工作单模式，工程式推进）
 │  ├─ core/                  引擎（100+ 模块，唯一实现处）
-│  ├─ checks/                自检脚本（python checks/run_all.py 一次全跑，168 个）
+│  ├─ checks/                自检脚本（python checks/run_all.py 一次全跑，227 个）
 │  ├─ tools/                 引擎工具 + 运维脚本（看门狗、巡检、诊断）
 │  ├─ web/                   前端（Vue3 + Vite，构建产物在 web/dist）
 │  ├─ data/                  运行期数据（settings.json / capability.json / proto.db，均不入库）
@@ -69,7 +69,7 @@ SixCoder/
 
 ```powershell
 cd SixCoder\prototype
-python checks\run_all.py                       # 全部自检（168 项，PowerShell 通道跑）
+python checks\run_all.py                       # 全部自检（227 项，PowerShell 通道跑）
 python cli.py night --repo <dir> --goal "目标" --estimate   # 两步法第一步：只估算花费
 python cli.py night --repo <dir> --goal-file <需求.md>      # 正式开工（续跑）
 python cli.py plan show / plan slices          # 看蓝图 / 切片
@@ -83,8 +83,13 @@ python server.py --port 8760                   # 起后端（开发态；用户�
 
 ## 当前关键口径（细节看 `开发文档.md`）
 
-- **预算**：唯一停机线 = 总花费 ≥ 系统总预算 × 1.05（写在产物仓 `.sixcoder/budget.json`）。
-  **用户不可设任何上限** —— `--max-cny` / `--hours` 已删除。两步法：先 `--estimate` 估算 → 充值 → 再开工。
+- **预算**：唯一停机线 = 总花费 ≥ 系统总预算 × 1.05（写在**产物仓** `.sixcoder/budget.json` 的
+  `system_budget_cny`，由 `core/budget_estimate.load_system_budget` 读取）。
+  **不设上限的只有 `--max-cny` / `--hours` 这类一次性命令行参数**（已删除，防止跑一夜忘了设）；
+  用户可以、也应该在 `.sixcoder/budget.json` 里给一个 `system_budget_cny` —— **不写这个文件 = 真的没有上限**
+  （函数返回 0 = 不启停机线），这也是 README 让新手第一步就设预算的原因。
+  口径：它是"系统给的总盘子"，引擎只能用它、不能自己改；CLI/界面没有任何参数能覆盖它。
+  两步法：先 `--estimate` 估算 → 充值 → 再开工。
 - **思考档位**：单模型 + 按难度自适应。起点按模块实测档案（`proven_floor`）+ 难度先验，
   失败 1 次即升档、成功即回最低档；**封顶恒为 max**（完全相信远端，不按成功率压封顶）。
 - **工具通路**：按模型能力选 `native`（官方 function calling）/ `xml`（文本协议）/ `none`（无工具）；
@@ -98,7 +103,7 @@ python server.py --port 8760                   # 起后端（开发态；用户�
   可复用的部分**只保留知识与设计契约**（`docs/15`、`docs/18`）。
 - **用户入口只有一个 EXE**：`start.bat` / `start.ps1` / `stop.bat` / `stop.ps1` / `START_NIGHT.bat` / `STOP_NIGHT.bat`
   已全部删除（2026-11-20），功能搬进界面与 `server.py` 接口；打包脚本也从 ps1 收成 Python。
-- 自检脚本集中到 `prototype/checks/`，统一入口 `run_all.py`（168 个，可任意 cwd 运行）。
+- 自检脚本集中到 `prototype/checks/`，统一入口 `run_all.py`（227 个，可任意 cwd 运行）。
 - 运行期产物（`workspaces/`、`*.db`、`_logs/`、`node_modules/`、`dist/`）全部 gitignore，
   并把 `settings.json`（含明文 Key）与 `capability.json`（本地模型能力记忆）移出索引；
   `tools/git-hooks/pre-push` 负责拦住复发。

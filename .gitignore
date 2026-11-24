@@ -95,6 +95,16 @@ projects/*
 /dist-installer/
 /.cache/
 
+# 构建产物轮转：dist-installer/release-* 每打一次包就是一个 900MB 的整目录，
+# 2026-11-23 一天打了 16 次 → 累计 20.8GB，把仓库撑到 22.8GB。
+# 规则：只保留最近 2 个（当前可回退的那一版 + 上一版），其余随时可删；
+# packaging/build_installer.py 打完包会自动轮转，手工删也安全。
+/dist-installer/release-*/
+# 打包中间产物与安装器的临时解包目录
+/dist-installer/*.blockmap
+/dist-installer/win-unpacked/
+/dist-installer/*-unpacked/
+
 # WorkBuddy 本地项目数据（会话记忆 / 工作日志，不入库）
 /.workbuddy/
 
