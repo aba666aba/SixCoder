@@ -75,7 +75,7 @@ def delete_ticket(ticket_id: int) -> dict:
 4. 契约要求抛的异常必须抛（例如 `b == 0` 抛 ValueError）；抛错要用契约指定的异常类型。
 5. 只写契约里出现的函数；模块内辅助函数用 `_` 开头。
 6. 契约里每条示例都要在你的实现上成立。
-7. **可维护性硬指标**：单函数圈复杂度 ≤8、嵌套 ≤3、单函数 ≤40 行（本地会判红）；
+7. **可维护性硬指标**：{limits}；
    用提前返回、字典查表、拆小函数来降复杂度。
 8. 如果你发现**契约或本地判据本身有问题**（漏定义字段、判据缺边界、工具链缺陷），
    写进 system_issues；不要因为契约有问题就自己改签名。
@@ -473,6 +473,27 @@ def _compile_ok(src: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------- 只回函数体
+
+def _quality_limits_text(ws=None) -> str:
+    """可维护性阈值的一句话说明（**从 scale 动态取，不写死**）。
+
+    2026-11-24 修：原来两处提示词都写死「圈复杂度 ≤8、嵌套 ≤3、≤40 行」，
+    但 gates.gate_quality_metrics 实际按项目规模判：
+        S 12/4/60、M 10/4/50、L 8/3/40、XL 8/3/40
+    于是 S 级项目里模型被告知"必须 ≤8"，写出来反而更绕；
+    实测失败数据里 33 条卡在"圈复杂度超限"。
+    提示词说的必须和判据判的一致 —— 否则模型在为一个过严的数字挣扎。
+    """
+    try:
+        from . import scale as _scale
+        lv = _scale.resolve("", ws)["level"] if ws is not None else "S"
+        lim = _scale.quality_limits(lv)
+        return ("单函数圈复杂度 ≤%d、嵌套 ≤%d、单函数 ≤%d 行（%s 级；本地会判红）"
+                % (lim["complexity"], lim["depth"], lim["lines"], lv))
+    except Exception:                                # noqa: BLE001
+        return "单函数圈复杂度 ≤12、嵌套 ≤4、单函数 ≤60 行（本地会判红）"
+
+
 BODIES_PROMPT = """你是资深工程师。骨架已经由引擎按契约渲染好了，你**只写函数体**，不写 def 行。
 
 {protocol}
@@ -501,7 +522,7 @@ BODIES_PROMPT = """你是资深工程师。骨架已经由引擎按契约渲染�
 4. 不要输出整文件、不要输出 import。
 5. 空输入/空值不许崩；契约要求抛的异常必须抛。
 6. 契约里每条示例都要在你的实现上成立。
-7. **可维护性硬指标**：单函数圈复杂度 ≤8、嵌套 ≤3、单函数 ≤40 行（本地会判红）。
+7. **可维护性硬指标**：{limits}。
    降复杂度用提前返回、字典查表、把大 if 拆成小函数（辅助函数放 helpers）。
 
 辅助函数（可选）：围栏里再用 `# ===== helper:_名字 =====` 开头给**完整 def 定义**，
@@ -882,7 +903,7 @@ def _fix_imports_after_write(ws: Path, p: Path, emit, how: str) -> str:
 
 def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan: str = "",
                   evidence: str = "", step_index: int = 0, task_id: str = "",
-                  emit=None, attempts: int = 2, max_out: int = 0,
+                  emit=None, attempts: int = 3, max_out: int = 0,
                   context_budget: int = 0, local_model: str = "",
                   only: list[str] | None = None, workingset: str = "",
                   diagnose: bool = True, tool_loop: bool = True,
@@ -1037,6 +1058,7 @@ def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan
             format_example=_format_example,
             file_block=_file_block,
             protocol=protocol.render("delegate"),
+            limits=_quality_limits_text(ws),
             skeleton_block=f"【骨架（已由引擎渲染好，你只补函数体）】\n```python\n{skeleton}\n```",
             contract_block=f"【契约】\n{contract_txt}",
             plan_block=(f"【实现方案】\n{_tokens.cut(model_plan.strip(), REMOTE_TEXT_CHARS)}" if model_plan else ""
@@ -1082,8 +1104,11 @@ def author_bodies(ws: Path, path: str, contract, contracts_all: dict, model_plan
         # 远端**带只读工具**写码：先看真实代码/契约/依赖，再交函数体。
         # 这条路之前是**零工具**的：远端只能凭注入的片段猜文件里长什么样 ->
         # "用了没 import 的名字""字段名猜错""重写已有函数"这类错反复出现。
-        # ToolLoop 早就实现（10 个只读工具），但写作路径只把说明追加进 prompt、
-        # 从不解析/执行/回灌 —— 机制写好了，出口没接上（今天第十次同一种病）。
+        #
+        # **现状（2026-11-24 核对）**：已经接上了 —— 见下面 if tool_loop 分支里
+        # `_lp = _rtl.ToolLoop(...)` + `_lr = _lp.run(prompt)`，工具调用会被真的
+        # 解析/执行/回灌。原先那句"从不解析/执行/回灌"是**修复前**的描述，
+        # 留着只说明为什么要有这段代码；判断现状请直接看下面的调用。
         _ans = ""
         _usage: dict = {}
         _remote_failed = [False]   # 远端调用本身失败 → 不再补打一次（省一次花费）
@@ -1388,7 +1413,7 @@ def _ensure_packages(ws: Path, rel: str) -> list[str]:
 
 def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan: str = "",
                   evidence: str = "", step_index: int = 0, task_id: str = "",
-                  emit=None, attempts: int = 2, max_out: int = 0,
+                  emit=None, attempts: int = 3, max_out: int = 0,
                   context_budget: int = 0, local_model: str = "",
                   workingset: str = "", verify_fn=None,
                   stop_on_repeat: bool = True,
@@ -1499,7 +1524,8 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
     if workingset:
         req_block = (req_block + "\n\n" + workingset).strip()
     prompt = AUTHOR_PROMPT.format(protocol=protocol.render("files"), context=ctx,
-                                  requirements=req_block)
+                                  requirements=req_block,
+                                  limits=_quality_limits_text(ws))
     # §20.4 落点 3：契约声明了产物文件 → 提示词带上清单与交回格式
     _arts_m = list(getattr(contract, "artifacts", None) or [])
     if _arts_m:
@@ -1563,7 +1589,8 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
         body = prompt if attempt == 1 else (
             prompt + "\n\n【上一版被机械判据判红，必须改掉】\n" + _tokens.cut(last or "", REMOTE_TEXT_CHARS))
         # 整文件路径**真的跑工具循环**（原生 function calling）：原来只是把工具说明
-        # 追加进 prompt，从不解析/执行/回灌 —— 远端看得见"有工具"，却一个都调不到。
+        # **现状（2026-11-24 核对）**：已接上，工具会被真的解析/执行/回灌
+    # （见下面 if tool_loop 分支的 _lp.run）。原注释描述的是修复前的状态。
         # 夜班「整文件模式两版都未通过」29 次就在这条路上（实测 2026-11-09）。
         _ans = ""
         _usage: dict = {}
