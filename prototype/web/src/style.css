@@ -459,7 +459,12 @@ button.ghost.sel { border-color: var(--accent); color: var(--accent); }
 .tree-root {
   border: 1px solid var(--line); border-radius: 7px;
   background: rgba(255,255,255,.015);
-  padding: 4px 2px; max-height: 260px; overflow: auto;
+  padding: 4px 2px; max-height: 260px;
+  /* 2026-11-24：深层嵌套时允许横向滚动。
+     原来只有 overflow:auto（两轴都滚），但 .tree-name 有 flex:1 + overflow:hidden，
+     深层缩进把宽度吃完后，文件名被压到 0 宽 —— 只看得见尾部的数字。
+     改成：行不换行、名字保持自然宽度、超出就横向滚。 */
+  overflow: auto;
 }
 /* 全仓搜索结果行：点一下跳到命中行（/v1/fs/search） */
 .fs-hit {
@@ -475,12 +480,19 @@ button.ghost.sel { border-color: var(--accent); color: var(--accent); }
   display: flex; align-items: center; gap: 5px;
   padding: 1px 6px; border-radius: 4px; cursor: pointer;
   font-size: 11.5px; white-space: nowrap;
+  /* 不压缩：让整行按内容撑开，超出时由 .tree-root 横向滚动 */
+  width: max-content; min-width: 100%;
 }
 .tree-row:hover { background: rgba(79,140,255,.13); }
 .tree-row.dir .tree-name { font-weight: 550; }
 .tree-caret { width: 10px; flex: 0 0 auto; color: var(--dim); font-size: 9px; }
 .tree-icon { flex: 0 0 auto; font-size: 11px; }
-.tree-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tree-name {
+  /* 不做 flex 伸缩、不省略：深层嵌套时文件名要完整可见，靠父级横向滚动兜底。
+     原来 flex:1 + overflow:hidden 会在缩进吃满宽度后把名字压成 0。 */
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 /* 当前正在编辑的那个文件：和 VSCode 一样给个高亮，避免"我改的是哪个文件" */
 .tree-row.is-editing { background: rgba(79,140,255,.22); box-shadow: inset 2px 0 0 var(--accent); }
 

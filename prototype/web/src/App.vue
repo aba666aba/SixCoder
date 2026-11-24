@@ -1341,7 +1341,14 @@ const TreeNode = defineComponent({
     // 递归组件需要显式引用自己（SFC 里按名字解析，这里手动给）
     return () => {
       const n = props.node
-      const indent = 2 + props.depth * 14
+      // 缩进：前 5 层每层 10px（保留层级感），更深只加 4px。
+      // 为什么压缩（2026-11-24 实测 8 层）：每层 14px 时 8 层要 112px，
+      // 面板只有约 230px 宽 -> 深层文件名被挤出可视区，只剩数字。
+      // 压缩后 8 层只需 50+12=62px，更深也涨得慢；配合横向滚动兜底。
+      const NEAT_DEPTH = 5
+      const neat = Math.min(props.depth, NEAT_DEPTH) * 10
+      const extra = Math.max(0, props.depth - NEAT_DEPTH) * 4
+      const indent = 2 + neat + extra
       const expanded = !!treeExpanded.value[n.path]
       const row = h('div', {
         class: ['tree-row', { dir: n.is_dir, 'is-editing': isEditing(n) }],
