@@ -26,6 +26,9 @@ SixCoder/
 │  └─ workspaces/            任务工作区（可随时删，已 gitignore）
 ├─ shell/                    Electron 桌面壳（只依赖 prototype；缺 Electron 会自动装或退化为浏览器）
 ├─ docs/                     设计文档与机制台账；`plan/` 计划基线；`legacy/` 旧产品 README
+├─ tests/                    ★ 回归安全网（2026-11-24 新增）：冻结重构前行为
+│                             与 prototype/checks/ 分工不同 —— checks 验"机制对不对"，
+│                             tests 验"重构有没有改坏"。跑法：python -m pytest tests
 ├─ projects/                 真实夜班产物（含 DELIVERY.md / TRACE.md）
 ├─ tools/                    上传前隐私体检（preupload_scan.py）+ git pre-push 守卫
 ├─ packaging/ dist/ dist-installer/   打包与安装产物
@@ -48,6 +51,8 @@ SixCoder/
 | 契约与判据 | `contract.py` / `contract_reverse.py` / `contractcheck.py` / `contractgen.py` | 契约解析/反向合成/自查/合成 |
 | | `props.py` / `oracle.py` / `e2e.py` / `httpflow.py` / `flow.py` | 机械判据、计算校验、跨模块业务流、HTTP 链、集成冒烟 |
 | | `gates.py` / `archrules.py` / `lint.py` / `quality.py` | 静态闸门族、架构规则、lint、质量指标 |
+| | **`judges.py`** / **`judges_cli.py`** | **判据抽象层（2026-11-24 新增）**：Judge 协议 + applies_to 按栈选判据；CLI 判据包。加新软件形态 = 写判据包，不改引擎 |
+| | `feedback.py` | **运行中提修改意见**（2026-11-24 新增）：文件信箱 + 轮边界生效 |
 | | `probe.py` / `specsample.py` | 验收探针（cli/py_call/pytest/http）、权威样例 |
 | 写作 | `author.py` / `autofix.py` / `linkfix.py` / `symedit.py` / `patch.py` / `dictfill.py` | 远端写码、确定性修复、保真渲染（libcst）、补丁、字典填充 |
 | | `tools.py` / `sandbox.py` | 本地工具面、沙箱 |
