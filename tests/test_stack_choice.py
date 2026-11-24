@@ -86,7 +86,10 @@ def test_unknown_stack_rejected():
     ws = _ws()
     r = auto._persist_stack_choice(ws, _D([_C("stack", "rusty：Rust 后端")]))
     assert r.get("ok") is False
-    assert "不认识" in r.get("why", "")
+    # 2026-11-24：文案从"不认识"改成"引擎还没有 X"，
+    # 并且现在会登记 pending 请求（让协商阶段去补全）。
+    assert "引擎还没有" in r.get("why", ""), r.get("why")
+    assert r.get("pending_ecosystem") is True, "应标记为待协商"
     assert _stack_of(ws) is None
 
 

@@ -559,17 +559,53 @@ def _night_inner(repo: Path, requirement: str, model: str,
                 step_index="strongest" if pol.spec_tier == "strongest" else None,
                 thinking=pol.spec_thinking, ambiguity=pol.ambiguity, budget=_budget)
             if gen.get("need_human"):
-                # 规格歧义 → 停下来问人（只会在 developer 的 ambiguity="ask" 时发生）
+                # 规格歧义 → 问人。**先等一会儿**（2026-11-24 改）：
+                #
+                # 原来 questions.ask(wait_s=0) 登记完就返回，夜班直接收工等人。
+                # 但 ask() 本来就支持 wait_s：等到答案就继续跑，等不到再收工。
+                # 加这个等待，把"跑一半停下"变成"能自助解决一部分"。
+                #
+                # 默认等 180 秒（可配 SIXCODER_ASK_WAIT_S，设 0 恢复旧行为）：
+                #   · 人在电脑前 -> 前端 /v1/questions 能看到，答完立刻继续
+                #   · 半夜无人 -> 等 3 分钟没答就按老逻辑收工，不浪费整夜
+                try:
+                    import os as _os
+                    _wait = float(_os.environ.get("SIXCODER_ASK_WAIT_S", "180") or 0)
+                except Exception:                    # noqa: BLE001
+                    _wait = 180.0
+                _answered = None
                 try:
                     from . import questions as _qs
-                    _qs.ask(ws, gen.get("question") or "规格有歧义", gen.get("options"),
-                            gen.get("why") or "", emit=emit)
+                    _r = _qs.ask(ws, gen.get("question") or "规格有歧义", gen.get("options"),
+                                 gen.get("why") or "", emit=emit, wait_s=_wait)
+                    if _r.get("ok") and _r.get("answer"):
+                        _answered = str(_r["answer"])
                 except Exception:                    # noqa: BLE001
                     pass
-                return NightResult(False, spent_s=round(time.time() - t0, 1), reason=(
-                    "规格有歧义，已停下等人拍板（不会猜着往下写）：\n- "
-                    + (gen.get("question") or "")
-                    + (f"\n可选：{' / '.join(gen.get('options') or [])}" if gen.get("options") else "")))
+                if _answered:
+                    # 人在等待窗口内答了 -> 把答案当补充需求，重新合成契约
+                    if emit:
+                        emit("question_answered", {"answer": _answered[:400]})
+                    _req2 = (str(requirement)
+                             + "\n\n【人类就歧义的答复】\n" + _answered)
+                    gen = contractgen.load_or_synthesize(
+                        ws, _req2,
+                        step_index="strongest" if pol.spec_tier == "strongest" else None,
+                        thinking=pol.spec_thinking, ambiguity=pol.ambiguity,
+                        budget=_budget)
+                    if gen.get("need_human"):
+                        # 答了还是不够清楚 -> 照样收工（不无限追问）
+                        return NightResult(False, spent_s=round(time.time() - t0, 1),
+                                           reason=("答复后歧义仍在，已停下等人拍板：\n- "
+                                                   + (gen.get("question") or "")))
+                    # 歧义已解决 -> 回落下面 gen.get("ok") 的正常分支
+                else:
+                    # 没等到答案（或 SIXCODER_ASK_WAIT_S=0）-> 按老逻辑收工
+                    return NightResult(False, spent_s=round(time.time() - t0, 1), reason=(
+                        "规格有歧义，已停下等人拍板（不会猜着往下写）：\n- "
+                        + (gen.get("question") or "")
+                        + (f"\n可选：{' / '.join(gen.get('options') or [])}"
+                           if gen.get("options") else "")))
             if gen.get("ok"):
                 contracts = gen["contracts"]
                 # 后续所有提示词都用"翻译出来的契约"作为需求原文，语义不会跑偏

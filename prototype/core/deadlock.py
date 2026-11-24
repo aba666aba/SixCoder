@@ -493,6 +493,31 @@ def _packet(ws, st: dict) -> str:
     except Exception:                                    # noqa: BLE001
         pass
 
+    # **待补全的生态包**（2026-11-24）：澄清阶段用户点名要的栈引擎没有，
+    # 会登记在 .sixcoder/pending_stacks.json。这里读出来交给审核者，
+    # 它们可以开 install_ecosystem 处方让远端现写一个 StackAdapter。
+    #
+    # 为什么放在这里：原来是「只有死局才协商」，而缺栈不表现为卡住
+    # （引擎按默认栈生成、判据全绿）-> 这个机制从没被触发过。
+    pending_stacks: list = []
+    try:
+        _pf = Path(ws) / ".sixcoder" / "pending_stacks.json"
+        if _pf.is_file():
+            pending_stacks = json.loads(_pf.read_text(encoding="utf-8")) or []
+            if pending_stacks:
+                missing_tools["待补全的栈（用户点名要、引擎没有）"] = [
+                    {"stack": str(x.get("stack") or ""),
+                     "why": str(x.get("reason") or "")[:200]}
+                    for x in pending_stacks if isinstance(x, dict)]
+                missing_tools["补全办法"] = (
+                    "对每一个待补全的栈开 install_ecosystem 处方：写一个 StackAdapter 子类，"
+                    "声明 entry_path / module_file_fmt / detect 特征；"
+                    "适配器禁止 import os/subprocess/socket/shutil/importlib，"
+                    "禁止 open/exec/eval/write_text（写盘由引擎做）。"
+                    "**需要 3/3 全票**才会真正安装。")
+    except Exception:                                # noqa: BLE001
+        pending_stacks = []
+
     return json.dumps({
         "死局描述": "写作者为修复缺口提交的改动，把以下已通过能力弄红，回归护栏整批回滚。"
                    "同一批能力已被回滚弄红多次，换打法无效 —— 机器已无法自行收敛。",

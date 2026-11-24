@@ -4484,6 +4484,7 @@ def _persist_stack_choice(ws, doc) -> dict:
     """
     import json as _json_io
     import re as _re
+    import time as _time_io
     picked = ""
     for c in (getattr(doc, "choices", None) or []):
         if str(getattr(c, "key", "")) != "stack":
@@ -4524,7 +4525,39 @@ def _persist_stack_choice(ws, doc) -> dict:
         name = _ALIASES[name]
 
     if name not in known:
-        return {"ok": False, "why": f"选了引擎不认识的栈 {name!r}（已知：{', '.join(sorted(known))}）"}
+        # **缺栈 -> 登记待协商请求**（2026-11-24：把 install_ecosystem 真正用起来）。
+        #
+        # 背景：协商机制早就支持 `install_ecosystem` 处方（deadlock.py:551），
+        # 远端能现写一个 StackAdapter 装进生态库。但它的触发条件是"死局"
+        # （反复回滚/振荡），而"缺栈"不表现为卡住 —— 引擎会按默认栈生成，
+        # 判据全绿，从没触发过协商。实测：8 个生态包 installed_at 全是 None，
+        # 审计里零条 install_ecosystem 记录。
+        #
+        # 这里补上真正的触发点：用户点名要的栈引擎没有 -> 登记请求，
+        # 让协商阶段把它变成 install_ecosystem 处方去问远端。
+        # **不拦截**（用户仍可继续用默认栈），只是让引擎知道"这里缺东西"。
+        try:
+            _req_dir = Path(ws) / ".sixcoder"
+            _req_dir.mkdir(parents=True, exist_ok=True)
+            _req = _req_dir / "pending_stacks.json"
+            _items = []
+            if _req.is_file():
+                try:
+                    _items = _json_io.loads(_req.read_text(encoding="utf-8")) or []
+                except Exception:                    # noqa: BLE001
+                    _items = []
+            if name not in [str(x.get("stack") or "") for x in _items if isinstance(x, dict)]:
+                _items.append({"stack": name,
+                               "reason": "澄清时用户点名要这个栈，引擎没有",
+                               "known": sorted(known),
+                               "at": _time_io.strftime("%Y-%m-%d %H:%M:%S")})
+                _req.write_text(_json_io.dumps(_items, ensure_ascii=False, indent=1),
+                                encoding="utf-8")
+        except Exception:                            # noqa: BLE001
+            pass                                     # 登记失败不该挡住澄清流程
+        return {"ok": False, "stack": name, "pending_ecosystem": True,
+                "why": (f"引擎还没有 {name!r} 这个栈（已知：{', '.join(sorted(known))}）。"
+                        f"已登记为待协商请求：下次协商时会让远端尝试补全这个生态包。")}
 
     # 落盘：有适配器的走 write_choice（它会校验）；
     # 没有适配器但 layerplan 支持的（cli/frontend）直接写同一份 stack.json ——
