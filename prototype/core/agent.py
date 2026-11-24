@@ -1224,6 +1224,14 @@ def _apply(ws: Path, node: dict, text: str,
     return {rel: (base, new)}
 
 
+class _SkipGate(Exception):
+    """内部用：这个闸门对当前栈不适用，跳过（不是失败，也不是通过）。
+
+    沿用既有的 try/except 结构来跳过，避免把三处调用改成嵌套 if
+    （那会显著增加这块已经很密的代码的复杂度）。
+    """
+
+
 def _paired_tests(test_files: list[str], node_path: str) -> list[str]:
     """只跑与这个节点配对的测试文件，避免多模块项目里互相污染。
 
@@ -1235,6 +1243,39 @@ def _paired_tests(test_files: list[str], node_path: str) -> list[str]:
     return paired or list(test_files)
 
 
+def _stack_gate_skip(ws: Path, emit: Emitter) -> set[str]:
+    """这个项目不该跑哪些闸门（阶段 3，2026-11-24）。
+
+    以前 _gate_node 是硬编码的闸门序列。其中 API / SQL行 / 安全 三个
+    假设"这是个 HTTP 服务"。CLI 项目跑它们必然假红，用户看到的是
+    "你写错了"，其实是引擎不认识这种项目。
+
+    用 core.judges 的栈识别，把这些栈相关闸门按 applies_to 过滤掉。
+    栈无关的闸门（语法/桩/导入…）照跑。
+
+    **跳过不等于通过**：跳过会 emit 一条 notice 说明原因，
+    且不产生 ok=True 的闸门记录 —— 后者会污染"这份报告证明了什么"。
+    """
+    try:
+        from . import judges as _J
+        stack = _J.project_stack(ws)
+        applicable = {j.key for j in _J.judges_for_project(ws)[1]}
+    except Exception as exc:                          # noqa: BLE001
+        emit("notice", {"message": f"栈识别失败，按全量闸门跑：{exc}"})
+        return set()
+
+    web_only = {"api": "gate_api", "db_rows": "gate_db_rows", "security": "gate_security"}
+    skipped = {fn for key, fn in web_only.items() if key not in applicable}
+
+    if skipped:
+        emit("notice", {
+            "message": (f"栈={stack}：跳过 {len(skipped)} 个 Web 专用闸门"
+                        f"（{", ".join(sorted(skipped))}）"
+                        "—— 对当前项目不适用，跳过不等于通过"),
+        })
+    return skipped
+
+
 def _gate_node(ws: Path, node: dict, changed: dict[str, tuple[str, str]],
                test_files: list[str], attempt: int, emit: Emitter,
                model: str = "") -> tuple[bool, str, list]:
@@ -1242,6 +1283,7 @@ def _gate_node(ws: Path, node: dict, changed: dict[str, tuple[str, str]],
     rels = list(changed.keys())
     results = []
     scoped = _paired_tests(test_files, node["path"])
+    _skip = _stack_gate_skip(ws, emit)
 
     def run(r: gates.GateResult, force_ok: bool | None = None) -> gates.GateResult:
         ok = r.ok if force_ok is None else force_ok
@@ -1286,17 +1328,25 @@ def _gate_node(ws: Path, node: dict, changed: dict[str, tuple[str, str]],
     if not stb.ok:
         static_problems.append(f"[桩] {stb.detail}")
     try:
+        if "gate_api" in _skip:
+            raise _SkipGate("api")
         ar = gates.gate_api(ws, rels)
         run(ar)
         if not ar.ok:
             static_problems.append(f"[API] {ar.detail}")
+    except _SkipGate:
+        pass  # 栈不适用，已在 _stack_gate_skip 里 emit 过原因
     except Exception as exc:                      # noqa: BLE001
         emit("notice", {"message": f"API 闸门跳过：{exc}"})
     try:
+        if "gate_db_rows" in _skip:
+            raise _SkipGate("db_rows")
         dr = gates.gate_db_rows(ws, rels)
         run(dr)
         if not dr.ok:
             static_problems.append(f"[SQL行] {dr.detail}")
+    except _SkipGate:
+        pass
     except Exception as exc:                      # noqa: BLE001
         emit("notice", {"message": f"SQL行闸门跳过：{exc}"})
     try:
@@ -1316,10 +1366,14 @@ def _gate_node(ws: Path, node: dict, changed: dict[str, tuple[str, str]],
     except Exception as exc:                      # noqa: BLE001
         emit("notice", {"message": f"导入闸门跳过：{exc}"})
     try:
+        if "gate_security" in _skip:
+            raise _SkipGate("security")
         se = gates.gate_security(ws, rels)
         run(se)
         if not se.ok:
             static_problems.append(f"[安全] {se.detail}")
+    except _SkipGate:
+        pass
     except Exception as exc:                      # noqa: BLE001
         emit("notice", {"message": f"安全闸门跳过：{exc}"})
     if static_problems:
