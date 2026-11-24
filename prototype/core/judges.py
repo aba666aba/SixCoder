@@ -304,9 +304,9 @@ _with_cli: Optional[JudgeRegistry] = None
 
 
 def full_registry() -> JudgeRegistry:
-    """包含所有判据包（内置 + CLI）的注册表。
+    """包含所有判据包（内置 + CLI + 多语言）的注册表。
 
-    **必须缓存**：每次调用都新建 + register_cli 会重复注册同一个 key
+    **必须缓存**：每次调用都新建 + register_xxx 会重复注册同一个 key
     （实测 2026-11-24：连调两次 judges_for_project 就 ValueError "判据 key 重复"）。
     而且判据表是只读的，缓存没有副作用。
     """
@@ -315,6 +315,8 @@ def full_registry() -> JudgeRegistry:
         reg = default_registry()
         from . import judges_cli as _cli
         _cli.register_cli(reg)
+        from . import judges_lang as _lang
+        _lang.register_lang(reg)
         _with_cli = reg
     return _with_cli
 

@@ -84,7 +84,9 @@ LANGS: dict[str, dict] = {
         "judge": "syntax_run",        # node --check + 可运行
         "install": "装 Node.js 18+",
         "test_cmd": ["npm", "test", "--silent"],
-        "typecheck_cmd": None,
+        # node --check 能做单文件语法检查（2026-11-24 补；
+        # 原来这里是 None，导致 JS 项目没有语法判据可跑）
+        "typecheck_cmd": ["node", "--check"],
         "has_tests": True,
     },
     "typescript": {

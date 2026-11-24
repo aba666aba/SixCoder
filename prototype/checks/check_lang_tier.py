@@ -49,8 +49,15 @@ def main() -> int:
     check("test_command('c') 没配测试 → None", lang.test_command("c") is None)
     check("typecheck_command('typescript') 是 list",
           isinstance(lang.typecheck_command("typescript"), list))
-    check("typecheck_command('javascript') 如实写 None",
-          lang.typecheck_command("javascript") is None)
+    # 2026-11-24 改：原来这条断言要求 JS 的类型检查命令必须是 None，
+    # 但 Node 的 `node --check` 确实能做单文件语法检查，写 None 是低估了能力
+    # （实测：把语法错的 .js 交给 node --check 会退出码 1 并指出行号）。
+    # 断言改成本意：**只接受"如实"的两种形态** —— 要么明确 None，
+    # 要么是一个真正的 argv list（不许编一条跑不通的命令）。
+    _js_tc = lang.typecheck_command("javascript")
+    check("typecheck_command('javascript') 如实：None 或真实 argv list",
+          _js_tc is None or (isinstance(_js_tc, list) and len(_js_tc) > 0
+                             and all(isinstance(x, str) for x in _js_tc)), str(_js_tc))
 
     print("[3] run_tests 成功路径（真跑 pytest）")
     with tempfile.TemporaryDirectory() as td:
