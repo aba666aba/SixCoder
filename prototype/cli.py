@@ -417,12 +417,12 @@ def _night_finish_sweep(repo: str, quiet: bool = False) -> None:
 
 
 def cmd_night(args) -> None:
-    """夜班（公司制）：甲方模式提需求 → 内部做完所有决策 → 早上读交付报告。
+    """夜班（公司制）：造物模式提需求 → 内部做完所有决策 → 早上读交付报告。
 
     与 `run` 的区别：run 是"一个需求 → 一对测试/实现节点"；night 是"反复体检/派工/开发/
     机械验收，直到收敛或预算耗尽"，并写出 DELIVERY.md / TRACE.md。
-    模式决定协作方式（core/policy.py）：甲方模式由远端拍板、本地判红即远端接管写代码；
-    开发者模式必须给 --plan（或 --plan-file），没有方案就抛 needhuman、不替人做架构决策。
+    模式决定协作方式（core/policy.py）：造物模式由远端拍板、本地判红即远端接管写代码；
+    精修模式必须给 --plan（或 --plan-file），没有方案就抛 needhuman、不替人做架构决策。
     """
     _need("agent.run")
     from core import company, policy
@@ -441,7 +441,7 @@ def cmd_night(args) -> None:
 
     pol = policy.current()
     if pol.code_escalation == policy.OFF:
-        print(f"[FAIL] {pol.name}不写文件，不能跑夜班；请切到甲方模式或开发者模式")
+        print(f"[FAIL] {pol.name}不写文件，不能跑夜班；请切到造物模式或精修模式")
         sys.exit(2)
     db.init()
     goal = str(getattr(args, "goal", "") or "").strip()
@@ -472,7 +472,7 @@ def cmd_night(args) -> None:
     if getattr(args, "plan_file", ""):
         plan = Path(args.plan_file).read_text(encoding="utf-8-sig")
     if pol.plan_authority == "human" and not plan.strip() and not args.allow_no_plan:
-        print("[FAIL] 开发者模式需要实现方案：用 --plan / --plan-file 给出"
+        print("[FAIL] 精修模式需要实现方案：用 --plan / --plan-file 给出"
               "（模块划分、函数职责、数据流）。系统不会替你决定架构。")
         sys.exit(2)
     repo = Path(args.repo)
@@ -879,7 +879,7 @@ def cmd_model(args) -> None:
             (d / f"{name}.mmd").write_text(txt, encoding="utf-8")
             print(f"已写 {d / (name + '.mmd')}")
     else:
-        print("\n（只读模式；加 --write 写入 .sixcoder/model.json 与 diagrams/*.mmd）")
+        print("\n（审阅模式；加 --write 写入 .sixcoder/model.json 与 diagrams/*.mmd）")
 
 
 def cmd_contract(args) -> None:
@@ -908,7 +908,7 @@ def cmd_contract(args) -> None:
 
 
 def cmd_questions(args) -> None:
-    """列出待人回答的问题（开发者模式里本地模型主动提的）。"""
+    """列出待人回答的问题（精修模式里本地模型主动提的）。"""
     from core import questions
     ws = Path(args.repo)
     rows = questions.pending(ws)
@@ -1440,10 +1440,10 @@ def build() -> argparse.ArgumentParser:
                          "只在做对照实验时用，平时别关）")
     sp.add_argument("--refresh-contract", action="store_true",
                     help="重新生成全量契约并覆盖锁定文件（**缓存全部失效**，只在需求变了时用）")
-    sp.add_argument("--plan", default="", help="实现方案（开发者模式下是权威，不许系统改架构）")
+    sp.add_argument("--plan", default="", help="实现方案（精修模式下是权威，不许系统改架构）")
     sp.add_argument("--plan-file", default="", help="实现方案文件路径")
     sp.add_argument("--allow-no-plan", action="store_true",
-                    help="开发者模式下没有方案也允许跑（默认不允许：架构决策归人）")
+                    help="精修模式下没有方案也允许跑（默认不允许：架构决策归人）")
     sp.add_argument("--max-rounds", type=int, default=40)
     sp.add_argument("--model", default="")
     sp.add_argument("--scale", default="", choices=["", "S", "M", "L", "XL", "s", "m", "l", "xl"],
@@ -1535,7 +1535,7 @@ def build() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(fn=cmd_inspect_docs)
 
-    sp = sub.add_parser("questions", help="列出待人回答的问题（开发者模式的主动提问）")
+    sp = sub.add_parser("questions", help="列出待人回答的问题（精修模式的主动提问）")
     sp.add_argument("--repo", required=True, help="工作区目录")
     sp.set_defaults(fn=cmd_questions)
 
@@ -1644,4 +1644,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     main()

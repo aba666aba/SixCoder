@@ -1,11 +1,11 @@
 """三档模式的**协作方式**自检（不是权限自检，权限见 check_modes.py）。
 
 用户把两档的上限说清楚了：
-    甲方模式 = 写代码的完全体，上限是远端 API 的推理能力 → 任何决策由远端拍板；
+    造物模式 = 写代码的完全体，上限是远端 API 的推理能力 → 任何决策由远端拍板；
                本地只是便宜工人，一旦被硬判据判红就立刻由远端接管写代码。
-    开发者模式 = 工具，上限是开发者本人的架构能力 → 实现方案由人给；
+    精修模式 = 工具，上限是开发者本人的架构能力 → 实现方案由人给；
                系统不许替人做架构决策（没有方案就抛 needhuman），远端写代码要人批准。
-    只读模式 = 不写文件，连夜班都不能跑。
+    审阅模式 = 不写文件，连夜班都不能跑。
 
 这里把这些差别钉成可执行断言，避免以后为了"跑得动"又悄悄退回"两档一样"。
 
@@ -33,10 +33,10 @@ def main() -> int:
     print("三档模式的协作方式自检")
     orig = permissions.current_mode().id
     try:
-        # ---- 甲方模式：远端是最终裁判，代码默认由远端写
+        # ---- 造物模式：远端是最终裁判，代码默认由远端写
         permissions.set_mode("client")
         pol = policy.current()
-        print("[1] 甲方模式 = 完全体（远端拍板 + 远端写代码）")
+        print("[1] 造物模式 = 完全体（远端拍板 + 远端写代码）")
         check("裁判是远端", pol.arbiter == "remote")
         check("实现方案由系统内部定", pol.plan_authority == "remote")
         check("代码由远端整文件写（旧逐符号路径已废弃）", pol.code_author == "remote")
@@ -47,7 +47,7 @@ def main() -> int:
         check("规格由最强档生成", pol.spec_tier == "strongest")
         check("规格思考全开", pol.spec_thinking == "on")
         check("模块拆分/范围由远端定", pol.scope_authority == "remote")
-        check("规格歧义由远端自己拍板（甲方模式没人在回路里）", pol.ambiguity == "decide")
+        check("规格歧义由远端自己拍板（造物模式没人在回路里）", pol.ambiguity == "decide")
         check("单模块自愈 ≥3 轮（AI 内部改到全绿，人不介入）", pol.heal_attempts >= 3)
         check("失败证据重复就停（不白烧同质调用）", pol.heal_stop_on_repeat is True)
         check("代码思考强度按难度自动路由（单模型内切档）", pol.effort_mode == "auto")
@@ -60,10 +60,10 @@ def main() -> int:
         go3, why3 = policy.should_escalate(pol, n_fail=5, hard_evidence=True, used=9999)
         check("不设上限时不会因为次数被拦", go3, why3)
 
-        # ---- 开发者模式：人是上限，系统不许替他定架构
+        # ---- 精修模式：人是上限，系统不许替他定架构
         permissions.set_mode("developer")
         pol = policy.for_mode("developer")
-        print("[2] 开发者模式 = 工具（人拍板，本地照方案写）")
+        print("[2] 精修模式 = 工具（人拍板，本地照方案写）")
         check("裁判是人", pol.arbiter == "human")
         check("实现方案必须人给", pol.plan_authority == "human")
         check("代码由本地写（远端要批准才用）", not pol.remote_writes_code)
@@ -77,14 +77,16 @@ def main() -> int:
         go5, _ = policy.should_escalate(pol, n_fail=2, hard_evidence=True, used=0)
         check("连续失败 2 次才提请远端（且要批准）", go5)
 
-        # ---- 只读模式：连夜班都不许跑
+        # ---- 审阅模式：连夜班都不许跑
         permissions.set_mode("readonly")
         pol = policy.for_mode("readonly")
-        print("[3] 只读模式 = 不写文件")
+        print("[3] 审阅模式 = 不写文件")
         check("不升级代码", pol.code_escalation == policy.OFF)
         ws = Path(tempfile.mkdtemp())
         res = company.night(ws, "给 calc.py 加 divide", "qwen2.5:7b")
-        check("夜班被直接拒绝且说明原因", not res.ok and "只读" in (res.reason or ""), res.reason)
+        # 只认当前文案（2026-11-23 口径：不留旧接口/旧字眼）。
+        _why = res.reason or ""
+        check("夜班被直接拒绝且说明原因", not res.ok and "审阅模式" in _why, res.reason)
         check("拒绝时不写交付物", not (ws / "DELIVERY.md").exists())
 
         # ---- 方案注入：只在该生效的地方生效
@@ -118,4 +120,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

@@ -1,4 +1,4 @@
-"""开发者模式「运行与调试」自检（2026-11-20）。
+"""精修模式「运行与调试」自检（2026-11-20）。
 
 钉住的能力（都是实测踩过的坑，不许退化）：
   1. 语言自动识别 + 按语言选真实工具链（Python 用 sys.executable，其余用 recon path）；
@@ -159,4 +159,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     sys.exit(main())

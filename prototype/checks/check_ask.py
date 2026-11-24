@@ -1,9 +1,9 @@
-"""开发者模式"主动提问" + 分区块计价 自检（照 DSH 的 ask_user_question / token-meter 思路）。
+"""精修模式"主动提问" + 分区块计价 自检（照 DSH 的 ask_user_question / token-meter 思路）。
 
 钉住四件事：
 1. 提问是工具化的：有 id、有选项、能回答，答案作为 human 证据入账；
 2. 同一个问题**只问一次**，之后复用答案（不重复骚扰人）；
-3. plan-mode：甲方模式自动通过、开发者模式必须人审；
+3. plan-mode：造物模式自动通过、精修模式必须人审；
 4. 分区块计价：能算出"每一块占多少 token、花多少钱、缓存能省多少"，
    且用**官方 tokenizer 精确算**（不是 4 字符/token 的启发式，中文会低估 3 倍）。
 
@@ -55,9 +55,9 @@ def main() -> int:
     # 3) plan-mode：甲方自动通过 / 开发者必须人审
     print("[3] plan-mode 流程")
     c = questions.review_plan(ws, "先写 clean 再写 store", mode="client")
-    check("甲方模式自动通过", c["ok"] and c["approved"] and c["auto"])
+    check("造物模式自动通过", c["ok"] and c["approved"] and c["auto"])
     d = questions.review_plan(ws, "先写 clean 再写 store", mode="developer")
-    check("开发者模式要人答（不自动通过）", d["ok"] is False and d["auto"] is False)
+    check("精修模式要人答（不自动通过）", d["ok"] is False and d["auto"] is False)
     qid = d["qid"]
     questions.answer(ws, qid, "通过")
     d2 = questions.review_plan(ws, "先写 clean 再写 store", mode="developer")
@@ -97,4 +97,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

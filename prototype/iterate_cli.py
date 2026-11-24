@@ -1,4 +1,4 @@
-﻿"""给 CLI 加 iterate 子命令：按工作单迭代，每轮只求"比上一轮更好"。"""
+"""给 CLI 加 iterate 子命令：按工作单迭代，每轮只求"比上一轮更好"。"""
 import ast
 from pathlib import Path
 
@@ -43,4 +43,11 @@ def main_cli(argv=None):
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     main_cli()

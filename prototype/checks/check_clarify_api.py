@@ -116,10 +116,10 @@ def main() -> int:
         ck("夜班模式只有一个需求文本框", "clarify-input" in src)
         ck("待定项渲染成多选", "qitem" in src and "clarify.answers[q.key]" in src)
         ck("主按钮随状态切换（分析/开始夜班）", "clarify.ready" in src and "beginNight" not in src)
-        ck("开发者模式去掉常驻需求框", "dev-hint" in src)
+        ck("精修模式去掉常驻需求框", "dev-hint" in src)
         ck("编辑器里有悬浮对话框", "ed-chat" in src and "ed-chat-input" in src)
         ck("悬浮框有本地/远端开关", "setFillSource" in src and "edChat.source" in src)
-        ck("只读模式只有一个审查按钮", "isReadonlyMode" in src and "runReview" in src)
+        ck("审阅模式只有一个审查按钮", "isReadonlyMode" in src and "runReview" in src)
         ck("旧的「发送」残留块已删", src.count('@click="startTask"') <= 1,
            src.count('@click="startTask"'))
         print(f"  （替身共被调用 {calls['n']} 次）")
@@ -136,4 +136,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     sys.exit(main())

@@ -267,6 +267,13 @@ def main() -> int:
 
 # 未配置项目路径时：这些自检依赖真实产物，明确 SKIP（不是 FAIL）
 if __name__ == "__main__" and _repo_root() is None:
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     print("SKIP：未配置项目路径（--repo / SIXCODER_REPO / _logs/engine.json），本自检需要真实产物仓")
     raise SystemExit(0)
 

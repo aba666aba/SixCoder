@@ -130,8 +130,8 @@ def main() -> int:
     src = inspect.getsource(company)
     check("按依赖/函数/失败算难度并挑档", "_auto_effort" in src and "effort.pick" in src)
     check("路由事件会落到事件流（可解释）", '"effort_route"' in src)
-    check("甲方模式 effort_mode=auto", policy.for_mode("client").effort_mode == "auto")
-    check("开发者模式 effort_mode=ladder（省钱）",
+    check("造物模式 effort_mode=auto", policy.for_mode("client").effort_mode == "auto")
+    check("精修模式 effort_mode=ladder（省钱）",
           policy.for_mode("developer").effort_mode == "ladder")
     ladder_ids = [s.get("profile_id") for s in settings_store.ladder()]
     check("升级只会动 effort，不动模型（阶梯内 profile 唯一）",
@@ -234,4 +234,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

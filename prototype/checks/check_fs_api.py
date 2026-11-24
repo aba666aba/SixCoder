@@ -1,4 +1,4 @@
-"""开发者模式文件 API 自检（服务端能力，2026-11-20）。
+"""精修模式文件 API 自检（服务端能力，2026-11-20）。
 
 钉住四条底线：
   1. **路径牢笼**：界面能改的只能是仓库内的文件（`../` 与绝对路径一律拒）；
@@ -104,4 +104,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

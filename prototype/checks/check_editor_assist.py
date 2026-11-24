@@ -1,4 +1,4 @@
-"""开发者模式「选中即改」自检（2026-11-20）。
+"""精修模式「选中即改」自检（2026-11-20）。
 
 钉住五条：
   1. `/v1/editor/assist` 真挂在 app 上（不是只定义函数）；
@@ -94,7 +94,7 @@ def main() -> int:
 
     print("[4] 结果不写盘（只返回 text）")
     src = (PROTO / "server.py").read_text(encoding="utf-8")
-    seg = src[src.index("def editor_assist("):src.index("# ---------------------------------------------------------------- 开发者模式：运行与调试")]
+    seg = src[src.index("def editor_assist("):src.index("# ---------------------------------------------------------------- 精修模式：运行与调试")]
     ck("assist 段没有 tools.write_file", "write_file" not in seg)
     ck("assist 返回 text 而非 insertion", '"text": r["text"]' in seg)
 
@@ -107,7 +107,7 @@ def main() -> int:
     ck("选中事件接到 refreshSelection", '@select="refreshSelection"' in app
        and '@mouseup="refreshSelection"' in app)
     ck("接受前校验文件没被改过", "ed.text !== assist.baseText" in app)
-    ck("只读模式不许接受", "当前模式只读，不能改文件" in app)
+    ck("审阅模式不许接受", "当前模式只读，不能改文件" in app)
 
     print()
     if FAILS:
@@ -118,4 +118,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     sys.exit(main())

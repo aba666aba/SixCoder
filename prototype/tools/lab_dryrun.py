@@ -1,4 +1,4 @@
-﻿"""干跑校验：不调模型，先确认每份实验契约**能生成判据**。
+"""干跑校验：不调模型，先确认每份实验契约**能生成判据**。
 
 动机很直接：契约若解析不出示例/边界判据，真跑就是白烧钱——夜班会"验收 0/0 通过"
 或整轮判红，而那不是模型的问题，是我的契约写坏了。这一步几秒钟，省掉整批无效实验。
@@ -85,4 +85,11 @@ def _stub_src(c) -> str:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

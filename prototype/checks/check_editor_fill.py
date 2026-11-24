@@ -64,7 +64,7 @@ def main() -> int:
     r1b = srv.editor_fill(srv.EditorFillReq(before="", selected="", instruction="写一个快排", path="a.py"))
     ck("只有指令时不判空（不误拒）", r1b.get("reason") != "光标前没有内容，也没写要求，没什么可生成的", r1b)
 
-    print("[4b] 本地/远端开关（开发者模式自己选）")
+    print("[4b] 本地/远端开关（精修模式自己选）")
     req = srv.EditorFillReq()
     ck("默认 source=local", req.source == "local", req.source)
     ck("可选 remote", srv.EditorFillReq(source="remote").source == "remote")
@@ -94,4 +94,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     sys.exit(main())

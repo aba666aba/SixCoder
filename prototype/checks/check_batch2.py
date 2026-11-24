@@ -132,7 +132,7 @@ def main() -> int:
     comp = (Path(__file__).resolve().parents[1] / "core" / "company.py").read_text(encoding="utf-8")
     check("M+ 一轮只改一个模块", 'if _lv16 in ("M", "L", "XL"):' in comp and "max_modules = 1" in comp)
     check("XL 即时反馈", "instant_health" in comp)
-    check("甲方模式计划门禁", "SIXCODER_CLIENT_PLAN_GATE" in comp and "plan_gate" in comp)
+    check("造物模式计划门禁", "SIXCODER_CLIENT_PLAN_GATE" in comp and "plan_gate" in comp)
     arch = (Path(__file__).resolve().parents[1] / "core" / "arch.py").read_text(encoding="utf-8")
     check("level_gates 带上第二批门禁", "quality as _q" in arch and "extra_gates" in arch)
 
@@ -145,4 +145,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

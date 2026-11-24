@@ -61,7 +61,7 @@ def main() -> int:
     backup = settings_store.models()
     backup_active = "flash"
     try:
-        # 1) 默认阶梯：flash 四档（甲方模式代码只由远端写，本地档默认关）
+        # 1) 默认阶梯：flash 四档（造物模式代码只由远端写，本地档默认关）
         steps = settings_store.ladder()
         want = [("flash", "none"), ("flash", "low"), ("flash", "high"), ("flash", "max")]
         got = [(s["profile_id"], s["effort"]) for s in steps]
@@ -174,4 +174,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

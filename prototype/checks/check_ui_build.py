@@ -6,7 +6,7 @@
 
 检查项：
   1) 已删除的文案不得出现在 dist 里：原型 demo / 判定权分离 / 目标文件（输入框）/ 
-     甲方模式 = 夜班 / 只读（不改任何文件）/ 怎么写需求
+     造物模式 = 夜班 / 只读（不改任何文件）/ 怎么写需求
   2) 必须存在的：规模下拉（S/M/L/XL 四档标签）、远端模型下拉、帮助里的规模说明表、
      「远端仓库地址」、帮助入口
   3) 帮助里必须写明每档"管什么/不管什么"（含"只挡基本错误"那句）
@@ -49,7 +49,7 @@ def main() -> int:
         "原型 demo": "原型 demo",
         "判定权分离": "判定权分离",
         "目标文件输入框占位": "目标文件（可留空）",
-        "甲方模式 = 夜班 标签": "甲方模式 = 夜班",
+        "造物模式 = 夜班 标签": "造物模式 = 夜班",
         "只读（不改任何文件）": "只读（不改任何文件）",
         "怎么写需求 按钮": "怎么写需求",
     }
@@ -107,4 +107,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

@@ -1,4 +1,4 @@
-﻿r"""追溯矩阵自检：TRACE 必须能回答"这条需求凭什么是真的"。
+r"""追溯矩阵自检：TRACE 必须能回答"这条需求凭什么是真的"。
 
 检查点：
   1. 每个契约函数都有行，且需求出处真的来自需求原文（不是"需求未点名"）
@@ -149,4 +149,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

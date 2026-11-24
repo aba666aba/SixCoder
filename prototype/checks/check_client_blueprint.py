@@ -1,14 +1,14 @@
-"""甲方模式必须接上 blueprint 那条线（§三 端到端业务流 / §八 骨架先行）。
+"""造物模式必须接上 blueprint 那条线（§三 端到端业务流 / §八 骨架先行）。
 
 2026-11-10 的由来（真实事故，不是设计想象）：
-甲方模式（`company.night`）长期**绕开 blueprint 这条线**，形成闭环：
+造物模式（`company.night`）长期**绕开 blueprint 这条线**，形成闭环：
   写出来的模块**路由接不上**（契约只验函数、不验路由 → 35/35 全过）
   → 端到端红灯**没人知道**（从不跑能力覆盖，账本停在 16:34）
   → 完成判据**只看模块契约**（齐了就收工）。
 实测 84 项能力只过 13 项。
 
-`core/openhouse.py` 是甲方模式与全自主模式**共用**的一份实现 ——
-复制两份必然漂移，所以这里断言的是"共用"，不是"甲方模式自己写一遍"。
+`core/openhouse.py` 是造物模式与全自主模式**共用**的一份实现 ——
+复制两份必然漂移，所以这里断言的是"共用"，不是"造物模式自己写一遍"。
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def main() -> int:
     for fn in ("def prepare(", "def wire(", "def observe(", "def red_modules("):
         check(f"openhouse 里有 {fn})", fn in src)
 
-    print("[2] 甲方模式真的调用了这些能力（不是只写了模块没人用）")
+    print("[2] 造物模式真的调用了这些能力（不是只写了模块没人用）")
     csrc = (ROOT / "core" / "company.py").read_text(encoding="utf-8")
     check("company 加载 blueprint", "blueprint" in csrc and "_bp_mod.load(ws)" in csrc)
     check("company 跑开工段（骨架树/接口锁定/扩展点）",
@@ -59,7 +59,7 @@ def main() -> int:
     check("_author_round 收下 cap_red/cap_detail",
           "cap_red: set | None = None" in csrc and "cap_detail: dict | None = None" in csrc)
     check("红灯详情喂给远端（evidence）", "_cap_ev" in csrc and "evidence=_cap_ev" in csrc)
-    # 这一条最关键：甲方模式的**主路径是 orders**（workorder.triage 分诊），
+    # 这一条最关键：造物模式的**主路径是 orders**（workorder.triage 分诊），
     # 不是 _author_round。triage 只看模块级判据 → 契约全过 → 无单 → 收工。
     # 所以红灯必须自己变成 orders，否则前面所有观测全是白跑。
     check("端到端红灯被转成工作单（orders）", "cap_orders" in csrc and
@@ -230,9 +230,16 @@ def main() -> int:
     if FAILS:
         print("有失败项：%s" % ", ".join(FAILS))
         return 1
-    print("全部通过（甲方模式接上 blueprint / 接线 / 端到端观测 / 红灯进工作单）")
+    print("全部通过（造物模式接上 blueprint / 接线 / 端到端观测 / 红灯进工作单）")
     return 0
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

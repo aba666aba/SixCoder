@@ -138,7 +138,7 @@ def main() -> int:
           "全自主模式绕过 openhouse 时就白改了")
     from core import openhouse as _oh
     _src2 = _inspect.getsource(_oh.observe)
-    check("openhouse.observe 里也调了（甲方模式那一路）",
+    check("openhouse.observe 里也调了（造物模式那一路）",
           "align_probe_expectations" in _src2, "")
 
     print("[7] json 写成 JSON 字符串的步骤必须归一化（2026-11-19 血泪）")
@@ -251,4 +251,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

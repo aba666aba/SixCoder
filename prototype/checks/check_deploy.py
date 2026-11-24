@@ -4,7 +4,7 @@
   1. 配置脱敏（私钥路径/凭据不回显）
   2. 命令白名单 + 注入攻击全拦截
   3. 权限隔离（readonly 禁用）
-  4. 强制人审 fail-closed（甲方模式也不能自动放行、超时=拒绝）
+  4. 强制人审 fail-closed（造物模式也不能自动放行、超时=拒绝）
   5. 批准后才执行：ssh argv 构造正确（BatchMode/端口/host/user/workdir）
   6. 环境变量脱敏
   7. 路径决策五条（含 authorized_deploy）
@@ -92,7 +92,7 @@ def main() -> int:
         check("readonly 执行被拒", not rr["ok"] and "模式" in rr["why"])
         pm.set_mode("client")
 
-        print("[4] 强制人审 fail-closed（甲方模式也不放行）")
+        print("[4] 强制人审 fail-closed（造物模式也不放行）")
         check("client 模式 auto_approve=True", pm.current_mode().auto_approve is True)
         rr = d.execute("prod", "git pull", approval_timeout=1,
                        consensus_fn=fake_consensus)   # 协商放行，卡在人审这层
@@ -297,4 +297,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

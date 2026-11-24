@@ -1,6 +1,6 @@
 """实测 DeepSeek API 的**能力上限**（不靠文档猜，用本机 Key 真打）。
 
-为什么要这个：甲方模式的上限就是远端能力，而我们的 `core/remote.py` 里写着
+为什么要这个：造物模式的上限就是远端能力，而我们的 `core/remote.py` 里写着
 `max_prompt_chars=14000`、`max_output_tokens=4000` —— 这两个数字是当初为了省钱
 拍出来的，跟 DeepSeek 的真实上限差了十几倍。设计"按能力上限发挥"之前，
 先得知道上限在哪。
@@ -144,4 +144,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

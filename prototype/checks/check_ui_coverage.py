@@ -42,6 +42,11 @@ API_ONLY = {
     "/v1/git/branches": "产品决定不做 Git 界面（用户要求移除编辑器 Git 按钮）；接口留给 CLI/脚本只读查询",
     "/v1/git/diff": "同上：无 diff 视图，接口留给 CLI/脚本",
     "/v1/git/log": "同上：无历史视图，接口留给 CLI/脚本",
+    # 2026-11-23：`/v1/audit` 与 `/v1/docs/stage3` 已在**审阅模式右栏**接上界面（扫描 / 生成文档），
+    # 所以从"仅 API"名单里撤掉——白名单只放"真的没接"的端点，接了还留着会掩盖问题。
+    "/v1/audit/report":
+        "审计报告的人读版（Markdown 文本）：界面右栏已直接用结构化的 /v1/audit 渲染，"
+        "这份留给 CLI 输出与外部工具拉取，不重复接一次",
 }
 
 # —— 该接、但还没接（打 WARN，不计失败）——
@@ -124,4 +129,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

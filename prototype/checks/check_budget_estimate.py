@@ -127,8 +127,8 @@ def main() -> int:
     print("[6] 两种夜班模式都已接线（估算 + 唯一停机线）")
     comp = (ROOT / "core" / "company.py").read_text(encoding="utf-8", errors="replace")
     auto = (ROOT / "core" / "auto.py").read_text(encoding="utf-8", errors="replace")
-    check("甲方模式：蓝图构建后发 night_estimate 事件", "night_estimate" in comp)
-    check("甲方模式：轮循环接系统预算停机", "system_budget_stopped(ws, task_id)" in comp)
+    check("造物模式：蓝图构建后发 night_estimate 事件", "night_estimate" in comp)
+    check("造物模式：轮循环接系统预算停机", "system_budget_stopped(ws, task_id)" in comp)
     check("全自主：片循环接系统预算停机", 'system_budget_stopped(ws, "")' in auto)
     check("全自主：slice_start 事件带系统预算字段", "system_budget_cny" in auto)
     check("server：有 /v1/night/estimate 两步法端点",
@@ -155,4 +155,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     sys.exit(main())

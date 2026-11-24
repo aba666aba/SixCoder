@@ -63,17 +63,17 @@ def main() -> int:
     print("[4] 远端开关：甲方强制开 / 只读强制关 / 开发者可开关")
     permissions.set_mode("client")
     ok_c, why_c = policy.remote_allowed()
-    check("甲方模式强制开启", ok_c is True, why_c)
-    check("甲方模式远端调用自动放行", guards.gate_remote_call(".", 100).get("ok") is True)
+    check("造物模式强制开启", ok_c is True, why_c)
+    check("造物模式远端调用自动放行", guards.gate_remote_call(".", 100).get("ok") is True)
 
     permissions.set_mode("readonly")
-    check("只读模式强制关闭", policy.remote_allowed()[0] is False)
-    check("只读模式远端调用被拒", guards.gate_remote_call(".", 100).get("ok") is False)
+    check("审阅模式强制关闭", policy.remote_allowed()[0] is False)
+    check("审阅模式远端调用被拒", guards.gate_remote_call(".", 100).get("ok") is False)
 
     permissions.set_mode("developer")
     settings_store.update_remote({"dev_remote": False})
     ok_d, why_d = policy.remote_allowed()
-    check("开发者模式默认关闭远端", ok_d is False, why_d)
+    check("精修模式默认关闭远端", ok_d is False, why_d)
     check("关闭时远端调用被拒且说明原因",
           guards.gate_remote_call(".", 100).get("ok") is False
           and "开关已关闭" in guards.gate_remote_call(".", 100).get("reason", ""))
@@ -93,7 +93,7 @@ def main() -> int:
     flash = next((p for p in settings_store.models() if p["id"] == "flash"), None)
     check("flash 覆盖四档思考强度",
           flash and flash["efforts"] == ["none", "low", "high", "max"], str(flash and flash["efforts"]))
-    check("甲方模式阶梯里没有本地档（代码只由远端写）",
+    check("造物模式阶梯里没有本地档（代码只由远端写）",
           all(s["profile_id"] != "local" for s in ladder), str(ladder[:1]))
 
     settings_store.update_remote({"dev_remote": old_dev})
@@ -107,4 +107,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

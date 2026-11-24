@@ -82,6 +82,17 @@ def main() -> int:
                             errors="replace", timeout=180)
         check("--only 只跑指定脚本", rc.returncode == 0 and "check_devdoc.py" in rc.stdout,
               (rc.stdout or "")[:160])
+        # 本项原先用 check_devdoc.py 当探针，于是 check_devdoc 一红就把这里带成假红
+        # （2026-11-23：加了 check_testweight.py 后文档数量暂时落后，本项跟着报
+        # "--only 只跑指定脚本" 失败，看起来像 run_all 的 --only 坏了）。--only
+        # 的语义是"挑哪个脚本"，不该依赖被挑中脚本自身的结论 —— 用 --list 验。
+        rl = subprocess.run([sys.executable, str(ROOT / "checks" / "run_all.py"),
+                             "--only", "check_testweight.py", "--list"],
+                            cwd=str(ROOT), capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=60)
+        check("--only 真的只挑一个脚本（不依赖被挑脚本的结论）",
+              rl.returncode == 0 and "共 1 个自检脚本" in rl.stdout
+              and "check_testweight.py" in rl.stdout, (rl.stdout or "")[:160])
 
     except Exception as exc:                             # noqa: BLE001
         check("自检未抛异常", False, f"{type(exc).__name__}: {exc}")
@@ -101,4 +112,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())

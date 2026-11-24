@@ -1,11 +1,11 @@
-"""甲方模式 v1.1「规格优先 + 自愈 + 委托回传」自检。
+"""造物模式 v1.1「规格优先 + 自愈 + 委托回传」自检。
 
 用户定的目标（2026-11-05）：
-    甲方模式 = **AI 完全从 0 生产代码，人不改代码**。在这个前提下尽力释放远端能力：
+    造物模式 = **AI 完全从 0 生产代码，人不改代码**。在这个前提下尽力释放远端能力：
       1. 规格（接口/数据形状/错误语义/示例）由**最强档 + 思考开**产出
          —— 旧行为是"从最低档起生成再固化"，等于用最弱的算力做最高杠杆的决定；
-      2. 规格有歧义时，甲方模式**自己拍板并把假设写进 purpose**（没人在回路里）；
-         开发者模式**停下来问人**，不许猜；
+      2. 规格有歧义时，造物模式**自己拍板并把假设写进 purpose**（没人在回路里）；
+         精修模式**停下来问人**，不许猜；
       3. 单个模块允许**多轮内部自愈**（人不介入），但新一轮的失败证据与已用过的完全
          相同时立刻停 —— 同一个提示词再问一遍只是白烧钱；
       4. 机械活（样板/校验/日志/适配）允许远端 delegate 给本地模型；委托失败必须
@@ -65,7 +65,7 @@ def unpatch(old) -> None:
 
 
 def main() -> int:
-    print("甲方模式 v1.1（规格优先 / 歧义策略 / 自愈收敛 / 委托回传）自检")
+    print("造物模式 v1.1（规格优先 / 歧义策略 / 自愈收敛 / 委托回传）自检")
 
     # ---------------------------------------------------------------- 1 最强档
     print("[1] 规格走最强档 + 思考开")
@@ -193,9 +193,9 @@ def main() -> int:
     steps_now = settings_store.ladder()
     c_start = company._code_start_tier(policy.for_mode("client"), steps_now)
     d_start = company._code_start_tier(policy.for_mode("developer"), steps_now)
-    check("甲方模式按难度自动路由（不写死最高档）",
+    check("造物模式按难度自动路由（不写死最高档）",
           policy.for_mode("client").effort_mode == "auto" and c_start == 0, f"start={c_start}")
-    check("开发者模式从最低强度起（省钱）",
+    check("精修模式从最低强度起（省钱）",
           policy.for_mode("developer").effort_mode == "ladder" and d_start == 0, f"start={d_start}")
     check("逐模块难度路由存在且会把档位写进事件",
           "def _auto_effort" in csrc and '"effort_route"' in csrc)
@@ -210,8 +210,8 @@ def main() -> int:
     finally:
         permissions.set_mode("developer")
     check("describe() 说清规格走最强档", "规格由最强档" in desc_c, desc_c)
-    check("甲方模式自愈轮数 ≥ 3", perms_client.heal_attempts >= 3, str(perms_client.heal_attempts))
-    check("开发者模式仍是『歧义问人 + 人定范围』",
+    check("造物模式自愈轮数 ≥ 3", perms_client.heal_attempts >= 3, str(perms_client.heal_attempts))
+    check("精修模式仍是『歧义问人 + 人定范围』",
           policy.for_mode("developer").ambiguity == "ask"
           and policy.for_mode("developer").scope_authority == "human")
 
@@ -244,4 +244,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
+        from core.console import encode_stdout
+        encode_stdout()
+    except Exception:                          # noqa: BLE001 —— 编码修复失败不许成为新的失败点
+        pass
     raise SystemExit(main())
