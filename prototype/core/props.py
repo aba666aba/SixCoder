@@ -412,7 +412,15 @@ for c in checks:
                     ok, detail = False, f"{c['desc']}: 输入 {x} 往返得到 {back}"
                     break
         else:
-            ok, detail = True, ""
+            # 未知判据类型 = **失败**，不是通过（2026-11-24 修）。
+            #
+            # 原来是 ok=True：新加一种判据时，如果忘了在这里补分支，
+            # 那条判据会**永远绿**——看起来"通过"，其实根本没检查。
+            # 这是"报告不说谎"这个核心承诺的漏洞：
+            # 一个静默通过的判据比一条失败的判据危险得多，
+            # 因为它把"没验证"伪装成了"验证通过"。
+            ok, detail = False, ("%s: 未知判据类型 %r（加新 kind 必须同时在这里补 RUNNER 分支）"
+                                 % (c.get("desc"), kind))
     except Exception as exc:
         ok, detail = False, f"{c['desc']}: 检查本身出错 {type(exc).__name__}: {exc}"
     if ok:
