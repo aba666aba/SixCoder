@@ -1386,6 +1386,37 @@ def _gate_node(ws: Path, node: dict, changed: dict[str, tuple[str, str]],
     if not r.ok:
         return False, f"【Q9 反逃避】{r.detail}", results
 
+    # ---- 按技术栈跑语言判据（2026-11-24 接入）----
+    # 放在反逃避之后：前面那些闸门查的是"改动本身有没有作弊/桩/缺符号"，
+    # 这一步查的是"这个语言的代码到底能不能过" —— 它要跑编译器/测试，最慢。
+    # 不进行硬中断：语言判据可能因工程结构特殊而无法运行，
+    # 判据自己会返回 ok=False + 原因，这里让它走统一的 run() 记录与回传。
+    try:
+        from . import judges as _J
+        _ctx = _J.JudgeContext(
+            ws=ws,
+            paths=tuple(rels),
+            changed=changed,
+            contract=node.get("contract") or "",
+            node_kind=node.get("kind") or "",
+            extras={"timeout": 180, "test_timeout": 300},
+        )
+        _reg = _J.full_registry()
+        _tc = None
+        for _j in ("lang.typecheck", "lang.tests"):
+            _judge = _reg.get(_j)
+            if _judge is None:
+                continue
+            _lr = _judge.check(_ctx)
+            run(_lr)
+            if _lr.gate == "lang.typecheck":
+                _tc = _lr
+        # 只有 typecheck 失败才阻塞（测试失败由后面的 gate_tests 统一处理）
+        if _tc is not None and not _tc.ok:
+            return False, f"【语言判据·类型/语法】{_tc.detail}", results
+    except Exception as exc:                      # noqa: BLE001
+        emit("notice", {"message": f"语言判据跳过：{type(exc).__name__}: {exc}"})
+
     # 断言有效性（只看与本节点配对的测试文件）
     if scoped:
         r = gates.gate_assertions(ws, scoped)

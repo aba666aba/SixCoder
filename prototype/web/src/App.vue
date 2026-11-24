@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 /* ---------------- 状态 ---------------- */
 const health = ref(null)
@@ -1323,6 +1323,42 @@ async function toggleDir(node) {
   treeExpanded.value = { ...treeExpanded.value, [key]: true }
   if (!treeNodes.value[key]) await loadTree(key)
 }
+
+/* ── 递归文件树节点（2026-11-24）──────────────────────────────
+   为什么改成组件：原来的模板手写了「根层 + 一层子目录」两层 v-for，
+   第三层目录虽然显示得出来，但展开后**没有对应的渲染分支**，
+   于是嵌套文件夹怎么看都见不到里面的文件。
+
+   递归组件的做法：每个节点自己渲染一行 + （若是展开的目录）渲染自己的子节点。
+   深度用 depth 传入控制缩进，任意层数都能展开，不用再手写。 */
+const TreeNode = defineComponent({
+  name: 'TreeNode',
+  props: {
+    node: { type: Object, required: true },
+    depth: { type: Number, default: 0 },
+  },
+  setup(props) {
+    // 递归组件需要显式引用自己（SFC 里按名字解析，这里手动给）
+    return () => {
+      const n = props.node
+      const indent = 2 + props.depth * 14
+      const expanded = !!treeExpanded.value[n.path]
+      const row = h('div', {
+        class: ['tree-row', { dir: n.is_dir, 'is-editing': isEditing(n) }],
+        onClick: () => (n.is_dir ? toggleDir(n) : openFile(n)),
+      }, [
+        h('span', { class: 'tree-caret' }, n.is_dir ? (expanded ? '▾' : '▸') : ''),
+        h('span', { class: 'tree-icon' }, n.is_dir ? '📁' : '📄'),
+        h('span', { class: 'tree-name' }, n.name),
+        !n.is_dir ? h('span', { class: 'dim', style: 'font-size:9.5px' }, String(n.size ?? '')) : null,
+      ])
+      const kids = (n.is_dir && expanded)
+        ? treeChildrenOf(n.path).map((c) => h(TreeNode, { node: c, depth: props.depth + 1, key: c.path }))
+        : []
+      return h('div', { class: 'tree-node', style: { paddingLeft: indent + 'px' } }, [row, ...kids])
+    }
+  },
+})
 
 /* ---------------- 内置编辑器（2026-11-20 用户口径：别再来回切外部编辑器） ----------------
    以前点文件树是 `shell.openPath` → 交给系统默认编辑器，改一行代码要切出去再切回来，
@@ -3945,26 +3981,9 @@ onUnmounted(() => {
             <div v-else-if="treeLoading && !treeNodes['']" class="empty">正在读取…</div>
             <div v-else-if="!treeChildrenOf('').length" class="empty">（空目录）</div>
             <template v-else>
-              <div v-for="n in treeChildrenOf('')" :key="n.path" class="tree-node" :style="{ paddingLeft: '2px' }">
-                <div class="tree-row" :class="{ dir: n.is_dir, 'is-editing': isEditing(n) }"
-                     @click="n.is_dir ? toggleDir(n) : openFile(n)">
-                  <span class="tree-caret">{{ n.is_dir ? (treeExpanded[n.path] ? '▾' : '▸') : '' }}</span>
-                  <span class="tree-icon">{{ n.is_dir ? '📁' : '📄' }}</span>
-                  <span class="tree-name">{{ n.name }}</span>
-                  <span v-if="!n.is_dir" class="dim" style="font-size:9.5px">{{ n.size }}</span>
-                </div>
-                <template v-if="n.is_dir && treeExpanded[n.path]">
-                  <div v-for="c in treeChildrenOf(n.path)" :key="c.path" class="tree-node" :style="{ paddingLeft: '14px' }">
-                    <div class="tree-row" :class="{ dir: c.is_dir, 'is-editing': isEditing(c) }"
-                         @click="c.is_dir ? toggleDir(c) : openFile(c)">
-                      <span class="tree-caret">{{ c.is_dir ? (treeExpanded[c.path] ? '▾' : '▸') : '' }}</span>
-                      <span class="tree-icon">{{ c.is_dir ? '📁' : '📄' }}</span>
-                      <span class="tree-name">{{ c.name }}</span>
-                      <span v-if="!c.is_dir" class="dim" style="font-size:9.5px">{{ c.size }}</span>
-                    </div>
-                  </div>
-                </template>
-              </div>
+              <!-- 递归渲染（2026-11-24 修）：原来手写两层，第三层目录点了不长子项。
+                   现在用递归组件 TreeNode，任意深度都能展开。 -->
+              <TreeNode v-for="n in treeChildrenOf('')" :key="n.path" :node="n" :depth="0" />
             </template>
           </div>
           <div class="dim" style="font-size:10px;margin-top:5px">
