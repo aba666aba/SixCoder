@@ -46,6 +46,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS = ROOT / "prototype" / "checks"
 
+# 自检脚本**不随仓库发布**（2026-11-24 用户口径：保留本地、不上传远端）。
+# 克隆仓库但没有 checks/ 的人，整套自检测试应当 **skip 而不是 fail** ——
+# skip 不等于 pass，但这里确实没有可跑的东西，报红只会误导。
+pytestmark = pytest.mark.skipif(
+    not CHECKS.is_dir(),
+    reason="prototype/checks/ 不在仓库里（自检仅本地保留）；"
+           "需要时放到 prototype/checks/ 再跑")
+
 #: 需要外部条件才能跑的自检
 NEEDS_BACKEND = "check_remote_http.py"
 

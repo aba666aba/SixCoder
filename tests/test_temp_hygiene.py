@@ -89,7 +89,7 @@ def test_gc_engine_tmp_never_touches_hsperfdata():
     """JVM 的 hsperfdata_* 是活文件，绝不能碰。"""
     root = Path(tempfile.mkdtemp(prefix="t_gc3-"))
     try:
-        h = root / "hsperfdata_Lenovo"
+        h = root / "hsperfdata_TestUser"
         h.mkdir()
         import os
         past = time.time() - 200 * 3600

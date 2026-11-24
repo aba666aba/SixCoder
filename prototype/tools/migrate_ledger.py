@@ -6,7 +6,7 @@
   · 之后每笔远端调用自动累加（`remote.complete` → `project_ledger.add`）。
 
 跑法（引擎目录下）：
-    python tools\\migrate_ledger.py --repo F:\\WorkSpace\\biyeshejishuangxuan
+    python tools\\migrate_ledger.py --repo F:\\WorkSpace\\<仓库>
     python tools\\migrate_ledger.py --repo ... --dry-run     # 只看不做
 
 幂等：重复跑不会把账改大改小（`seed` 只升不降，`ALTER` 先查 pragma）。

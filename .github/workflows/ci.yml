@@ -81,13 +81,11 @@ jobs:
       # 自检套件是**信息性**的：其中一部分判据依赖本机能力（编译器 / 本地模型 / 构建产物），
       # runner 上与开发机不完全一致，红了不等于产物有问题（详见 README「安装与首次运行」）。
       # 合并门槛放在 guards（密钥 / 索引 / 链接）与 web（前端能否构建）两格上。
-      - name: 自检套件（72 项；信息性，不阻断合并）
-        continue-on-error: true
-        working-directory: prototype
-        env:
-          PYTHONIOENCODING: utf-8
-          PYTHONUTF8: "1"
-        run: python checks/run_all.py
+      # 自检套件（prototype/checks/，231 项）**不随仓库发布**：
+      # 2026-11-24 用户口径「自检保留在本地、不上传远端」。
+      # 运行时完全不依赖它们（core/ 里提到 checks 的地方全是注释），
+      # 需要时本地跑：cd prototype && python checks/run_all.py
+
 
       # 独立验收（hq_verify）需要一个真实工作区；工作区是生成产物、不入库，
       # 因此这一步改到"README 里写的用法"上（跑生成出来的项目时手动执行），
@@ -166,8 +164,29 @@ jobs:
           bad=$(git ls-files | grep -E 'prototype/data/(settings\.json|proto\.db|api_index\.db)|llm-config\.yml|node_modules/|__pycache__/|\.sixcoder/' || true)
           if [ -n "$bad" ]; then echo "$bad"; exit 1; fi
           echo "索引干净"
+      # 文档链接检查原在 prototype/checks/check_links.py（自检不上传）。
+      # 这里换成不依赖 checks 目录的等价检查：扫描 md 里的相对链接目标是否存在。
       - name: 文档链接
-        working-directory: prototype
-        env:
-          PYTHONIOENCODING: utf-8
-        run: python checks/check_links.py
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          from pathlib import Path
+          bad = []
+          for md in Path('.').rglob('*.md'):
+              if any(p in md.parts for p in ('.git', 'node_modules', 'dist-installer')):
+                  continue
+              try:
+                  text = md.read_text(encoding='utf-8', errors='replace')
+              except OSError:
+                  continue
+              for m in re.finditer(r'\\[[^\\]]*\\]\\(([^)#]+)\\)', text):
+                  target = m.group(1).strip()
+                  if target.startswith(('http://', 'https://', 'mailto:', '#')):
+                      continue
+                  if not (md.parent / target).exists():
+                      bad.append(f'{md}: {target}')
+          if bad:
+              print('\\n'.join(bad[:20])); sys.exit(1)
+          print('文档链接 OK')
+          PY
+

@@ -161,3 +161,11 @@ projects/*
 
 # 一次性诊断脚本（不入库）
 /.tmp_probe/
+
+# 自检脚本（2026-11-24 用户口径：本地全部保留、不上传远端）
+#
+# 229 个 check_*.py + run_all.py 是开发期门禁，运行时**完全不依赖**
+# （core/ 里提到它们的地方全是注释，无一处 import）。
+# 安装包本来就不含（packaging 的 filter 有 !checks/**），上传了用户也用不着。
+# 本地照常跑：cd prototype && python checks/run_all.py
+/prototype/checks/

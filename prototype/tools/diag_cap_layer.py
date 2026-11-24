@@ -52,8 +52,8 @@ def classify(detail: str) -> str:
 
 
 def main() -> int:
-    ws = pathlib.Path(sys.argv[1] if len(sys.argv) > 1
-                      else r"F:\WorkSpace\biyeshejishuangxuan")
+    # 不传参就用当前目录（原硬编码某个真实项目路径，泄露且换机器不可用）
+    ws = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else ".")
     bp = bp_mod.load(ws)
     done = bp.done()
     pend = [c for c in bp.caps if str(getattr(c, "status", "")) != "done"]

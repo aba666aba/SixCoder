@@ -9,7 +9,7 @@
 用法：
     D:\\Python\\python.exe tools\\ds_balance.py          # 一行摘要
     D:\\Python\\python.exe tools\\ds_balance.py --json   # 完整字段
-    D:\\Python\\python.exe tools\\ds_balance.py --reconcile F:\\WorkSpace\\biyeshejishuangxuan
+    D:\\Python\\python.exe tools\\ds_balance.py --reconcile F:\\WorkSpace\\<仓库>
 
 官方接口：GET https://api.deepseek.com/user/balance
     Authorization: Bearer <key>
