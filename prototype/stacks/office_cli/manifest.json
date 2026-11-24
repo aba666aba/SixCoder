@@ -1,0 +1,21 @@
+{
+ "name": "office_cli",
+ "version": "1",
+ "kind": "stack",
+ "description": "Office 文档处理工具（xlsx/docx/pptx）：识别 openpyxl/python-docx 依赖，用 cli 探针真跑并读回产物断言内容",
+ "provides": [
+  "stack:office_cli",
+  "probe:cli"
+ ],
+ "needs": [],
+ "adapter_class": "OfficeCliAdapter",
+ "detect_markers": [
+  "office_main.py"
+ ],
+ "verify": [
+  "python",
+  "-c",
+  "import openpyxl; print('office ok')"
+ ],
+ "notes": "marker 用 office_main.py。判据关键是读回产物：xlsx 用 openpyxl 打开断言单元格，docx 用 python-docx 断言段落。只看文件存在等于没验。"
+}
