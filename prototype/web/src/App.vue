@@ -1236,6 +1236,59 @@ const treeExpanded = ref({})        // { 相对目录路径: true }
 const treeLoading = ref(false)
 const treeError = ref('')
 
+/* ---------------- 左栏宽度可拖（2026-11-24） ----------------
+   为什么加：文件树是左栏主角，但宽度原来写死 400px。
+   深层嵌套时缩进把可见宽度吃完，用户只能忍着。
+   与其改交互模型（面包屑导航），不如先让用户自己把栏拉宽 —— 改动小、风险低。
+
+   实现要点：
+   · 宽度写进 CSS 变量 --left-w，存 localStorage，刷新后保持
+   · 拖动时给 body 加 .resizing 禁止选中文字（否则会一路刷蓝）
+   · 界限 240 ~ 900：太窄放不下内容，太宽中栏就没了
+   · 用 pointer 事件而不是 mouse 事件 —— 触摸板/触屏也能拖 */
+const LEFT_MIN = 240
+const LEFT_MAX = 900
+const leftWidth = ref(Number(localStorage.getItem('sixcoder.leftWidth')) || 400)
+const resizing = ref(false)
+
+function applyLeftWidth() {
+  const w = Math.max(LEFT_MIN, Math.min(LEFT_MAX, leftWidth.value || 400))
+  leftWidth.value = w
+  document.documentElement.style.setProperty('--left-w', w + 'px')
+}
+
+function onResizeStart(e) {
+  e.preventDefault()
+  resizing.value = true
+  document.body.classList.add('resizing')
+  const startX = e.clientX
+  const startW = leftWidth.value
+
+  function onMove(ev) {
+    leftWidth.value = Math.max(LEFT_MIN, Math.min(LEFT_MAX, startW + (ev.clientX - startX)))
+    applyLeftWidth()
+  }
+  function onUp() {
+    resizing.value = false
+    document.body.classList.remove('resizing')
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onUp)
+    try { localStorage.setItem('sixcoder.leftWidth', String(leftWidth.value)) } catch { /* 隐私模式可能禁用存储 */ }
+  }
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+}
+
+/** 双击把手：回到默认宽度（拖歪了不用慢慢拖回来） */
+function resetLeftWidth() {
+  leftWidth.value = 400
+  applyLeftWidth()
+  try { localStorage.setItem('sixcoder.leftWidth', '400') } catch { /* 同上 */ }
+}
+
+// 双击容器上应用一次（内存里已有的宽度在首次渲染前就该生效）
+applyLeftWidth()
+
 /* 全仓关键词搜索（/v1/fs/search）：编辑器该有的 Ctrl+Shift+F。
    后端 docstring 写的就是"编辑器用：返回命中文件+行号+整行文本"，
    但此前界面只能靠自然语言导航找符号，搜不了关键词——这是第 7 次
@@ -4035,6 +4088,13 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
+
+      <!-- 左栏拖动把手（2026-11-24）：双击回默认宽度 -->
+      <div v-show="!leftCollapsed" class="col-resizer" :class="{ dragging: resizing }"
+           :title="'拖动调整左栏宽度（当前 ' + leftWidth + 'px，双击复位）'"
+           :style="{ left: 'calc(' + leftWidth + 'px - 4px)' }"
+           @pointerdown="onResizeStart"
+           @dblclick="resetLeftWidth"></div>
 
       <!-- ============ 中栏 ============ -->
       <div class="col col-mid">
