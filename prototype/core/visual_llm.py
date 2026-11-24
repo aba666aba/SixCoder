@@ -69,11 +69,36 @@ def _b64_png(path: Path, max_side: int = MAX_SIDE) -> Optional[str]:
     return "data:image/png;base64," + b64
 
 
-def extract_frames(video: Path, out_dir: Path, want: int = 3) -> list[dict]:
-    """按**画面变化**抽帧（不是固定间隔）。
+def extract_frames(video: Path, out_dir: Path, want: int = 3,
+                   *, sample_hz: float = 4.0, max_candidates: int = 2400,
+                   cleanup: bool = True) -> list[dict]:
+    """按**画面变化**抽帧。
 
-    返回 [{"path": str, "timeSec": float, "changeScore": float}]。
-    cv2 不可用或视频读不了 -> 返回空（调用方据此跳过）。
+    ## 采样率（2026-11-24 修：0.5s 太粗）
+
+    原来固定"每 0.5 秒采一格" —— 30fps 下每 15 帧才看一次。
+    界面在 0.3 秒内完成一次切换（弹窗弹出、路由跳转）就会整段被跳过。
+
+    现在默认 **4 次/秒**（sample_hz=4.0，即每 0.25 秒一格），
+    快速变化也接得住。代价是候选帧变多，但候选只存**灰度小图 + 分数**（见下）。
+
+    需要更细就调 sample_hz（8~10 适合动画密集型界面）；
+    视频很长时用 max_candidates 兜底，避免扫描过久。
+
+    ## 内存（2026-11-24 修：会爆）
+
+    原来 cands 里存的是**完整 numpy 帧**：
+        320x240x3 = 230KB/帧，2400 帧 = 552 MB 常驻 -> 直接 OOM。
+    现在候选只存 (帧号, 时间, 差异分)，**帧本身不保留**；
+    等选出前 N 个之后，再 seek 回去读那几帧。内存占用与视频长度无关。
+
+    ## 临时文件（2026-11-24 修：不删会爆炸）
+
+    cleanup=True（默认）：返回的是**已编码的 data URL**，写出的 PNG 立刻删掉，
+    磁盘上不留东西。调用方拿到就能直接发给模型。
+    cleanup=False：保留 PNG 并返回路径（调试/人看现场时用，用完自己清）。
+
+    返回 [{"timeSec", "changeScore", "path"?, "data_url"?}]。
     """
     try:
         import cv2  # noqa: PLC0415
@@ -85,7 +110,10 @@ def extract_frames(video: Path, out_dir: Path, want: int = 3) -> list[dict]:
     if not cap.isOpened():
         return []
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0) or 30.0
-    cands: list[tuple] = []
+    step = max(1, int(round(fps / max(0.5, sample_hz))))
+
+    # 第一遍：只记分数，**不保留帧**（内存与视频长度无关）
+    cands: list[tuple] = []          # (帧号, 时间, 差异分)
     prev = None
     i = 0
     try:
@@ -93,33 +121,94 @@ def extract_frames(video: Path, out_dir: Path, want: int = 3) -> list[dict]:
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
-            # 每 0.5 秒采一格候选
-            if i % max(1, int(fps / 2)) == 0:
-                gray = cv2.cvtColor(cv2.resize(frame, (64, 36)), cv2.COLOR_BGR2GRAY)
+            if i % step == 0:
+                small = cv2.cvtColor(cv2.resize(frame, (64, 36)),
+                                     cv2.COLOR_BGR2GRAY)
                 diff = 0.0 if prev is None else float(
-                    np.abs(gray.astype(np.int16) - prev.astype(np.int16)).mean())
-                cands.append((i, i / fps, diff, frame))
-                prev = gray
+                    np.abs(small.astype(np.int16) - prev.astype(np.int16)).mean())
+                cands.append((i, i / fps, diff))
+                prev = small
+                del small
             i += 1
-            if len(cands) > 600:                         # 上限，防止超长视频吃内存
+            if len(cands) >= max_candidates:
                 break
     finally:
         cap.release()
     if not cands:
         return []
-    # 按变化量排序取前 want 个，再按时间排回去
-    top = sorted(cands, key=lambda x: -x[2])[:max(1, want)]
-    top.sort(key=lambda x: x[0])
+
+    # 选出要看的帧 —— **不是简单取变化最大的 N 个**。
+    #
+    # 为什么（2026-11-24 实测暴露）：只按 diff 排序取前 N，
+    # 快速变化时前 N 个全挤在开头几秒（实测 6 秒视频，
+    # hz=10 选出的 3 帧全在 0.7~1.5s），**后半段完全没被看过**。
+    #
+    # 改成**分段取样**：把时间轴切成 want 段，每段内取变化最大的一帧。
+    # 这样既覆盖全程，又保证每段抓到的是该段最"动"的时刻。
+    top = []
+    if cands:
+        n = max(1, want)
+        total = cands[-1][0] + 1
+        seg = max(1, total // n)
+        for k in range(n):
+            lo, hi = k * seg, (k + 1) * seg if k < n - 1 else total
+            bucket = [c for c in cands if lo <= c[0] < hi]
+            if bucket:
+                top.append(max(bucket, key=lambda x: x[2]))
+        # 段内全是 0 变化时 bucket 仍会出一帧（静止段也要有代表帧）
+
+    # 第二遍：seek 回去只读那几帧
     out = []
-    for idx, (fi, t, diff, frame) in enumerate(top, 1):
-        p = out_dir / ("frame_%02d.png" % idx)
-        try:
-            cv2.imwrite(str(p), frame)
-        except Exception:                                # noqa: BLE001
-            continue
-        out.append({"path": str(p), "timeSec": round(t, 1),
-                    "changeScore": round(diff, 1)})
+    cap2 = cv2.VideoCapture(str(video))
+    try:
+        for idx, (fi, t, diff) in enumerate(top, 1):
+            cap2.set(cv2.CAP_PROP_POS_FRAMES, fi)
+            ok, frame = cap2.read()
+            if not ok or frame is None:
+                continue
+            p = out_dir / ("frame_%02d.png" % idx)
+            try:
+                cv2.imwrite(str(p), frame)
+            except Exception:                            # noqa: BLE001
+                continue
+            item: dict = {"timeSec": round(t, 1), "changeScore": round(diff, 1)}
+            if cleanup:
+                url = _b64_png(p)
+                try:
+                    p.unlink()                           # 立刻删，磁盘不留东西
+                except OSError:
+                    pass
+                if url:
+                    item["data_url"] = url
+            else:
+                item["path"] = str(p)
+            out.append(item)
+    finally:
+        cap2.release()
     return out
+
+
+def cleanup_dir(path) -> int:
+    """删掉一个目录里的 frame_*.png，返回删除个数。
+
+    给 cleanup=False 的调用方兜底用：调试完调一下，别让临时文件堆着。
+    **只删本模块自己生成的文件名**（frame_NN.png），不碰别的。
+    """
+    d = Path(path)
+    if not d.is_dir():
+        return 0
+    n = 0
+    for f in d.glob("frame_*.png"):
+        try:
+            f.unlink()
+            n += 1
+        except OSError:
+            pass
+    try:
+        d.rmdir()                                        # 空了就删目录
+    except OSError:
+        pass                                             # 还有别的文件就留着
+    return n
 
 
 _PROMPT = """你是 UI 检查员。下面是一组界面截图（可能是同一页面的不同状态，也可能来自录屏）。
