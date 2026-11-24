@@ -40,7 +40,18 @@ WEB = ROOT / "prototype" / "web"
 OUT = ROOT / "dist-installer"
 PY_VERSION = "3.12.10"
 # 打包机在国内：默认走清华镜像，环境变量可覆盖（CI 用官方源）
-INDEX_URL = os.environ.get("SIXCODER_PIP_INDEX", "https://pypi.tuna.tsinghua.edu.cn/simple")
+# pip 源：默认走清华镜像（国内开发机快），CI 上走官方 PyPI。
+#
+# 为什么（2026-11-24 GitHub Actions 首次构建失败 75 秒定位）：
+#   GitHub runner 在国外，连清华源要么绕远路很慢、要么干脆连不上；
+#   而 CI 自己的 pip install 一直是直连 pypi.org，从来没出过问题。
+#   所以按环境自动切：有 CI 标志就用官方源，本地保持镜像。
+#
+# 想强制指定：设 SIXCODER_PIP_INDEX=<任意源>
+INDEX_URL = os.environ.get("SIXCODER_PIP_INDEX") or (
+    "https://pypi.org/simple" if os.environ.get("CI") else
+    "https://pypi.tuna.tsinghua.edu.cn/simple"
+)
 
 
 def step(n: str, msg: str) -> None:
@@ -584,6 +595,10 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     print(f"SixCoder 打包（版本 {json.loads((SHELL / 'package.json').read_text(encoding='utf-8'))['version']}）")
+    # 打一份环境摘要：CI 失败时这是唯一能看到的上下文（Actions 日志要求认证）
+    print(f"  平台: {sys.platform}  Python: {sys.version.split()[0]}", flush=True)
+    print(f"  pip 源: {INDEX_URL}", flush=True)
+    print(f"  CI: {os.environ.get('CI', '(未设置)')}", flush=True)
     if args.skip_ui:
         if not (WEB / "dist" / "index.html").is_file():
             fail("dist 不存在，不能 --skip-ui")

@@ -64,9 +64,24 @@ jobs:
           PYTHONIOENCODING: utf-8
           PYTHONUTF8: "1"
         run: |
-          # build_installer.py 会自己下载便携 Python、装依赖、跑 electron-builder
-          python packaging/build_installer.py
-          if ($LASTEXITCODE -ne 0) { throw "构建失败，退出码 $LASTEXITCODE" }
+          # 构建输出同时落盘：Actions 日志接口要求认证，未登录的协作者读不到，
+          # 失败时靠 artifact 把日志带出来（见下一步）。
+          python packaging/build_installer.py 2>&1 | Tee-Object -FilePath build.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Write-Output "::error::构建失败，退出码 $code"
+            Get-Content build.log -Tail 60
+            throw "构建失败"
+          }
+
+      - name: 上传构建日志（失败时也传，便于排查）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: 找出产物
         id: find
