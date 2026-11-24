@@ -50,13 +50,14 @@ prototype/
 │   ├── go_service/        同上（go.mod + main.go）
 │   ├── microservice/      同上（celery_app.py + app/ 分层）
 │   ├── node_express/      同上（server.js + routes/）
+│   ├── office_cli/        同上（office_main.py + commands/）★ 2026-11-24 新增
 │   ├── py_lib/            同上（lib/__init__.py 懒加载导出）
 │   └── spring_boot/       同上（pom.xml + Application.java）
 ├── checks/          232 个自检脚本（check_*.py）
 ├── tools/           辅助工具（gate_snapshot.py 等）
 └── archive/         归档的旧代码（.removed_* 移进来）
 
-tests/               92 个 pytest 用例
+tests/               129 个 pytest 用例（21 个文件）
 web/                 Vue 3 前端
 docs/                文档
 ```
@@ -75,8 +76,8 @@ docs/                文档
 
 | 注册表 | 文件 | 管什么 | 当前内容 |
 |---|---|---|---|
-| `stack._ADAPTERS` | `core/stack.py` | 栈适配器（识别 + 探针约定） | 10 个（含 8 个生态包） |
-| `layerplan` | `core/layerplan.py` | 生成骨架的分层与落点 | 5 个 |
+| `stack._ADAPTERS` | `core/stack.py` | 栈适配器（识别 + 探针约定） | **11 个**（含 9 个生态包） |
+| `layerplan` | `core/layerplan.py` | 生成骨架的分层与落点 | **11 个** |
 | `judges` | `core/judges.py` | 验收判据按栈分发 | 26 条判据 |
 
 ### 2.1 当前注册情况
@@ -91,6 +92,7 @@ docs/                文档
 | `go_service` | Y | **Y**（1 层） | 19 / 0 | **Y** | cli |
 | `microservice` | Y | **Y**（1 层） | 19 / 0 | **Y** | sql |
 | `node_express` | Y | **Y**（1 层） | 19 / 0 | **Y** | cli |
+| `office_cli` | Y | **Y**（1 层） | 19 / 0 | **Y** | cli |
 | `py_lib` | Y | **Y**（1 层） | 19 / 0 | **Y** | py_call |
 | `spring_boot` | Y | **Y**（1 层） | 19 / 0 | **Y** | cli |
 
@@ -168,7 +170,7 @@ is_django = ...; is_frontend = ...
 |---|---|---|
 | `fastapi` | models → services → api | models 固定 `app/models.py`+`app/schemas.py`；services/api 扫目录 |
 | `django` | models(空) → services → (空) | models 跳过（防冲掉已有迁移），业务层写 `apps/**/*.py` |
-| `cli_tool` / `electron` / `frontend_spa` | modules（单层） | 生态包通用计划，见下 |
+| `cli_tool` / `electron` / `frontend_spa` / `office_cli` / `go_service` / `microservice` / `node_express` / `py_lib` / `spring_boot` | modules（单层） | 生态包通用计划，见下 |
 
 **生态包通用计划**（`ecosystem_plan()`）的落点规则 ——
 这是被三处测试来回夹出来的，改动前务必看清：
@@ -288,6 +290,94 @@ CLI 入口：单个子命令坏了标 `(unavailable: 原因)`，**仍出现在 -
 
 `main.py` / `cli.py` / `App.jsx` / `vite.config.js` 这类装配文件由引擎生成，
 远端改了会和骨架约定冲突（实测：远端改 cli.py 的分发，退出码约定就失守）。
+
+---
+
+### 4.7 临时文件必须自己负责删除
+
+**实测事故（2026-11-24）**：系统 temp 里积压了 **10,154 个目录**，
+几乎全来自测试的 `mkdtemp()`。
+
+| 前缀 | 数量 | 来源 |
+|---|---|---|
+| `gatesnap` | 1080 | 自检 |
+| `cov-` | 840 | test_visual_llm 造视频 |
+| `sixcoder` | 659 | 测试 |
+| `langjudge` | 333 | 测试 |
+| 其余 | 数千 | 测试 |
+
+根因一句话：**`mkdtemp()` 只负责创建，从不负责删除。**
+`tests/` 下当时 39 处 mkdtemp、0 处 TemporaryDirectory。
+
+#### 三条硬规矩
+
+**1. 测试函数里用 `tmp_path` fixture**
+
+```python
+def test_x(tmp_path):          # pytest 自动建、自动清
+    (tmp_path / "a.py").write_text("x")
+```
+
+**2. helper 函数里（拿不到 fixture）用 `tests/_tmp.py` 的 `temp_ws()`**
+
+```python
+from _tmp import temp_ws
+
+with temp_ws("mytest") as ws:   # 离开时无论如何都删（含异常路径）
+    ...
+```
+
+**不要用 atexit**：它只在正常退出时跑，`pytest -x` 中途停 / Ctrl+C /
+CI 超时全都跳过。with 语句在异常路径也保证清理。
+
+**3. 产出文件有 cleanup 参数**
+
+写临时产物的函数（如 `visual_llm.extract_frames`）必须提供
+`cleanup=True` 默认值：**返回内存数据，磁盘不留东西**。
+需要留文件排查时显式 `cleanup=False`，并配一个 `cleanup_dir()`。
+
+#### 兜底：`tests/conftest.py` 的会话级清理
+
+```python
+# session 开始：记下 temp 根目录条目名
+# session 结束：删掉「结束后有、开始时没有」的
+```
+
+**这一层我第一版写错过**：用**前缀白名单**判该删谁，结果漏了
+`probejudge-`，跑完净增 5 个没清掉。
+
+**白名单必然漏** —— 测试随时加新前缀，维护列表赶不上。
+（和 `core/ecosystem` 那次「三个注册表各维护一份清单」是同一个病。）
+
+改成按 **"是否本次会话新生"** 判定，不靠名字。安全边界：
+- 只删 temp 根目录的**直接子项**
+- 只删本次新出现的（会话前就存在的可能是别的程序的，一律不动）
+- 删失败静默跳过，绝不让测试失败
+- `SIXCODER_KEEP_TEMP=1` 关闭（排查问题时）
+
+#### 引擎自身的临时目录是正常的
+
+不要以为全都要重写。`core/probe.py` 的两个 GC 是对的：
+
+```
+gc_scratch      清产物仓的 .sixcoder/tmp   —— 按 mtime
+gc_engine_tmp   清引擎自己的 prototype/.tmp —— 按 mtime，不靠前缀
+调用点：cli.py 收盘、company.py 开跑
+```
+
+实测 `gc_engine_tmp(max_age_hours=0)` -> `.tmp` 从 48 条降到 4 条。
+`hsperfdata_*` 有明确保护（JVM 活文件，删了会出问题）。
+
+**新加"写临时文件"的代码时，先看这两种模式哪个合适，别自己发明第三种。**
+
+#### 验证方法
+
+```bash
+$before = (Get-ChildItem $env:TEMP -Directory).Count
+python -m pytest -q
+$after = (Get-ChildItem $env:TEMP -Directory).Count
+"净增: $($after - $before)"      # 必须是 0
+```
 
 ---
 
@@ -423,7 +513,7 @@ cat prototype/stacks/*/manifest.json   # 看 provides 声明了什么
 
 ```bash
 cd F:/WorkSpace/SixCoder
-python -m pytest -q                    # 102 个用例，默认排除 slow
+python -m pytest -q                    # 129 个用例，默认排除 slow
 ```
 
 **改到架构/判据/生成（必跑）**：
@@ -492,7 +582,7 @@ $env:SIXCODER_BASE_URL = "http://127.0.0.1:8798"
 
 ### 6.2 生态包骨架已全部补齐（2026-11-24）
 
-8 个包现在都有 `templates/`：
+**9 个包**现在都有 `templates/`：
 
 | 包 | 骨架文件 | 验证深度 |
 |---|---|---|
@@ -503,6 +593,7 @@ $env:SIXCODER_BASE_URL = "http://127.0.0.1:8798"
 | `node_express` | 3 个（server.js + routes/ + package.json） | **node --check 通过** |
 | `py_lib` | lib/__init__.py（懒加载导出） | **真 import**：空库可导入、加模块能取符号 |
 | `spring_boot` | 3 个（pom.xml + Application.java + properties） | **mvn validate exit=0** |
+| `office_cli` | 3 个（office_main.py + commands/ + requirements.txt） | **真跑**：造 xlsx -> 命令处理 -> **读回产物断言单元格** |
 | `go_service` | 2 个（go.mod + main.go） | **仅文本检查**（本机无 go） |
 
 **唯一没有真跑验证的是 go_service**——本机没装 Go 工具链。
