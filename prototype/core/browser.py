@@ -105,6 +105,8 @@ class PageVisit:
     a11y_violations: list[dict] = field(default_factory=list)
     a11y_tree: str = ""                                # 压缩后的可访问性树（前 N 行）
     screenshot: str = ""
+    #: 视觉体检结果（2026-11-24）
+    visual: dict = field(default_factory=dict)
     elapsed_ms: int = 0
     error: str = ""                                    # 过程异常（不是页面错）
 
@@ -262,7 +264,8 @@ def axe_scan(page) -> list[dict]:
 
 def visit(url: str, *, actions=None, expect_dom=None, expect_url: str = "",
           expect_no_errors: bool = True, screenshot_dir=None,
-          timeout: int = DEFAULT_TIMEOUT, with_a11y: bool = True) -> PageVisit:
+          timeout: int = DEFAULT_TIMEOUT, with_a11y: bool = True,
+          visual=None) -> PageVisit:
     """访问一个页面，跑动作与断言，收集证据。
 
     `actions`：动作列表（`[{do: goto|fill|click|select|press|wait, ...}]`）
@@ -360,6 +363,26 @@ def visit(url: str, *, actions=None, expect_dom=None, expect_url: str = "",
             if with_a11y:
                 visit_res.a11y_violations = axe_scan(page)
                 visit_res.a11y_tree = _aria_compact(page)
+            # 视觉体检（2026-11-24）：DOM 断言说"元素存在"，但可能被遮住/看不见。
+            # 用**确定性的浏览器 API**（不是截图喂模型），同一页面跑 100 次答案一样。
+            # 放在 DOM 断言之后、截图之前 —— 先算结论，再留证据。
+            if visual:
+                try:
+                    from . import visual as _vismod
+                    _vr = _vismod.visual_check(
+                        page,
+                        not_covered=visual.get("expect_not_covered"),
+                        visible=visual.get("expect_visible"),
+                        contrast=visual.get("expect_contrast"))
+                    visit_res.visual = _vr
+                    if not _vr.get("ok", True):
+                        visit_res.dom.append({
+                            "desc": "视觉体检：" + _vismod.describe(_vr),
+                            "ok": False, "visual": _vr})
+                except Exception as exc:                 # noqa: BLE001
+                    visit_res.visual = {"ok": False, "checked": 0,
+                                        "note": "视觉体检异常：%s: %s"
+                                                % (type(exc).__name__, exc)}
             # 截图（失败时也有，作为证据）
             if screenshot_dir:
                 try:

@@ -932,15 +932,31 @@ def normalize_messages(msgs: list[dict] | None) -> list[dict] | None:
         return None
     out: list[dict] = []
     for _m in msgs:
-        _item = {'role': str(_m.get('role') or 'user'),
-                 'content': str(_m.get('content') or '')}
+        # **content 可能是字符串，也可能是多模态数组**（2026-11-24）。
+        #
+        # 多模态（图片）的形状是：
+        #   [{'type': 'text', 'text': '...'},
+        #    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,...'}}]
+        #
+        # 原来这行是 str(...)，会把数组变成字符串 "[{'type': ...}]" ——
+        # API 直接拒收。现在：字符串原样用，list 原样透传，其余按 str 兜底。
+        _content = _m.get('content')
+        if isinstance(_content, list):
+            _c = _content                      # 多模态：原样透传
+        elif _content is None:
+            _c = ''
+        else:
+            _c = str(_content)
+        _item = {'role': str(_m.get('role') or 'user'), 'content': _c}
         if _m.get('tool_calls'):
             _item['tool_calls'] = _m['tool_calls']
         if _m.get('tool_call_id'):
             _item['tool_call_id'] = _m['tool_call_id']
         if _m.get('reasoning_content'):
             _item['reasoning_content'] = _m['reasoning_content']
-        if _item['content'].strip() or _item.get('tool_calls') or _item.get('tool_call_id'):
+        _ct = _item['content']
+        _has_content = bool(_ct) if isinstance(_ct, list) else bool(str(_ct).strip())
+        if _has_content or _item.get('tool_calls') or _item.get('tool_call_id'):
             out.append(_item)
     return out or None
 

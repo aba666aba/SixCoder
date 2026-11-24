@@ -2109,6 +2109,32 @@ def _kill_tree(proc) -> None:
         pass
 
 
+
+def _visual_spec(probe: dict) -> dict:
+    """从探针里抽视觉检查项（2026-11-24）。
+
+    支持的字段：
+      expect_not_covered: [selector...]      元素不能被别的元素盖住
+      expect_visible:     [selector...]      元素必须真的可见（非 0 尺寸/非 hidden）
+      expect_contrast:    [{selector, ratio}] 文字与背景对比度达标（WCAG AA）
+
+    为什么单独抽成函数：自检要能直接测它，且可视化选项以后还会加。
+    """
+    out = {}
+    for key in ("expect_not_covered", "expect_visible"):
+        v = probe.get(key)
+        if isinstance(v, str):
+            v = [v]
+        if isinstance(v, list) and v:
+            out[key] = [str(x) for x in v]
+    c = probe.get("expect_contrast")
+    if isinstance(c, (str, dict)):
+        c = [c]
+    if isinstance(c, list) and c:
+        out["expect_contrast"] = c
+    return out
+
+
 def _run_browser(ws, probe: dict, timeout: int, out_cap: int = 240) -> dict:
     """前端 SPA 探针：起服务 → 等就绪 → Playwright 访问 + DOM 断言 → 杀服务。
 
@@ -2156,7 +2182,8 @@ def _run_browser(ws, probe: dict, timeout: int, out_cap: int = 240) -> dict:
                               % (waited, port, _tail(_read_log(log_path), 400))}
         pv = _br.visit(url, actions=actions, expect_dom=expect_dom,
                        expect_url=expect_url,
-                       timeout=min(int(timeout), 40) * 1000)
+                       timeout=min(int(timeout), 40) * 1000,
+                       visual=_visual_spec(probe))
     finally:
         _kill_tree(proc)
         if logf is not None:
@@ -2172,10 +2199,24 @@ def _run_browser(ws, probe: dict, timeout: int, out_cap: int = 240) -> dict:
     ev = {"url": pv.url, "final_url": pv.final_url, "status": pv.status,
           "dom": pv.dom[:20], "console_errors": pv.console_errors[:10],
           "a11y_violations": (pv.a11y_violations or [])[:10]}
+    # 视觉体检（2026-11-24）：DOM 说"元素存在"，但可能被遮住/看不见。
+    # 用的是**确定性的浏览器 API**（elementFromPoint / getComputedStyle），
+    # 不是截图喂模型 —— 同一页面跑 100 次答案一样，不烧 token。
+    _vis = pv.visual or {}
+    if _vis:
+        ev["visual"] = _vis
+    if pv.ok and _vis and not _vis.get("ok", True):
+        from . import visual as _vismod
+        return {"ok": False, "kind": "browser",
+                "detail": "视觉体检未过：%s" % _vismod.describe(_vis),
+                "evidence": ev}
     if pv.ok:
+        _vnote = ""
+        if _vis.get("checked"):
+            _vnote = "，视觉体检 %d 项通过" % int(_vis.get("checked") or 0)
         return {"ok": True, "kind": "browser",
-                "detail": "浏览器验收通过（DOM 断言 %d 条，%dms）"
-                          % (len(expect_dom), pv.elapsed_ms), "evidence": ev}
+                "detail": "浏览器验收通过（DOM 断言 %d 条%s，%dms）"
+                          % (len(expect_dom), _vnote, pv.elapsed_ms), "evidence": ev}
     bits = []
     if pv.error:
         bits.append(pv.error)
