@@ -131,16 +131,29 @@ def _frontend_targets(ctx: LayerContext, layer: str) -> list[str]:
 def _cli_targets(ctx: LayerContext, layer: str) -> list[str]:
     """CLI 工具：单层，按蓝图声明的 .py 落点写。
 
-    P1 的前置：判据侧已经有 cli 包（退出码/输出/产物），
-    这里补上"该生成什么文件"——否则引擎不知道 CLI 项目写哪里。
+    ## 与生态包 cli_tool 的关系（2026-11-24 合并）
 
-    设计取舍：CLI 工具通常是**平铺**的（一个入口 + 若干模块），
-    不像 Web 那样分 models/services/api。所以只有一层。
-    蓝图里如果声明了子目录（如 cmd/、lib/），按原样保留 —— 不强制扁平。
+    这个计划不自己定义入口约定，而是**对齐生态包 cli_tool**：
+      · 入口固定 cli.py（生态包的 detect_markers 只认这个文件）
+      · 子命令模块放 commands/（生态包 adapter 的 module_file_fmt）
+      · 骨架来自 cli_tool/templates/（engine 用 ecosystem.apply_templates 复制）
+      · 验收走生态包的 cli 探针（真跑 cli.py + 断言 stdout/退出码）
+
+    为什么"对齐"而不是各写一套：早先这里用的是 main.py，
+    与生态包的 cli.py 冲突 —— 生成的 CLI 项目永远不被识别成 CLI 项目。
+    合并后只有一个入口名、一套判据。
     """
     if layer != "cli":
         return []
-    return [m for m in ctx.module_paths() if m.endswith(".py")]
+    entry = "cli.py"
+    out = []
+    for m in ctx.module_paths():
+        if not m.endswith(".py"):
+            continue
+        if m == entry:
+            continue          # 入口由骨架生成，不让远端写
+        out.append(m)
+    return out
 
 
 FASTAPI_PLAN = SimplePlan(
@@ -168,7 +181,7 @@ CLI_PLAN = SimplePlan(
     stack="cli",
     layers=(("cli",),),
     resolver=_cli_targets,
-    description="CLI 工具：单层平铺（入口 + 模块）",
+    description="CLI 工具：单层，入口 cli.py（生态包 cli_tool 的骨架 + 探针）",
 )
 
 

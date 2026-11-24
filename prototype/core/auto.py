@@ -1498,61 +1498,6 @@ def ensure_web_build(ws, emit=None, timeout: int = 300) -> dict:
     return out
 
 
-def write_cli_entry(ws, bp) -> dict:
-    """生成/刷新 CLI 入口 main.py（确定性、0 token）。
-
-    与 write_web_entry 平行，但不共用任何逻辑 ——
-    Web 入口是 ASGI + include_router，CLI 入口是 argparse + 子命令分发，
-    两者唯一相同的地方是"入口只做组装"这个原则。
-
-    子命令来源：
-      ① .sixcoder/cli_commands.json（接线产物，权威）
-      ② 蓝图点名的 cmd/ cli/ 或根目录 .py 模块（补充）
-    都取不到就生成一个只有 --help 的可用入口 —— 能跑，只是还没命令。
-
-    返回 {"ok", "path", "commands", "why"?}。
-    """
-    from . import cli_template as _ct
-    ws = Path(ws)
-    commands = {}
-
-    try:
-        f = ws / ".sixcoder" / "cli_commands.json"
-        if f.exists():
-            data = json.loads(f.read_text(encoding="utf-8-sig")) or {}
-            for mod, cmd in data.items():
-                m = str(mod).strip()
-                if m.endswith(".py"):
-                    m = m[:-3].replace("/", ".").replace("\\", ".")
-                if m and m != "main":
-                    commands[m] = str(cmd).strip() or m.split(".")[-1]
-    except Exception:                                  # noqa: BLE001
-        pass
-
-    try:
-        for c in (getattr(bp, "caps", None) or []):
-            if str(getattr(c, "status", "") or "") == "descoped":
-                continue
-            for rel in (getattr(c, "modules", None) or []):
-                rel = str(rel or "").strip()
-                if not rel.endswith(".py") or rel == "main.py":
-                    continue
-                if rel.startswith(("cmd/", "cli/")) or "/" not in rel:
-                    mod = rel[:-3].replace("/", ".")
-                    commands.setdefault(mod, mod.split(".")[-1])
-    except Exception:                                  # noqa: BLE001
-        pass
-
-    body = _ct.render_entry(commands)
-    path = ws / _ct.CLI_ENTRY_FILE
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(body, encoding="utf-8")
-    except OSError as exc:
-        return {"ok": False, "why": "写入失败：" + str(exc), "path": str(path), "commands": {}}
-    return {"ok": True, "path": str(path), "commands": commands}
-
-
 def write_web_entry(ws, bp) -> dict:
     """生成/刷新 ASGI 入口 `app/main.py`（确定性、0 token、可溯源）。
 
