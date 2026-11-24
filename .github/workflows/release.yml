@@ -1,0 +1,118 @@
+name: 构建安装包并发布
+
+# 为什么放云端构建（2026-11-24 用户选定的方案 A）：
+#
+#   本地打包要 15-20 分钟，每次发版都得手动跑一遍、手动传 GitHub。
+#   改成打 tag 自动构建 + 发布，人只需要决定"发哪个版本"。
+#
+#   另外有个实在的好处：**构建过程公开可查**。别人能看到这个 exe
+#   是从哪份源码、用什么步骤打出来的，不是来路不明的二进制。
+#
+# 用法：
+#   1. 改 shell/package.json 的 version
+#   2. git tag v1.2.2 && git push origin v1.2.2
+#   3. 等 20 分钟左右，Release 自动出现
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（如 1.2.2）；留空则用 shell/package.json 里的"
+        required: false
+        type: string
+
+permissions:
+  contents: write          # 创建 Release 需要
+
+jobs:
+  build:
+    name: 构建 NSIS 安装包
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 确认打包脚本在仓库里
+        shell: bash
+        run: |
+          # 2026-11-24 之前 packaging/ 被 .gitignore 排除，CI 上根本没有这个目录。
+          # 这条检查用来防止哪天又被误加回忽略列表。
+          if [ ! -f packaging/build_installer.py ]; then
+            echo "::error::packaging/build_installer.py 不在仓库里，无法构建"
+            exit 1
+          fi
+          echo "打包脚本就位"
+
+      - name: 构建安装包
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
+        run: |
+          # build_installer.py 会自己下载便携 Python、装依赖、跑 electron-builder
+          python packaging/build_installer.py
+          if ($LASTEXITCODE -ne 0) { throw "构建失败，退出码 $LASTEXITCODE" }
+
+      - name: 找出产物
+        id: find
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist-installer -Filter "SixCoder-Setup-*.exe" |
+                 Where-Object { $_.Name -notmatch "OLD" } |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -First 1
+          if (-not $exe) { throw "没有找到安装包" }
+          Write-Output ("  产物: " + $exe.Name + "  " + [math]::Round($exe.Length/1MB,1) + " MB")
+          "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($exe.Name)"     >> $env:GITHUB_OUTPUT
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash
+          Write-Output ("  SHA256: " + $sha)
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.find.outputs.path }}
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## 安装
+
+            下载 `${{ steps.find.outputs.name }}` 双击安装。
+
+            - 安装位置：`%LOCALAPPDATA%\Programs\SixCoder`（不需要管理员）
+            - 卸载：设置 → 应用 → SixCoder
+
+            **静默安装**（覆盖升级时用）：
+            ```
+            SixCoder-Setup-x.y.z.exe /S /currentuser
+            ```
+
+            ## 校验
+
+            ```
+            SHA256: ${{ steps.find.outputs.sha }}
+            ```
+
+            ## 这个包是怎么来的
+
+            由 GitHub Actions 从本仓库的这份 tag 构建，全程可查：
+            [构建日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

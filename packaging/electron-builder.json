@@ -1,0 +1,98 @@
+{
+  "appId": "com.sixcoder.desktop",
+  "productName": "SixCoder",
+  "copyright": "SixCoder contributors",
+  "directories": {
+    "output": "../dist-installer/release",
+    "buildResources": "build"
+  },
+  "files": [
+    "main.cjs",
+    "preload.cjs",
+    "package.json",
+    "build/icon.ico",
+    "!**/node_modules/**"
+  ],
+  "extraResources": [
+    {
+      "from": "resources/python",
+      "to": "python",
+      "filter": [
+        "**/*",
+        "!Lib/site-packages/mypy/**",
+        "!Lib/site-packages/mypy_extensions.py",
+        "!Lib/site-packages/mypy_extensions/**",
+        "!Scripts/mypy*",
+        "!Scripts/dmypy*",
+        "!Scripts/stubgen*",
+        "!Scripts/stubtest*",
+        "!Scripts/mypyc*"
+      ]
+    },
+    {
+      "from": "../prototype",
+      "to": "prototype",
+      "filter": [
+        "**/*",
+        "!**/__pycache__/**",
+        "!**/*.pyc",
+        "!**/.tmp/**",
+        "!**/.tmp_*/**",
+        "!.sixcoder/**",
+        "!data/*.db",
+        "!data/*.db-*",
+        "!data/settings.json",
+        "!data/.settings*",
+        "!data/toolchains.json",
+        "!data/tool_lib/**",
+        "!data/scratch/**",
+        "!web/node_modules/**",
+        "!demo-repo/**",
+        "!workspaces/**",
+        "!_logs/**",
+        "!checks/**",
+        "!docs/**",
+        "!**/*.md.bak*",
+        "!_sandbox/**",
+        "!**/.mypy_cache/**",
+        "!**/.pytest_cache/**",
+        "!**/.ruff_cache/**"
+      ]
+    },
+    {
+      "from": "../packaging/settings.template.json",
+      "to": "prototype/data/settings.template.json"
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "artifactName": "SixCoder-Setup-${version}.${ext}"
+  },
+  "electronLanguages": [
+    "zh-CN",
+    "en-US"
+  ],
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": true,
+    "allowToChangeInstallationDirectory": true,
+    "license": "build/terms.rtf",
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "SixCoder",
+    "uninstallDisplayName": "SixCoder",
+    "deleteAppDataOnUninstall": false,
+    "include": "build/installer.nsh",
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico",
+    "installerHeaderIcon": "build/icon.ico"
+  }
+}

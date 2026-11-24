@@ -1,0 +1,3 @@
+# 只在「构建机」上需要，不进安装包（安装包里的运行时不装 Pillow）。
+# 用途：packaging/make_icon.py 生成 shell/build/icon.ico
+pillow>=10.0

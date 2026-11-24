@@ -90,7 +90,7 @@ projects/*
 .git.bak*
 
 # 打包工具链（只在本机构建安装包用，不进仓库、不上 GitHub）
-/packaging/
+# /packaging/   <- 2026-11-24 解除忽略：CI 需要它自动构建安装包
 /shell/resources/
 /dist-installer/
 /.cache/
@@ -169,3 +169,7 @@ projects/*
 # 安装包本来就不含（packaging 的 filter 有 !checks/**），上传了用户也用不着。
 # 本地照常跑：cd prototype && python checks/run_all.py
 /prototype/checks/
+
+# 打包脚本的字节码（每次运行都生成）
+/packaging/__pycache__/
+/packaging/assets/icon-preview.png
