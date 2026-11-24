@@ -323,15 +323,36 @@ cat prototype/stacks/*/manifest.json   # 看 provides 声明了什么
 
 ### 5.3 改完必须跑
 
+**日常改动（快，1 分钟）**：
+
 ```bash
 cd F:/WorkSpace/SixCoder
-python -m pytest tests -q                              # 92 个
-cd prototype
-python checks/check_ecosystem.py                       # 生态包
-python checks/check_stack.py                           # 栈
-python checks/check_fullgen.py                        # 生成
-python tools/gate_snapshot.py --verify                 # 7 个闸门快照
+python -m pytest -q                    # 102 个用例，默认排除 slow
 ```
+
+**改到架构/判据/生成（必跑）**：
+
+```bash
+cd prototype
+python checks/check_ecosystem.py       # 生态包
+python checks/check_stack.py           # 栈
+python checks/check_fullgen.py         # 生成
+python tools/gate_snapshot.py --verify # 7 个闸门快照 ← 最重要
+```
+
+**提交前全量（15-20 分钟）**：
+
+```bash
+pytest -m slow tests/test_all_checks.py -q   # 229 个自检逐个跑
+```
+
+2026-11-24 起，**229 个自检已全部纳入 pytest**（`tests/test_all_checks.py`
+用 parametrize 逐个包装）。好处：
+
+- 失败立刻可见（不再需要"记得手动跑 run_all.py"）
+- 可以 `-k` 筛选：`pytest -m slow tests/test_all_checks.py -k ecosystem`
+- 可以 `--lf` 只跑上次失败的
+- 每个脚本独立用例，一个崩了不影响其他
 
 **`gate_snapshot --verify` 是最重要的**：它比对 7 个闸门的行为
 与基线是否一致。改了判据/生成逻辑，这个必须过。
@@ -395,9 +416,27 @@ $env:SIXCODER_BASE_URL = "http://127.0.0.1:8798"
 测试：`tests/test_ecosystem_skeletons.py`（9 条）钉住
 "每个包有模板 + 复制后能被 detect 认出 + 能跑"。
 
-### 6.3 `_sandbox/` 占 58 MB
+### 6.3 仓库体积（2026-11-24 已清理）
 
-比 `core/` 大 17 倍。属于仓库体积问题，未处理。
+```
+清理前 prototype/: 199 MB
+清理后 prototype/:  80 MB   实测
+```
+
+删掉的（**全部未纳入 git 跟踪**，纯本地产物）：
+
+| 目录 | 大小 | 内容 |
+|---|---|---|
+| `_sandbox/` | 57 MB | 判据标定用的对照实现 |
+| `_logs/spa_verify/` | 44.5 MB | 前端验证的 node_modules 副本 |
+| `_logs/del_* 等` | ~1 MB | 调试遗留（runall_*.txt、截图）|
+| `data/scratch/` | 16.4 MB | 临时工作区 |
+
+**代码会自动重建这些目录**（`paths.py` 的 `logs_dir()` 等按需创建），
+所以删了不影响运行。`.gitignore` 早就覆盖它们了。
+
+剩余 80 MB 里，`web/node_modules` 占 36.7 MB（本地依赖，正常）。
+真正入仓库的代码约 40 MB。
 
 ---
 

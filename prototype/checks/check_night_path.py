@@ -82,8 +82,25 @@ def main() -> int:
     print()
     print("[7] 判型仍可用（空项目 / 已有项目）")
     ck("decide_mode 存在且被 night 调用", callable(fullgen.decide_mode))
-    ck("空目录 → scratch / 多模块 → repair",
-       fullgen.decide_mode(PROTO / "_sandbox" / "whole_try") == "repair")
+    # 2026-11-24 修：原来拿 PROTO/_sandbox/whole_try 当"多模块"样本，
+    # 但 _sandbox/ 是 .gitignore 里的本地副产物（判据标定用的对照实现），
+    # 清理仓库时被删掉 -> 这个断言永远失败（实测：单独跑 3 次全 exit=1）。
+    #
+    # 自检不该依赖"本地正好存在的目录"。这里现造一个临时目录：
+    # 空目录判 scratch、3 个模块判 repair（阈值是 SCRATCH_MIN_MODULES=3）。
+    import tempfile as _tf
+    with _tf.TemporaryDirectory(prefix="np_") as _td:
+        _empty = Path(_td) / "empty"
+        _empty.mkdir()
+        ck("空目录 → scratch", fullgen.decide_mode(_empty) == "scratch")
+
+        _multi = Path(_td) / "multi"
+        for _i in range(fullgen.SCRATCH_MIN_MODULES):
+            _f = _multi / "app" / ("mod%d.py" % _i)
+            _f.parent.mkdir(parents=True, exist_ok=True)
+            _f.write_text("VALUE = %d\n" % _i, encoding="utf-8")
+        _got = fullgen.decide_mode(_multi)
+        ck("多模块 → repair", _got == "repair", "actual=" + _got)
 
     print()
     print("[8] 公司循环仍能写交付报告（异常也不许没有交付物）")
