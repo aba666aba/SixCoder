@@ -26,21 +26,28 @@
 对普通人：做一个 Web 服务或命令行工具，**这一个模式就够了**。
 对程序员：大型项目用它**生成初始原型**，省掉"从头搭骨架"那几天。
 
-> **⚠️ 它现在能做什么、不能做什么（2026-11-24 补，来自真实代码事实）**
+> **⚠️ 它现在能做什么、不能做什么（2026-11-24 按真实代码更新）**
 >
-> | 能做 | 不能做 |
+> | 能做 | 验证深度 |
 > |---|---|
-> | Python Web 服务：**FastAPI**（默认）/ **Django**（需配置） | 桌面 GUI 程序（Electron / WinForm / Qt） |
-> | **命令行工具 / 脚本**（退出码 + 输出 + 产物三类判据） | 游戏、移动 App、嵌入式 |
-> | 纯 Python 库 | 前端框架工程（React / Vue 项目骨架） |
+> | **FastAPI** Web 服务（默认）/ **Django**（需配置） | 真启动 + HTTP 探针 + 浏览器 DOM |
+> | **命令行工具 / 脚本** | **真跑**：--help / 子命令 / 退出码 / 产物 |
+> | **纯 Python 库** | **真 import**：空库可导入、加模块能取符号 |
+> | **Electron 桌面应用** | 结构校验；可用 CDP 连真窗口测交互 |
+> | **前端 SPA**（React/Vue + Vite） | **真构建**：npm install + vite build + 浏览器渲染 |
+> | **Node Express 服务** | `node --check` 通过 |
+> | **Go 服务** | 仅文本检查（本机无 go 工具链） |
+> | **Spring Boot** | `mvn validate` exit=0 |
+> | **微服务**（celery + app 分层） | py_compile 全过 |
+> | **Office 处理程序**（读写 xlsx/docx/pptx） | **真跑 + 读回产物断言单元格** |
+>
+> **不能做**：游戏、移动 App、嵌入式、WinForm/Qt 桌面程序。
 >
 > 为什么有这个边界：造物模式的"验收"依赖**机械判据**（跑得起来吗、输出对不对、
-> 产物在不在）。这些判据原本全部假设"这是一个 HTTP 服务"，
-> 所以引擎只能造 Web 后端。
->
-> 2026-11-24 起判据被抽成了可插拔的（`core/judges.py`），
-> 已经能正确识别 CLI 项目并只跑适用判据。**加一种新形态 = 写一个判据包**，
-> 不用改引擎。但每加一种形态都需要真实跑通验证，不是配置一行就生效。
+> 产物在不在）。判据已抽成可插拔的（`core/judges.py`），
+> 11 种栈各自声明适用判据，**加一种新形态 = 写一个生态包**，不用改引擎。
+> 但每加一种形态都需要真实跑通验证，不是配置一行就生效。
+> 当前 9 个生态包、11 个栈适配器、26 条判据、7 种探针。
 
 ### 想让它支持新的软件形态？（给会写代码的人）
 
@@ -121,8 +128,8 @@
 | 词 | 大白话解释 |
 |---|---|
 | **命令提示符 / 终端 / cmd** | 一个黑底白字的窗口，你在里面「打字命令」让电脑干活。按 `Win + R`，输入 `cmd`，回车就打开。**它不是编程，就是打字下指令** |
-| **`cd`** | 「切换文件夹」。`cd /d E:\SixCoder` = 进入 E 盘的 SixCoder 文件夹 |
-| **路径** | 文件在电脑里的地址，例如 `E:\SixCoder\README.md` |
+| **`cd`** | 「切换文件夹」。`cd /d D:\你的代码\SixCoder` = 进入那个文件夹 |
+| **路径** | 文件在电脑里的地址，例如 `D:\你的代码\SixCoder\README.md` |
 | **Python** | 一种编程语言，也是运行 SixCoder 的「发动机」。**装一次就行** |
 | **Node.js / npm** | 另一套工具，专门用来构建「界面」。也是**装一次就行** |
 | **API Key** | 一串以 `sk-` 开头的密码，相当于「AI 服务的会员卡」。**不能给别人**，别人拿了会花你的钱 |
@@ -206,7 +213,10 @@ ollama list
 
 ### 第 1 步：双击安装包
 
-拿到 `SixCoder-Setup-1.1.0.exe`，**双击它**。
+> 📦 下载地址：https://github.com/aba666aba/SixCoder/releases
+> 每个包都由 GitHub Actions 从对应 tag 构建，构建日志公开可查。
+
+到 GitHub Releases 页下载最新的 `SixCoder-Setup-1.2.2.exe`，**双击它**。
 
 - 装到当前用户目录（`%LOCALAPPDATA%\Programs\SixCoder`），**不会弹管理员权限**
 - 装完桌面和开始菜单会有 `SixCoder` 图标
@@ -257,7 +267,7 @@ ollama list
 在 `cmd` 里：
 
 ```
-cd /d E:\SixCoder\prototype
+cd /d <你放代码的盘>:\SixCoder\prototype
 python tools\set_key.py sk-把你的完整key粘在这里
 ```
 
@@ -439,7 +449,7 @@ python tools\set_key.py --check
 | `.sixcoder\errors_report.md` | 错误清单（按严重程度排序） | 只看 P0 / P1 就够 |
 | 你的代码 | 生成出来的项目 | 想跑起来看效果，看里面有没有 README |
 | `.sixcoder\` 其他文件 | 引擎的记账本（蓝图/预算/日志） | 不用管，**别删** |
-| `E:\SixCoder\_logs\*.log` | 引擎运行日志 | 出问题时把最新的发给开发者 |
+| `%LOCALAPPDATA%\SixCoder\_logs\*.log` | 引擎运行日志 | 出问题时把最新的发给开发者 |
 
 **报告怎么读（三分钟版）**：
 
@@ -486,21 +496,32 @@ python tools\set_key.py --check
 
 **无论勾不勾，你的项目仓库都不会被删** —— 源码、`.git` 提交历史、`.sixcoder` 账本都不在安装目录里，卸载脚本连它的路径都不碰。
 
-（API Key 只存在 `E:\SixCoder\prototype\data\settings.json`，删文件夹即清掉。）
+（API Key 存在 `%LOCALAPPDATA%\SixCoder\data\settings.json`，删这个目录即清掉。）
 
 ---
 
 ## 十二、给会写代码的人
 
-- 全量自检：`cd prototype && python checks\run_all.py`（227 项；每修一个真 bug 必须补一条断言）
-  > **只在源码仓库里有 `checks/`**：安装包刻意排除了它（`packaging/electron-builder.json` 的 `!checks/**`），
-  > 所以你装完之后在安装目录里找不到它——这是设计如此，不是装坏了。要跑自检请用源码仓库。
+- 全量自检：`cd prototype && python checks\run_all.py`（229 个 check_*.py；每修一个真 bug 必须补一条断言）
+  > **自检脚本不在 GitHub 仓库里**（2026-11-24 起：自检保留在开发机本地、不上传远端）。
+  > 安装包里也没有（`packaging/electron-builder.json` 的 `!checks/**`）。
+  > 所以克隆仓库或装完后都找不到 `checks/` —— **这是设计如此，不是坏了**。
+  > 要跑自检需要有源码开发环境的机器。
+  >
+  > 替代方案：`python -m pytest -q`（**159 个用例 / 22 个文件**随仓库发布，覆盖判据/栈/生态包/视觉/交互/协商）
 - 架构、铁律、变更记录：`开发文档.md`；机制专题：`docs\`
 - 判据/覆盖诊断：`python tools\diag_cap_layer.py`
 - 接口：`server.py`（FastAPI + SSE）；命令行入口：`cli.py`
 - 项目路径解析：`--repo` > 环境变量 `SIXCODER_REPO` > `_logs\engine.json`（`core/runtime_cfg.py`）
 - 依赖锁定：`requirements.txt` / `requirements-dev.txt`
 - 上传前隐私体检：`python tools\preupload_scan.py`
+- 界面测试：`core/browser.py` 支持点击 / 双击 / **拖拽**（选择器或坐标）/ 悬停 / 右键 /
+  滚轮 / 填表 / 按键 / 上传，Electron 通过 CDP 连真窗口；`Recorder` 可录下操作过程
+- 视觉体检：`core/visual.py` 查遮挡 / 可见性 / 对比度（确定性，零 token）；
+  `core/visual_llm.py` 走模型看图（可选），视频抽帧同在此
+- 生态包扩展：遇到引擎没有的栈，远端可现写 `StackAdapter` 装进生态库
+  （协商机制，需三方全票）
+- 发布：打 tag `v*` 触发 GitHub Actions 自动构建安装包并发布 Release
 
 ### 许可
 

@@ -53,14 +53,19 @@ prototype/
 │   ├── office_cli/        同上（office_main.py + commands/）★ 2026-11-24 新增
 │   ├── py_lib/            同上（lib/__init__.py 懒加载导出）
 │   └── spring_boot/       同上（pom.xml + Application.java）
-├── checks/          232 个自检脚本（check_*.py）
+├── checks/          229 个自检脚本（check_*.py）+ run_all.py 等 3 个辅助
 ├── tools/           辅助工具（gate_snapshot.py 等）
 └── archive/         归档的旧代码（.removed_* 移进来）
 
-tests/               129 个 pytest 用例（21 个文件）
+tests/               159 个 pytest 用例（22 个文件）
 web/                 Vue 3 前端
 docs/                文档
 ```
+
+**checks/ 不上传远端（2026-11-24 用户口径）**：这 229 个脚本只保留在开发机本地，
+.gitignore 有 `/prototype/checks/`。运行时完全不依赖它们（core/ 里提到 checks 的
+地方全是注释，无一处 import），安装包的 filter 也早有 `!checks/**`。
+克隆仓库的人跑 `pytest -q`（159 个用例）即可，`tests/test_all_checks.py` 会自动 skip。
 
 **为什么 stacks/ 要改名**：它原来在 `prototype/data/ecosystem/`。
 `data/` 这个名字让人（和 AI）把它当数据目录跳过，实际上里面是
@@ -513,7 +518,7 @@ cat prototype/stacks/*/manifest.json   # 看 provides 声明了什么
 
 ```bash
 cd F:/WorkSpace/SixCoder
-python -m pytest -q                    # 129 个用例，默认排除 slow
+python -m pytest -q                    # 159 个用例，默认排除 slow
 ```
 
 **改到架构/判据/生成（必跑）**：
