@@ -29,6 +29,8 @@ from __future__ import annotations
 import json
 import os
 import time
+import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -151,7 +153,30 @@ def _aria_compact(page, max_lines: int = 60) -> str:
 
 
 def _run_action(page, act: dict, timeout: int) -> None:
-    """执行一个动作（结构固定，不自由发挥）。"""
+    """执行一个动作（结构固定，不自由发挥）。
+
+    ## 支持的动作（2026-11-24 扩展：桌面应用测试需要拖拽/悬停等）
+
+      导航类： goto / reload
+      输入类： fill / type / press / select / check / uncheck
+      指针类： click / dblclick / rightclick / hover / drag / drag_to
+      其它：   scroll / wait / wait_for / focus / upload
+
+    ## 拖拽的两种写法
+
+      {"do":"drag", "selector":"#card", "to":"#column"}
+          -> 从 selector 拖到 to（CSS 选择器）
+      {"do":"drag", "selector":"#card", "x":300, "y":200}
+          -> 从 selector 拖到绝对坐标（相对视口）
+       两种都支持，至少要给 to 或 (x, y) 之一。
+
+    ## 为什么拖拽要分步做（page.mouse.down -> move -> up）
+
+      很多拖放实现监听的是**中间过程**的 mousemove（如 HTML5 draggable、
+      或自定义的 pointer 事件处理），直接 drag_and_drop 有时不触发它们的
+      状态机。所以这里用 hover -> down -> 多次 move -> up 的序列，
+      并在每步之间给一点延迟 —— 这是实测能触发 React 拖拽库的做法。
+    """
     kind = str(act.get("do") or act.get("action") or "").lower()
     sel = act.get("selector") or ""
     if kind in ("goto", "open"):
@@ -163,10 +188,30 @@ def _run_action(page, act: dict, timeout: int) -> None:
         page.click(sel, timeout=timeout)
     elif kind in ("dblclick", "doubleclick"):
         page.dblclick(sel, timeout=timeout)
+    elif kind in ("rightclick", "contextclick"):
+        page.click(sel, button="right", timeout=timeout)
+    elif kind == "hover":
+        page.hover(sel, timeout=timeout)
+    elif kind in ("drag", "drag_to", "dragdrop"):
+        _do_drag(page, act, sel, timeout)
+    elif kind == "scroll":
+        # 两种写法：给 selector 就滚到它；给 dy 就滚鼠标滚轮
+        if sel:
+            page.locator(sel).scroll_into_view_if_needed(timeout=timeout)
+        else:
+            page.mouse.wheel(int(act.get("dx") or 0), int(act.get("dy") or 300))
+    elif kind == "check":
+        page.check(sel, timeout=timeout)
+    elif kind == "uncheck":
+        page.uncheck(sel, timeout=timeout)
+    elif kind == "focus":
+        page.focus(sel, timeout=timeout)
     elif kind == "select":
         page.select_option(sel, str(act.get("value") or ""), timeout=timeout)
     elif kind == "press":
         page.press(sel or "body", str(act.get("key") or "Enter"), timeout=timeout)
+    elif kind == "upload":
+        page.set_input_files(sel, str(act.get("value") or ""), timeout=timeout)
     elif kind in ("wait", "wait_for"):
         if sel:
             page.wait_for_selector(sel, timeout=timeout)
@@ -175,6 +220,47 @@ def _run_action(page, act: dict, timeout: int) -> None:
     elif kind == "reload":
         page.reload(wait_until="domcontentloaded", timeout=timeout)
     # 未知动作忽略（不猜）
+
+
+def _do_drag(page, act: dict, source: str, timeout: int) -> None:
+    """拖拽：从 source 拖到 to（选择器）或 (x, y)（坐标）。
+
+    做法见 _run_action 的 docstring：分步 down -> move -> up，
+    每步之间留一点时间，让听到 mousemove 的拖放实现能更新状态。
+    """
+    if not source:
+        return
+    target = act.get("to") or act.get("target") or ""
+    tx = act.get("x")
+    ty = act.get("y")
+    # 起手：移到源元素中心并按下
+    box = page.locator(source).bounding_box(timeout=timeout)
+    if not box:
+        return
+    sx = box["x"] + box["width"] / 2.0
+    sy = box["y"] + box["height"] / 2.0
+    page.mouse.move(sx, sy)
+    page.mouse.down()
+    try:
+        # 目标点：选择器中心 或 绝对坐标
+        if target:
+            tbox = page.locator(target).bounding_box(timeout=timeout)
+            if not tbox:
+                return
+            ex = tbox["x"] + tbox["width"] / 2.0
+            ey = tbox["y"] + tbox["height"] / 2.0
+        elif tx is not None and ty is not None:
+            ex, ey = float(tx), float(ty)
+        else:
+            return                                  # 没目标点，不猜
+        # 中间插几步，让 drag 状态机有 mousemove 可听
+        steps = int(act.get("steps") or 8)
+        for i in range(1, max(2, steps) + 1):
+            k = i / float(max(2, steps))
+            page.mouse.move(sx + (ex - sx) * k, sy + (ey - sy) * k)
+            page.wait_for_timeout(int(act.get("step_ms") or 20))
+    finally:
+        page.mouse.up()
 
 
 def _check_dom(page, exp: dict, timeout: int) -> dict:
@@ -600,3 +686,114 @@ def render_evidence(v: PageVisit, limit: int = 6) -> str:
     if v.screenshot:
         lines.append("- 截图：%s" % v.screenshot)
     return "\n".join(lines)
+
+class Recorder:
+    """界面录屏（2026-11-24）：动作前后按需截帧，事后拼成序列。
+
+    ## 为什么不用后台线程（我第一版踩的坑）
+
+    第一版开了一个后台线程定时 `page.screenshot()` —— **直接卡死**。
+    原因：Playwright 的**同步 API 绑定到创建它的线程**（greenlet），
+    在别的线程调用会死锁。
+
+    （Playwright 的 async API 才有跨线程/跨协程能力；但我们整个
+    browser.py 用的是 sync API，不能为录屏改成 async。）
+
+    所以改成 **submit() 式**：在**主线程**的每个关键节点（动作前后）
+    截一帧。虽然拿不到严格等间隔的帧，但对"看清操作过程"够用，
+    而且完全避开了线程问题。
+
+    ## 用法
+
+        rec = Recorder(page, max_frames=30)
+        rec.shot("开始")                       # 手动截一帧
+        run_actions(page, actions, rec=rec)    # 动作序列自动截
+        frames = rec.frames                    # [{"path", "t", "note"}]
+        rec.close()                            # 删临时文件
+
+    ## 与 visual_llm 的分工
+
+        visual.visual_check        确定性检查（遮挡/对比度），看当前状态
+        visual_llm.extract_frames  从用户给的视频抽帧
+        Recorder                   **自己录**：把操作过程录下来
+
+    录完的帧可直接喂给 visual_llm.review_screenshots，让模型看
+    "这个操作过程里界面有没有出现异常"。
+    """
+
+    def __init__(self, page, out_dir=None, max_frames: int = 30,
+                 cleanup: bool = True):
+        self.page = page
+        self.max_frames = max(1, int(max_frames or 30))
+        self.cleanup = cleanup
+        self.frames: list = []
+        self.error = ""
+        self._t0 = time.time()
+        self._dir = Path(out_dir) if out_dir else Path(
+            tempfile.mkdtemp(prefix="rec_"))
+        self._own_dir = out_dir is None
+        try:
+            self._dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:                           # noqa: BLE001
+            self.error = "建录屏目录失败：%s" % exc
+
+    def shot(self, note: str = "") -> bool:
+        """在**主线程**截一帧。返回是否成功。"""
+        if len(self.frames) >= self.max_frames:
+            return False
+        fp = self._dir / ("shot_%03d.png" % (len(self.frames) + 1))
+        try:
+            self.page.screenshot(path=str(fp), timeout=5000)
+        except Exception as exc:                         # noqa: BLE001
+            self.error = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+            return False
+        self.frames.append({"path": str(fp),
+                            "t": round(time.time() - self._t0, 2),
+                            "note": str(note or "")[:80]})
+        return True
+
+    def run(self, page, actions, timeout: int) -> list:
+        """执行动作序列，**每个动作前后各截一帧**。
+
+        返回每一步的结果（失败的动作也记下来，便于定位）。
+        """
+        results = []
+        self.shot("开始")
+        for i, act in enumerate(actions or [], 1):
+            name = str((act or {}).get("do") or (act or {}).get("action") or "?")
+            sel = str((act or {}).get("selector") or "")[:50]
+            try:
+                _run_action(page, act, timeout)
+                ok, why = True, ""
+            except Exception as exc:                     # noqa: BLE001
+                ok, why = False, "%s: %s" % (type(exc).__name__, str(exc)[:150])
+            self.shot("步骤%d %s %s%s" % (i, name, sel, "" if ok else " [失败]"))
+            results.append({"i": i, "do": name, "selector": sel,
+                            "ok": ok, "why": why})
+        return results
+
+    def data_urls(self, limit: int = 8) -> list:
+        """取前 limit 帧转 data URL（可直接喂给模型）。"""
+        from . import visual_llm as _vl
+        out = []
+        for fr in self.frames[:limit]:
+            u = _vl._b64_png(Path(fr["path"]))
+            if u:
+                out.append({"t": fr["t"], "note": fr.get("note", ""), "data_url": u})
+        return out
+
+    def close(self) -> None:
+        """删掉录下来的临时帧（cleanup=True 时）。"""
+        if not self.cleanup:
+            return
+        for fr in self.frames:
+            try:
+                Path(fr["path"]).unlink()
+            except OSError:
+                pass
+        self.frames = []
+        if self._own_dir:
+            try:
+                self._dir.rmdir()
+            except OSError:
+                pass                                 # 还有别的文件就留着
