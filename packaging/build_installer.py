@@ -472,7 +472,20 @@ def assert_no_local_secrets(release_dir: Path) -> None:
 def build_installer() -> Path:
     step("6", "electron-builder（NSIS 安装包）")
     env = dict(os.environ)
-    env["NODE_OPTIONS"] = (env.get("NODE_OPTIONS", "") + " --use-system-ca").strip()
+    # --use-system-ca 让 Node 信任系统证书库（本机装过自签代理证书时需要）。
+    #
+    # 2026-11-24 GitHub Actions 实测：这个参数**不是所有 Node 版本都认** ——
+    # Node 20.20 直接报「--use-system-ca is not allowed in NODE_OPTIONS」，整次构建失败。
+    # （本机 Node 24 认、CI 的 Node 20 不认，所以本地一直没复现出来。）
+    # 改成先探测：能用才加。标准环境本来就不需要它。
+    _probe = subprocess.run(["node", "-e", "0"],
+                            env={**env, "NODE_OPTIONS": "--use-system-ca"},
+                            capture_output=True, text=True)
+    if _probe.returncode == 0:
+        env["NODE_OPTIONS"] = (env.get("NODE_OPTIONS", "") + " --use-system-ca").strip()
+        print("  Node 支持 --use-system-ca，已启用（信任系统证书）")
+    else:
+        print("  Node 不支持 --use-system-ca，跳过（标准环境不需要）")
     if not (SHELL / "node_modules" / "electron-builder").is_dir():
         print("  安装 electron-builder")
         if run(["npm", "install", "--no-save", "--no-audit", "--no-fund", "electron-builder"],
