@@ -3070,6 +3070,56 @@ async function pollNightOnce() {
   } catch { }
 }
 
+/* ── 中途提意见（2026-11-24）────────────────────────────────
+   夜班是 detached 独立进程，界面杀得掉它但说不上话。
+   所以走"文件信箱"：意见写进 .sixcoder/feedback.jsonl，
+   夜班在下一轮开头读 —— 不打断正在写的节点。 */
+const fbPanel = ref(false)
+const fb = reactive({
+  scope: 'global', target: '', text: '',
+  busy: false, note: '',
+  stats: { total: 0, pending: 0 },
+  items: [],
+})
+
+function toggleFeedback() {
+  fbPanel.value = !fbPanel.value
+  if (fbPanel.value) refreshFeedback()
+}
+
+async function refreshFeedback() {
+  if (!form.repo) return
+  try {
+    const d = await api(`/v1/night/feedback?repo=${encodeURIComponent(form.repo)}`)
+    fb.stats = { total: d.total || 0, pending: d.pending || 0 }
+    fb.items = d.items || []
+  } catch { /* 静默：轮询失败不该打断玩家 */ }
+}
+
+async function submitFeedback() {
+  const text = fb.text.trim()
+  if (!text) return
+  if (fb.scope === 'module' && !fb.target.trim()) {
+    fb.note = '选「只改这个模块」时，必须填模块路径'
+    return
+  }
+  fb.busy = true; fb.note = ''
+  try {
+    const d = await api('/v1/night/feedback', {
+      method: 'POST',
+      body: JSON.stringify({
+        repo: form.repo || '', text,
+        scope: fb.scope, target: fb.scope === 'module' ? fb.target.trim() : '',
+      }),
+    })
+    fb.note = d.note || '已提交'
+    fb.text = ''
+    await refreshFeedback()
+  } catch (e) {
+    fb.note = '提交失败：' + e.message
+  } finally { fb.busy = false }
+}
+
 /* 在系统浏览器里打开当前界面（原 start.ps1 -Web 的等价物） */
 function openInBrowser() {
   const url = location.origin
@@ -4156,16 +4206,62 @@ onUnmounted(() => {
             <button class="ghost tiny" :disabled="ops.busy || !can('agent.run')"
                     title="停掉夜班与看门狗：先停看门狗再停夜班进程，不会杀了又自己起来"
                     @click="stopNight">停止夜班</button>
+            <button class="ghost tiny" :disabled="!can('agent.run')"
+                    title="夜班跑到一半也能改方向：写一条意见，夜班在下一轮开头并入（不打断正在写的节点）"
+                    @click="toggleFeedback">{{ fbPanel ? '收起意见' : '中途提意见' }}</button>
             <button class="ghost tiny" title="用系统浏览器打开当前界面"
                     @click="openInBrowser">在浏览器打开</button>
             <span v-if="ops.running" class="badge b-warn">
               {{ OPS_LABEL[ops.op] || ops.op }} 运行中 · {{ opsElapsed() }}</span>
+            <span v-if="fb.stats.pending" class="badge b-warn"
+                  :title="'有 ' + fb.stats.pending + ' 条意见等待夜班下一轮并入'">
+              待并入 {{ fb.stats.pending }}</span>
             <span v-else-if="ops.note" class="dim" style="font-size:10.5px">{{ ops.note }}</span>
           </div>
           <div v-if="isClientMode && (ops.log || ops.running)"
                style="margin-top:6px;border:1px solid var(--line);border-radius:6px;padding:8px;
                       max-height:170px;overflow:auto;font-family:Consolas,monospace;
                       font-size:11px;white-space:pre-wrap;background:var(--panel2)">{{ ops.log || '（等待输出…）' }}</div>
+
+          <!-- 中途提意见（2026-11-24）：夜班跑到一半也能改方向 -->
+          <div v-if="isClientMode && fbPanel"
+               style="margin-top:6px;border:1px solid var(--line);border-radius:6px;padding:8px;background:var(--panel2)">
+            <div class="dim" style="font-size:10.5px;margin-bottom:6px;line-height:1.6">
+              夜班<b>不打断正在写的节点</b>，在下一轮开头并入你的意见。
+              全局/红线一直生效，模块级只用那一次。
+            </div>
+            <div class="row" style="gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+              <select v-model="fb.scope" class="tiny"
+                      title="global=影响后续所有模块；forbid=红线；module=只影响下面填的那个模块">
+                <option value="global">全局调整</option>
+                <option value="forbid">红线（不许违反）</option>
+                <option value="module">只改这个模块</option>
+              </select>
+              <input v-if="fb.scope === 'module'" v-model="fb.target" class="tiny"
+                     placeholder="模块相对路径，如 app/user.py"
+                     style="flex:1;min-width:160px" />
+            </div>
+            <textarea v-model="fb.text" rows="2"
+                      placeholder="例：整体别用 React / 登录改 JWT / 不许引入新依赖"
+                      style="width:100%;box-sizing:border-box;font-size:11.5px"
+                      @keydown.ctrl.enter.prevent="submitFeedback()"></textarea>
+            <div class="row" style="gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+              <button class="ghost tiny" :disabled="fb.busy || !fb.text.trim()"
+                      @click="submitFeedback()">{{ fb.busy ? '提交中…' : '提交意见（Ctrl+Enter）' }}</button>
+              <button class="ghost tiny" :disabled="fb.busy" @click="refreshFeedback()">刷新</button>
+              <span v-if="fb.note" class="dim" style="font-size:10.5px">{{ fb.note }}</span>
+            </div>
+            <div v-if="fb.items.length" style="margin-top:8px;max-height:150px;overflow:auto">
+              <div v-for="it in fb.items.slice().reverse().slice(0, 12)" :key="it.id"
+                   style="font-size:11px;padding:3px 0;border-top:1px solid var(--line)">
+                <span class="badge" :class="it.consumed ? 'b-ok' : 'b-warn'"
+                      style="font-size:9.5px">{{ it.consumed ? '已并入' : '待并入' }}</span>
+                <span class="dim" style="margin-left:4px">[{{ it.scope }}]</span>
+                <span v-if="it.target" class="dim mono" style="margin-left:4px">{{ it.target }}</span>
+                <span style="margin-left:6px">{{ it.text }}</span>
+              </div>
+            </div>
+          </div>
 
           <!-- 打包 exe：状态 + 产物路径 + 日志尾巴 -->
           <div v-if="isClientMode && (pack.note || pack.busy || pack.exe)" style="margin-top:6px">

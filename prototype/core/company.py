@@ -1007,6 +1007,36 @@ def _night_inner(repo: Path, requirement: str, model: str,
             if emit:
                 emit("system_budget_stop", {"action": "收工", "reason": reason})
             break
+        # ---- 人的中途修改意见（2026-11-24）：**轮边界生效** ----
+        # 为什么放在这里而不是节点里：正在写的节点不能被半路打断 ——
+        # 闸门会在半成品上判定、正在写的文件会被丢弃。等一个节点（几分钟），
+        # 换来的是每条意见都作用在一个完整状态上（用户定稿选 A）。
+        #
+        # global / forbid 是长期规矩，每轮都带上；module 粒度的并进本轮后被消费。
+        _fb_text = ""
+        try:
+            from . import feedback as _fb
+            _fb_stats = _fb.stats(ws)
+            _fb_mods = _fb.module_pending(ws)
+            _fb_text = _fb.render_for_prompt(ws)
+            if _fb_stats["pending"]:
+                _rules = _fb.rules(ws)
+                if emit:
+                    emit("feedback_applied", {
+                        "action": "并入本轮",
+                        "global": len(_rules["global"]),
+                        "forbid": len(_rules["forbid"]),
+                        "module": len(_fb_mods),
+                        "note": "人类中途意见在轮边界生效（不打断正在写的节点）",
+                    })
+                # module 粒度并进本轮后即消费；global/forbid 不消费（是长期规矩）
+                if _fb_mods:
+                    _fb.consume(ws, [f.id for f in _fb_mods], rnd=rnd)
+        except Exception as _e:                           # noqa: BLE001
+            # 意见机制坏了不许拖垮夜班 —— 但要在事件流里留痕，不能静默
+            if emit:
+                emit("notice", {"message": f"中途意见读取失败：{type(_e).__name__}: {_e}"})
+            _fb_text = ""
         try:
             state = iterate.inspect(ws, contracts)
             verified = sum(s["verified"] for s in state.values())

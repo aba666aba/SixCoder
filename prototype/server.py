@@ -140,6 +140,14 @@ class ApprovalReq(BaseModel):
     by: str = "ui"
 
 
+class FeedbackReq(BaseModel):
+    """人的中途修改意见（2026-11-24）。"""
+    repo: str
+    text: str
+    scope: str = "global"          # global / module / forbid
+    target: str = ""               # scope=module 时必填（模块相对路径）
+
+
 @app.get("/v1/approvals")
 def list_approvals():
     """待审单据：精修模式下前端轮询这个，弹出"通过/拒绝"。"""
@@ -2433,6 +2441,61 @@ def night_detached_log(repo: str, offset: int = 0):
     lines = [p.decode("utf-8", "replace").rstrip("\r") for p in parts if p.strip()]
     return {"ok": True, "lines": lines[-400:], "offset": offset + consumed,
             "running": bool(_night_procs(str(ws))), "log": str(lg)}
+
+
+@app.post("/v1/night/feedback")
+def post_feedback(req: FeedbackReq):
+    """人给正在跑的夜班提修改意见（2026-11-24）。
+
+    解决什么：造物模式一旦开跑，人就没法插话 —— clarify 是开工前的，
+    stop 只会杀进程等于从头再来。这条通道让人在夜里也能改方向。
+
+    **生效时机是轮边界**：意见写进磁盘，夜班下一轮开头读；
+    不打断正在写的节点（否则闸门会在半成品上判定、正在写的文件被丢弃）。
+
+    粒度三种：
+      - global：影响后续所有模块，长期累积
+      - forbid：红线，长期累积
+      - module：只影响 target 指向的模块，并进那一轮后即消费
+    """
+    _guard("agent.run")
+    ws = Path(req.repo)
+    if not ws.exists():
+        raise HTTPException(404, f"仓库不存在：{req.repo}")
+    try:
+        from core import feedback as _fb
+        fb = _fb.append(ws, req.text, scope=req.scope, target=req.target)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    running = bool(_night_procs(str(ws)))
+    return {
+        "ok": True,
+        "id": fb.id,
+        "scope": fb.scope,
+        "target": fb.target,
+        "running": running,
+        # 没在跑就说清楚，避免用户以为"已经生效"了
+        "note": ("夜班正在跑，意见将在下一轮边界生效"
+                 if running else "夜班当前没在跑，意见已存，下次开跑时生效"),
+        **_fb.stats(ws),
+    }
+
+
+@app.get("/v1/night/feedback")
+def list_feedback(repo: str):
+    """看这条仓库的全部中途意见与处理状态。"""
+    ws = Path(repo)
+    if not ws.exists():
+        raise HTTPException(404, f"仓库不存在：{repo}")
+    from core import feedback as _fb
+    items = _fb.load(ws)
+    return {
+        "ok": True,
+        **_fb.stats(ws),
+        "running": bool(_night_procs(str(ws))),
+        "rules": _fb.rules(ws),
+        "items": [f.to_json() for f in items[-100:]],
+    }
 
 
 @app.get("/v1/night/detached/status")
