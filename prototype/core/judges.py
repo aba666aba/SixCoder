@@ -52,6 +52,8 @@ cli          命令行工具（阶段 2 落地）
 """
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, runtime_checkable
@@ -261,3 +263,67 @@ def default_registry() -> JudgeRegistry:
     if _default is None:
         _default = build_default_registry()
     return _default
+
+# ── 与 stack.py 的桥接（阶段 3 第一块）──────────────────
+
+def project_stack(ws) -> str:
+    """判断这个项目属于哪个栈。
+
+    **优先看 .sixcoder/stack.json（人写的），再看实物探测，最后才回默认。**
+
+    为什么要这一层：stack.py 的 from_workspace 只认 fastapi/django，
+    一个 CLI 项目会被判成 fastapi，于是跑一堆 HTTP 判据、全红。
+    这里先认 cli，认不出再交给 stack.py。
+    """
+    from pathlib import Path as _P
+    ws = _P(ws)
+
+    # 1) 显式配置最权威
+    cfg = ws / ".sixcoder" / "stack.json"
+    if cfg.is_file():
+        try:
+            name = str((json.loads(cfg.read_text(encoding="utf-8-sig")) or {}).get("stack") or "").lower()
+            if name:
+                return name
+        except Exception:                                # noqa: BLE001
+            pass
+
+    # 2) CLI 项目的实物特征
+    if (ws / ".sixcoder" / "cli.json").is_file():
+        return STACK_CLI
+
+    # 3) 交给 stack.py（它的 detect 认 fastapi/django）
+    try:
+        from . import stack as _stack
+        return str(_stack.from_workspace(ws).name or STACK_FASTAPI)
+    except Exception:                                    # noqa: BLE001
+        return STACK_FASTAPI
+
+
+_with_cli: Optional[JudgeRegistry] = None
+
+
+def full_registry() -> JudgeRegistry:
+    """包含所有判据包（内置 + CLI）的注册表。
+
+    **必须缓存**：每次调用都新建 + register_cli 会重复注册同一个 key
+    （实测 2026-11-24：连调两次 judges_for_project 就 ValueError "判据 key 重复"）。
+    而且判据表是只读的，缓存没有副作用。
+    """
+    global _with_cli
+    if _with_cli is None:
+        reg = default_registry()
+        from . import judges_cli as _cli
+        _cli.register_cli(reg)
+        _with_cli = reg
+    return _with_cli
+
+
+def judges_for_project(ws) -> tuple[str, list]:
+    """返回 (栈名, 这个项目该跑的判据列表)。
+
+    **没有判据 != 通过**。空列表会被调用方当成"没有可验收的东西"，
+    而不是"全部通过"—— 这是 props.py:414 修完之后的口径。
+    """
+    name = project_stack(ws)
+    return name, full_registry().for_stack(name)
