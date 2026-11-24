@@ -21,6 +21,7 @@ SixCoder 的**回归安全网**。与 `prototype/checks/` 的分工：
 - `gate_snapshot.json` —— 闸门行为的基线快照（`tools/gate_snapshot.py --record` 生成）
 - `test_gate_snapshot.py` —— 把快照比对接进 pytest
 - `test_judge_contract.py` —— 阶段 1 的 Judge 协议契约测试
+- `test_judges_cli.py` —— 阶段 2 的 CLI 判据包测试（证明判据能脱离 Web）
 
 ## 跑法
 

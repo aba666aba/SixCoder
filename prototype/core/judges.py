@@ -139,6 +139,25 @@ class LegacyJudge:
         return self.fn(*args)
 
 
+@dataclass
+class CtxJudge:
+    """把"直接吃 JudgeContext"的函数包成 Judge。
+
+    和 LegacyJudge 的区别：LegacyJudge 包装的是**老闸门的散参数签名**
+    （ws, paths, contract...），CtxJudge 包装的是**新写的、统一签名**的判据。
+
+    新判据应该用这个 —— 它拿到的是完整上下文，不用再和参数名对齐。
+    这是阶段 2 之后新增判据的标准写法。
+    """
+    key: str
+    fn: Callable[[JudgeContext], GateResult]
+    applies_to: frozenset[str]
+    description: str = ""
+
+    def check(self, ctx: JudgeContext) -> GateResult:
+        return self.fn(ctx)
+
+
 # ── 注册表 ───────────────────────────────────────────────
 
 class JudgeRegistry:
