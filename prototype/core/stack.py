@@ -740,11 +740,54 @@ def detect(ws) -> str:
                     return "django"
             if list(ws.glob("*/settings.py")):
                 return "django"
+        # **前端项目**（2026-11-24 P2）：vite/next 配置 + React/Vue 依赖。
+        #
+        # 为什么必须在这里判（实测）：生成出前端骨架后，project_stack 仍返回 fastapi，
+        # 于是后续按 Web 三分层走、跑 HTTP 判据 —— 明明是个 React 项目，
+        # 引擎却拿它当后端。前端特征比"有个 app/main.py"更能定性。
+        if _looks_like_frontend(ws):
+            # 返回**生态包名**，不是裸 "frontend"。
+            # 生态包 frontend_spa 才是真正有适配器/模板/探针的那个；
+            # 这里返回 "frontend" 会让下游查不到适配器（2026-11-24 实测：
+            # 两个名字并存时，layerplan 按 frontend 匹配、adapters 按 frontend_spa 注册，
+            # 结果两边都对不上）。
+            return "frontend_spa"
         if (ws / "app" / "main.py").is_file():
             return "fastapi"
     except OSError:
         pass
     return DEFAULT_STACK
+
+
+def _looks_like_frontend(ws: Path) -> bool:
+    """前端项目的实物特征。
+
+    判据（满足任一即算）：
+      · vite.config.{js,ts,mjs} / next.config.{js,mjs} / svelte.config.js
+      · package.json 里 dependencies/devDependencies 含 react / vue / svelte
+    为什么不用"有 index.html"：FastAPI 模板也可能带一个，误判代价大。
+    """
+    ws = Path(ws)
+    for name in ("vite.config.js", "vite.config.ts", "vite.config.mjs",
+                 "next.config.js", "next.config.mjs", "svelte.config.js"):
+        if (ws / name).is_file():
+            return True
+    pkg = ws / "package.json"
+    if not pkg.is_file():
+        return False
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8-sig"))
+    except Exception:                                    # noqa: BLE001
+        return False
+    if not isinstance(data, dict):
+        return False
+    deps = {}
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        d = data.get(key)
+        if isinstance(d, dict):
+            deps.update(d)
+    return any(k in deps for k in ("react", "react-dom", "vue", "svelte", "next",
+                                   "@vitejs/plugin-react", "vite"))
 
 
 def from_workspace(ws) -> StackAdapter:

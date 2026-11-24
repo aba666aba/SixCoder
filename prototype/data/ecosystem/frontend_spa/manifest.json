@@ -3,10 +3,26 @@
  "version": "1",
  "kind": "stack",
  "description": "前端 SPA（React/Vue + Vite）：识别 package.json/vite.config/src，用浏览器探针（Playwright）做路由与 DOM 断言验收",
- "provides": ["stack:frontend_spa", "probe:browser"],
- "needs": ["node", "npm"],
+ "provides": [
+  "stack:frontend_spa",
+  "probe:browser"
+ ],
+ "needs": [
+  "node",
+  "npm"
+ ],
  "adapter_class": "FrontendSpaAdapter",
- "detect_markers": ["package.json", "index.html", "vite.config.js", "vite.config.ts"],
- "verify": ["node", "--version"],
- "notes": "骨架在 templates/（React）。Vue 模板可另建 frontend_spa_vue 包。"
+ "detect_markers": [
+  "vite.config.js",
+  "vite.config.ts",
+  "vite.config.mjs",
+  "next.config.js",
+  "next.config.mjs",
+  "svelte.config.js"
+ ],
+ "verify": [
+  "node",
+  "--version"
+ ],
+ "notes": "骨架在 templates/（React）。Vue 模板可另建 frontend_spa_vue 包。 | 2026-11-24 修正 detect_markers：原来含 \"package.json\"，而 ecosystem.detect 是 any() 语义 —— 任何 Node 项目（含 Express 后端）都会被判成前端 SPA。现在只认真正的构建配置特征；React/Vue 依赖的补充判断在 core/stack._looks_like_frontend 里。"
 }

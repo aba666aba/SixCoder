@@ -292,10 +292,16 @@ def project_stack(ws) -> str:
     if (ws / ".sixcoder" / "cli.json").is_file():
         return STACK_CLI
 
-    # 3) 交给 stack.py（它的 detect 认 fastapi/django）
+    # 3) 交给 stack.py 的 detect。
+    #
+    # 注意用 detect() 而不是 from_workspace().name（2026-11-24 实测踩到）：
+    #   from_workspace 内部是 get(detect(ws))，而 get() 只认 _ADAPTERS 里的栈，
+    #   认不出就**回退到 fastapi 适配器** —— 于是 detect 明明返回 "frontend"，
+    #   .name 却是 "fastapi"，前端项目被当成后端。
+    #   detect 是纯粹的名称判定，没有适配器回退，才是这里要的。
     try:
         from . import stack as _stack
-        return str(_stack.from_workspace(ws).name or STACK_FASTAPI)
+        return str(_stack.detect(ws) or STACK_FASTAPI)
     except Exception:                                    # noqa: BLE001
         return STACK_FASTAPI
 
