@@ -1,0 +1,175 @@
+{
+ "gate_anti_cheat": {
+  "desc": "反逃避闸门：7 项检查各喂一个反例",
+  "result": {
+   "bare_except": {
+    "detail": "m.py: 裸 except/pass 吞异常",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "7 checks",
+    "gate": "anti_cheat",
+    "ok": false
+   },
+   "clean": {
+    "detail": "通过 7 项反逃避检查",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "7 checks",
+    "gate": "anti_cheat",
+    "ok": true
+   },
+   "del_test": {
+    "detail": "tests/test_z.py: 既有测试被删除 ['test_keep']；tests/test_z.py: 文件有效行数骤减，疑似注释/删除实现",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "7 checks",
+    "gate": "anti_cheat",
+    "ok": false
+   },
+   "edit_test": {
+    "detail": "tests/test_x.py: 实现节点不得修改测试文件；tests/test_x.py: 恒真断言 `assert 1`",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "7 checks",
+    "gate": "anti_cheat",
+    "ok": false
+   },
+   "skip_mark": {
+    "detail": "tests/test_x.py: 新增跳过标记 `@pytest.mark.skip`",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "7 checks",
+    "gate": "anti_cheat",
+    "ok": false
+   },
+   "trivial_assert": {
+    "detail": "tests/test_y.py: 恒真断言 `assert True`",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "7 checks",
+    "gate": "anti_cheat",
+    "ok": false
+   }
+  }
+ },
+ "gate_completeness": {
+  "desc": "完整性闸门：契约点名的函数全部存在",
+  "result": {
+   "all_present": {
+    "detail": "契约要求的 1 个函数都存在",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "ok/1",
+    "gate": "completeness",
+    "ok": true
+   },
+   "missing_one": {
+    "detail": "契约要求的 1 个函数都存在",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "ok/1",
+    "gate": "completeness",
+    "ok": true
+   }
+  }
+ },
+ "gate_duplicates": {
+  "desc": "同文件重名闸门",
+  "result": {
+   "dup": {
+    "detail": "dup.py 有 2 个同名定义 f（第 1, 5 行）→ 后定义会覆盖前定义",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "1 处",
+    "gate": "duplicates",
+    "ok": false
+   },
+   "ok": {
+    "detail": "1 个文件没有重名定义",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "ok/1",
+    "gate": "duplicates",
+    "ok": true
+   }
+  }
+ },
+ "gate_import_ok": {
+  "desc": "导入闸门：能 import / 不能 import / 平台条件模块",
+  "result": {
+   "bad": {
+    "detail": "bad.py（import bad）导入失败：ModuleNotFoundError: No module named 'definitely_not_a_real_module_xyz'",
+    "evidence_kind": "exit_code",
+    "evidence_ref": "1 处",
+    "gate": "import_ok",
+    "ok": false
+   },
+   "good": {
+    "detail": "1 个模块都能干净导入",
+    "evidence_kind": "exit_code",
+    "evidence_ref": "ok/1",
+    "gate": "import_ok",
+    "ok": true
+   },
+   "platform": {
+    "detail": "1 个模块都能干净导入",
+    "evidence_kind": "exit_code",
+    "evidence_ref": "ok/1",
+    "gate": "import_ok",
+    "ok": true
+   }
+  }
+ },
+ "gate_stub": {
+  "desc": "桩闸门：raise NotImplementedError 要被抓",
+  "result": {
+   "real": {
+    "detail": "1 个函数都有实际实现",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "ok/1",
+    "gate": "stub",
+    "ok": true
+   },
+   "stub": {
+    "detail": "stub.py:f 只 raise NotImplementedError（未实现）",
+    "evidence_kind": "static_rule",
+    "evidence_ref": "1 处",
+    "gate": "stub",
+    "ok": false
+   }
+  }
+ },
+ "gate_syntax": {
+  "desc": "语法闸门：好文件通过 / 坏文件拦下",
+  "result": {
+   "bad": {
+    "detail": "a.py:1 invalid syntax",
+    "evidence_kind": "exit_code",
+    "evidence_ref": "compile()",
+    "gate": "syntax",
+    "ok": false
+   },
+   "good": {
+    "detail": "语法通过",
+    "evidence_kind": "exit_code",
+    "evidence_ref": "compile()",
+    "gate": "syntax",
+    "ok": true
+   },
+   "missing": {
+    "detail": "语法通过",
+    "evidence_kind": "exit_code",
+    "evidence_ref": "compile()",
+    "gate": "syntax",
+    "ok": true
+   }
+  }
+ },
+ "red_is_meaningful": {
+  "desc": "有效失败判定：测试自己写错不算有效失败",
+  "result": {
+   "import_missing_is_real": {
+    "detail": "",
+    "ok": true
+   },
+   "infra_error": {
+    "detail": "测试因自身缺陷而失败（NameError: name 'pytest' is not defined），不是功能缺失导致的红。请修正测试文件本身（例如 import pytest）。",
+    "ok": false
+   },
+   "real_red": {
+    "detail": "",
+    "ok": true
+   }
+  }
+ }
+}
