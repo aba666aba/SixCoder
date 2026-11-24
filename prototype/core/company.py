@@ -585,6 +585,9 @@ def _night_inner(repo: Path, requirement: str, model: str,
                 if _answered:
                     # 人在等待窗口内答了 -> 把答案当补充需求，重新合成契约
                     if emit:
+                        # 400 是 emit 给前端的展示截断：只决定界面里显示多长，
+                        # 完整答复已拼进 requirement 继续跑（下面 _req2 用全文）。
+                        # 判据读的是文件，不读这个字段 —— 属展示类，不是硬限制。
                         emit("question_answered", {"answer": _answered[:400]})
                     _req2 = (str(requirement)
                              + "\n\n【人类就歧义的答复】\n" + _answered)

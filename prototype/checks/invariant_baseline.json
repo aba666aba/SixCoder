@@ -5433,35 +5433,35 @@
     "kind": "禁令",
     "value": "### 红线（绝对不许违反）",
     "snip": "lines.append(\"### 红线（绝对不许违反）\")",
-    "依据": "（待填：这个数字凭什么）"
+    "依据": "提示词约定（不是系统硬限制）：这是拼给模型看的段落标题，作用是让绝对不许违反的条目醒目。引擎不执行检查强制它，真正的约束由判据（anti_cheat 等）兜底。"
   },
   "judges_cli.py|截断长度|400|ae2fe154": {
     "file": "judges_cli.py",
     "kind": "截断长度",
     "value": "400",
     "snip": "f\"`{run} {args}` 退出码 {code}：\" + \" | \".join(tail)[:400], ms)",
-    "依据": "（待填：这个数字凭什么）"
+    "依据": "证据展示截断：CLI 退出时 stderr tail 截到 400 字进 GateResult.detail，只决定人看到的诊断长度。判定依据是退出码，不看这段文本。"
   },
   "judges_cli.py|截断长度|40|79fb11da": {
     "file": "judges_cli.py",
     "kind": "截断长度",
     "value": "40",
     "snip": "\"输出里找不到：\" + \"、\".join(str(m)[:40] for m in missing[:5]),",
-    "依据": "（待填：这个数字凭什么）"
+    "依据": "证据展示截断：缺失符号名逐个截到 40 字拼提示。判定依据是 missing 列表是否为空，不看截断后文本。"
   },
   "judges_lang.py|截断长度|400|f25a0461": {
     "file": "judges_lang.py",
     "kind": "截断长度",
     "value": "400",
     "snip": "\"`{}` 退出码 {}：{}\".format(label, code, out[:400]), ms)",
-    "依据": "（待填：这个数字凭什么）"
+    "依据": "证据展示截断：编译器 stdout 截到 400 字进 detail，只决定诊断显示长度。判定依据是返回码。"
   },
   "judges_probe.py|截断长度|300|f0c7dbd8": {
     "file": "judges_probe.py",
     "kind": "截断长度",
     "value": "300",
     "snip": "fails.append(name + \": \" + str(r.get(\"detail\") or \"\")[:300])",
-    "依据": "（待填：这个数字凭什么）"
+    "依据": "证据展示截断：每条失败探针 detail 截到 300 字拼接。判定依据是 probe.run 的 ok 布尔值，不看文本。"
   },
   "layerplan.py|截断长度|80|476ea40a": {
     "file": "layerplan.py",
@@ -5469,5 +5469,33 @@
     "value": "80",
     "snip": "plan = ecosystem_plan(nm, str(row.get(\"description\") or \"\")[:80])",
     "依据": "计划描述文字截断：生态包 manifest 的 description 拼进生成计划说明时取前 80 字符。纯展示用——layerplan 的 description 字段只给人看和写日志，不参与任何判据或生成决策。超了会怎样：说明文字变长，无功能影响。"
+  },
+  "company.py|截断长度|400|a25b18f4": {
+    "file": "company.py",
+    "kind": "截断长度",
+    "value": "400",
+    "snip": "emit(\"question_answered\", {\"answer\": _answered[:400]})",
+    "依据": "展示类截断（emit 事件）：question_answered 的 answer 截到 400 字只决定界面显示多长。完整答复已拼进 requirement 继续跑，判据读产物文件不读这个字段。"
+  },
+  "deadlock.py|截断长度|200|1f6b8bb8": {
+    "file": "deadlock.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "\"why\": str(x.get(\"reason\") or \"\")[:200]}",
+    "依据": "展示类截断：待补全栈的 reason 截到 200 字只影响提示文本长度，判定不受影响。"
+  },
+  "visual_llm.py|禁令|: true}**。不要为了凑数编问题。|a0096032": {
+    "file": "visual_llm.py",
+    "kind": "禁令",
+    "value": ": true}**。不要为了凑数编问题。",
+    "snip": "**没问题就返回 {\"problems\": [], \"looks_ok\": true}**。不要为了凑数编问题。\"\"\"",
+    "依据": "提示词约定（不是系统硬限制）：_PROMPT 是发给视觉模型的指令，末尾一句约束模型输出形态防止杜撰问题。引擎不强制它；真正的保护是 review_screenshots 只把 problems 当告警、不参与 pass/fail。"
+  },
+  "visual_llm.py|截断长度|200|6ce33fd7": {
+    "file": "visual_llm.py",
+    "kind": "截断长度",
+    "value": "200",
+    "snip": "% str(r.get(\"error\") or \"\")[:200]}",
+    "依据": "展示类截断：远端错误原因截到 200 字写进 skipped，只用于排查显示。兜底永远 ok=True，不影响主流程。"
   }
 }

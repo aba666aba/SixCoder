@@ -549,8 +549,13 @@ def _packet(ws, st: dict) -> str:
             "开 install_tool 处方，让引擎把工具现装进本地工具库（装完引擎会复验，"
             "rc≠0 自动回滚）。注意：工具链（go/cargo/playwright 等系统软件）引擎"
             "不自动装包，只能装「代码+自检脚本」形态的工具。",
-        "输出格式": '{"verdict":"unlock|keep|fix_judge","reason":"<一句话>",'
-                     '"judge_fix":"<人话说明>","judge_patch":[<操作>, ...]}',
+        "输出格式": "{\"verdict\":\"unlock|keep|fix_judge\",\"reason\":\"<一句话>\",\"judge_fix\":\"<人话说明>\",\"judge_patch\":[<操作>, ...],\"dissenting_case\":\"<反对时必填：理由+具体例子>\",\"examples\":\"<支持你判断的1-2个可复现场景>\",\"risks_seen\":\"<你看到但别人可能没注意的问题>\"}",
+        "反对必须举证（2026-11-24 用户定稿）":
+            "**所有协商都要三方全票**，一票反对就卡住。所以反对不能只说一句 keep："
+            "必须在 dissenting_case 写清**凭什么**，在 examples 给**1-2 个能复现的具体场景**"
+            "（例如：某输入下判据 A 要求成功、判据 B 要求失败，两者互斥），"
+            "在 risks_seen 写**你看到但别人可能漏掉的问题**。这是协商唯一的价值来源。"
+            "引擎会检查：投 keep/fix_judge 但没给任何举证 = 记为无依据反对，下一轮点名这一票。",
         "引擎立场（2026-11-19 用户定稿）": "引擎**不做任何项目假设**：它不知道"
             "谁是教师/学生，也不认识任何具体业务。开放性问题（判据该怎么写、"
             "期望值是否合理、步骤要不要增删）由你们三方判断并给处方，引擎只做"
@@ -601,8 +606,8 @@ def _packet(ws, st: dict) -> str:
         "第三票 fix_judge（2026-11-18 用户口径）": "如果你判断症结在判据本身（题目自相"
             "矛盾——同一件事一条要成功一条要失败、同一端点两份 status 词表、夹具里没有"
             "断言要的数据），投 fix_judge 并在 judge_fix 写清怎么改。写作者与两名审判官"
-            "各一票，任一选项拿到 ≥2 票即成决议：unlock=放行修复、fix_judge=改判据后重跑、"
-            "keep=收工等人。",
+            "各一票。**必须三方全票**才算决议（2026-11-24 用户定稿，不再多数决）："
+            "unlock=放行修复、fix_judge=改判据后重跑、keep=收工等人。"
     }, ensure_ascii=False)
 
 
@@ -679,6 +684,17 @@ def decide_env_install(writer_verdict: str, patches: list,
     return [(m, list(pk)) for (m, pk) in sorted(agree)], notes
 
 
+#: 举证字段的存储上限（2026-11-24）。
+#: 为什么需要上限：远端可能把整段推理贴进 dissenting_case，
+#: 而这段要进下一轮协商包 —— 不封顶会让包体积爆炸（实测过长证据
+#: 会把更有用的判据定义挤出上下文）。
+#: 为什么是这几个值：900 字够说清一个具体依据（约两三百汉字），
+#: 600 字够列 2-3 条风险；再长就是复述已有信息了。
+#: 超了会怎样：只截展示，不影响投票结果（投票看的是 verdict 字段）。
+EVIDENCE_MAX_CHARS = 900
+RISKS_MAX_CHARS = 600
+
+
 def negotiate(ws, emit=None) -> dict:
     """三方协商。写作者默认投解锁（提案人）；≥1 名审核者同意 = 2/3 多数。"""
     st = load_state(ws)
@@ -695,9 +711,26 @@ def negotiate(ws, emit=None) -> dict:
             verdict = "unavailable"
         votes[role] = verdict
         _patch = v.get("judge_patch")
+        # **举证字段**（2026-11-24 用户定稿）：全票制下一票反对就卡住，
+        # 所以反对必须说清"凭什么 + 举个具体例子"，否则另外两方无从考虑，
+        # 协商就退化成"一个人一句话否决全部"。
+        _dissenting = str(v.get("dissenting_case") or "").strip()
+        _examples = v.get("examples")
+        if isinstance(_examples, str):
+            _examples = [_examples]
+        _examples = [str(x)[:300] for x in (_examples or []) if str(x).strip()][:3]
+        _risks = str(v.get("risks_seen") or "").strip()
+        _is_against = verdict in ("keep", "fix_judge")
+        # 投了反对但一个字道理都没给 -> 标记出来，不悄悄吞掉。
+        # 注意：不直接翻成 unlock（那等于"不举证就能通过"，方向反了）。
+        _no_evidence = bool(_is_against and not (_dissenting or _examples or _risks))
         reasons[role] = {"reason": str(v.get("reason") or "")[:300],
                          "judge_fix": str(v.get("judge_fix") or "")[:300],
                          "judge_patch": _patch if isinstance(_patch, list) else [],
+                         "dissenting_case": _dissenting[:EVIDENCE_MAX_CHARS],
+                         "examples": _examples,
+                         "risks_seen": _risks[:RISKS_MAX_CHARS],
+                         "no_evidence": _no_evidence,
                          "error": "" if r.get("ok") else str(r.get("error") or "")[:200]}
     st["votes"] = votes
     st["vote_reasons"] = reasons
@@ -707,9 +740,10 @@ def negotiate(ws, emit=None) -> dict:
     #   两名独立审核者都指向判据时，放行写作者去改代码等于让他背锅）。
     tally = {k: sum(1 for v in votes.values() if v == k)
              for k in ("unlock", "keep", "fix_judge")}
+    _total = 3                                    # 三方：写作者 + 两名审核者
     decision = ""
     for opt in ("fix_judge", "unlock"):        # fix_judge 优先
-        if tally.get(opt, 0) >= 2:
+        if tally.get(opt, 0) == _total:        # **全票**才算决议（2026-11-24 用户定稿）
             decision = opt
             break
     if not decision:
@@ -946,7 +980,9 @@ def on_round_result(ws, round_no: int, regressed: list[str], green: list[str],
         votes[role] = verdict
         if verdict == "pass":
             agree += 1
-    resolved = agree >= 2                              # 3 票里 ≥2 = 多数
+    # **全票**：所有在席审核者都 pass 才算通过（2026-11-24 用户定稿）。
+    # 多数决会让"改完仍然有问题"那一票被忽略，而那恰恰最该听。
+    resolved = bool(votes) and agree >= len(votes)
     out = {"acted": True, "resolved": resolved, "votes": votes,
            "still_red": still_red, "restore_backup": None}
     if resolved:

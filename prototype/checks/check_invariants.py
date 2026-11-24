@@ -202,6 +202,12 @@ def scan() -> list[dict]:
             #
             # 识别办法：该行若是 "裸字符串字面量"（整行就是一个字符串/
             # 字符串拼接），说明它是在拼文案，不是执行限制判断。
+            # 提示词变量（_PROMPT = """…""" / SYSTEM = …）里的"不要/不许"是给模型的
+            # 行为指令，不是引擎的硬限制 —— 同样不该进"必须有依据"的清单（2026-11-24 补充）。
+            _is_prompt_assign = bool(re.match(
+                r'^[A-Z_][A-Z0-9_]*\s*=\s*[rbu]?[\"\']', line.strip()))
+            if _is_prompt_assign:
+                continue
             _stripped = line.strip()
             _is_text_block = bool(re.fullmatch(
                 r'["\'].*["\']\s*[,)]?', _stripped)) or _stripped.startswith('"')
