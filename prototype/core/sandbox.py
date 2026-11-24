@@ -1,4 +1,4 @@
-"""沙箱：路径牢笼 + 命令策略 + 备份日志 + 只读模式。
+"""沙箱：路径牢笼 + 命令策略 + 备份日志 + 审阅模式。
 
 必须说清楚它的边界（docs 里也要写）：
 - 这一层是**进程内策略沙箱**：防误操作、防路径越界、防网络外联、防破坏性命令，**不是**安全边界。
@@ -79,7 +79,7 @@ class Sandbox:
     # -------------------------------------------------------------- 路径牢笼
     def jail(self, rel: str, write: bool = False) -> Path:
         if write and self.mode == "readonly":
-            raise SandboxError("沙箱处于只读模式，禁止写入")
+            raise SandboxError("沙箱处于审阅模式，禁止写入")
         p = Path(rel)
         target = (self.ws / p).resolve() if not p.is_absolute() else p.resolve()
         if target != self.ws and self.ws not in target.parents:
@@ -92,7 +92,7 @@ class Sandbox:
     # -------------------------------------------------------------- 命令策略
     def check_cmd(self, cmd: str) -> str:
         if self.mode == "readonly" and not re.match(r"^(dir|ls|type|cat|echo|git (status|log|diff|ls-files|rev-parse|show))", cmd.strip()):
-            raise SandboxError("沙箱处于只读模式，仅允许查看类命令")
+            raise SandboxError("沙箱处于审阅模式，仅允许查看类命令")
         head = cmd.strip().split()
         if not head:
             raise SandboxError("空命令")
@@ -124,8 +124,22 @@ class Sandbox:
     def backup(self, path: Path, action: str = "write") -> str | None:
         if not path.exists():
             return None
-        token = time.strftime("%H%M%S") + "-" + str(int(time.time() * 1000) % 100000)
+        # token 必须**唯一**（2026-11-23 修）。旧写法
+        #   token = strftime("%H%M%S") + "-" + str(int(time.time()*1000) % 100000)
+        # 有两处会撞车：
+        #   ① 毫秒取模 100000 后**丢掉了高位**，不是单调递增（同一秒内还会回绕）；
+        #   ② 同一毫秒内连续两次备份 → token 完全相同 → 备份文件同名互相覆盖，
+        #      但 journal.jsonl 追加了**两行**指向同一个文件。
+        # 后果：`prune_journal` 按行序留 3 份时，其中两行指向同一文件 → 实际只剩 2 份，
+        # 撤销栈比承诺的少一层（实测全量自检里偶发，单独复跑又绿）。
+        # 修法：**按文件名去重**，撞了就加序号；不依赖时钟精度。
         self.journal_dir.mkdir(parents=True, exist_ok=True)
+        base = time.strftime("%H%M%S") + "-" + str(int(time.time() * 1000) % 100000)
+        token = base
+        seq = 0
+        while (self.journal_dir / f"{token}__{path.name}").exists():
+            seq += 1
+            token = f"{base}s{seq}"          # 同一毫秒的第 N 份：带 sN 后缀，仍可按前缀分组
         shutil.copy2(path, self.journal_dir / f"{token}__{path.name}")
         entry = JournalEntry(token=token, ts=time.strftime("%Y-%m-%d %H:%M:%S"),
                              rel=path.relative_to(self.ws).as_posix(),
@@ -146,17 +160,22 @@ class Sandbox:
         if len(entries) <= self.KEEP_PER_FILE:
             return {"removed": 0, "kept": len(entries), "freed_bytes": 0}
 
-        # 1) 每个文件只留最近 KEEP_PER_FILE 份（token 前缀是时分秒，字符串序 = 时间序）
+        # 1) 每个文件只留最近 KEEP_PER_FILE 份
+        # 2026-11-23 修：原来按 `token` 字符串序当时间序 —— **token 只有秒级精度**
+        # （`%H%M%S` + 毫秒取模 100000 的后缀，跨秒不单调）。同一秒内写 3 次以上时
+        # 排序并列，`es[-3:]` 保留哪几份就变成实现细节；实测全量自检里
+        # `check_sandbox_journal` 偶发"存 30 次后仍只有 3 个副本 → 实际 2 个"，
+        # 单独复跑又绿（约 448 秒的一轮里撞上同一秒）。
+        # journal.jsonl 是**追加写**的，行序就是真实先后序 → 按行序切，不按 token 切。
         by_rel: dict[str, list[dict]] = {}
         for e in entries:
             by_rel.setdefault(str(e.get("rel") or ""), []).append(e)
         survivors: list[dict] = []
         for es in by_rel.values():
-            es.sort(key=lambda x: str(x.get("token") or ""))
             survivors.extend(es[-self.KEEP_PER_FILE:])
 
         # 2) 全局数量 / 体积上限：从最新往回数，超额的老副本淘汰
-        survivors.sort(key=lambda x: str(x.get("token") or ""))
+        #    （`entries` 已是行序；这里不再二次排序，避免又按 token 打乱）
         limit_bytes = self.MAX_TOTAL_MB * 1024 * 1024
         kept: list[dict] = []
         total = 0
@@ -187,7 +206,8 @@ class Sandbox:
         except OSError:
             pass
         try:
-            kept.sort(key=lambda x: str(x.get("token") or ""))
+            # 保持 survivors 的原序（journal 行序）落盘：撤销栈"最近一次在最后"依赖行序，
+            # 按 token 重排会在同一秒内把顺序打乱（2026-11-23 同源 bug）。
             tmp = self.journal_file.with_suffix(".jsonl.tmp")
             with tmp.open("w", encoding="utf-8") as fh:
                 for e in kept:

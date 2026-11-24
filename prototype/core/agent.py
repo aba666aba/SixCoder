@@ -1832,7 +1832,7 @@ def _run_node(ws: Path, task_id: str, node: dict, model: str,
             emit("notice", {"message": escalation_note[:200]})
 
     # 节点状态用 stuck（有节点没通过、需人工介入）；不要用 needs_human ——
-    # 那个词留给"等人工审批"（开发者模式的 needhuman），两个概念混了会误导人。
+    # 那个词留给"等人工审批"（精修模式的 needhuman），两个概念混了会误导人。
     db.execute("UPDATE nodes SET status=? WHERE id=?", ("stuck", node["nid"]))
     reason = feedback or "（本地没有给出更具体的原因）"
     if escalation_note:
@@ -2099,7 +2099,7 @@ def _run_task(task_id: str, repo: Path, requirement: str, target: str,
     db.execute("UPDATE tasks SET audit_json=?, updated_at=? WHERE id=?",
                (json.dumps(a, ensure_ascii=False), db.now(), task_id))
     # 任务终态只有三种：done / stuck（有节点没通过，需人工介入）/ failed。
-    # 注意 stuck 与"等人工审批"无关——后者只在开发者模式出现，且不会落到任务状态里。
+    # 注意 stuck 与"等人工审批"无关——后者只在精修模式出现，且不会落到任务状态里。
     state = "done" if a["nodes_ok"] == a["nodes_total"] and a["nodes_total"] else "stuck"
     db.execute("UPDATE tasks SET state=?, updated_at=? WHERE id=?", (state, db.now(), task_id))
     # 交付件：根目录 README + MIT LICENSE（内容由 AST 扫描生成，不是模型编的）

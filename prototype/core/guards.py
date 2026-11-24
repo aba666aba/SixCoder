@@ -1,9 +1,9 @@
 """关键节点守卫：把"要不要人点头"集中在这五个函数里，别散落在各处。
 
 为什么单独一层：
-- 甲方模式（auto_approve=True）→ 全部直接放行，夜里无人值守也能跑完；
-- 开发者模式 → 五个关键节点阻塞等人（`needhuman`），人点通过才继续；
-- 只读模式 → 压根没有写/提交/推送能力，根本走不到这里。
+- 造物模式（auto_approve=True）→ 全部直接放行，夜里无人值守也能跑完；
+- 精修模式 → 五个关键节点阻塞等人（`needhuman`），人点通过才继续；
+- 审阅模式 → 压根没有写/提交/推送能力，根本走不到这里。
 
 调用点（只有这些，别在别处再写一遍）：
     file.write  → iterate.execute_local（写盘前）
@@ -25,7 +25,7 @@ def _need(node: str) -> bool:
 
 
 def gate_file_write(ws: Path, rel: str, old: str, new: str, emit=None) -> dict:
-    """写盘前：开发者模式要人看一眼"改了什么"（给 diff，不给一句"要写文件"）。"""
+    """写盘前：精修模式要人看一眼"改了什么"（给 diff，不给一句"要写文件"）。"""
     if not _need("file.write"):
         return {"ok": True, "decision": "auto"}
     diff = "\n".join(list(difflib.unified_diff(
@@ -52,7 +52,7 @@ def gate_remote_allowed() -> dict:
     """档位层面的远端总开关：甲方强制开、只读强制关、开发者看设置里的开关。
 
     放在这里（而不是各处自己判断）是为了只有一处口径 —— 用户的说法是
-    "这个开关只要开发者模式有，甲方是强制开启的，只读是强制关闭的"。
+    "这个开关只要精修模式有，甲方是强制开启的，只读是强制关闭的"。
     """
     try:
         from . import policy
@@ -63,7 +63,7 @@ def gate_remote_allowed() -> dict:
 
 
 def gate_remote_call(ws: Path | str, prompt_chars: int, task_id: str = "", emit=None) -> dict:
-    # 0) 档位总开关：开发者模式关掉远端时，连审批入口都不给（甲方强制开、只读强制关）
+    # 0) 档位总开关：精修模式关掉远端时，连审批入口都不给（甲方强制开、只读强制关）
     sw = gate_remote_allowed()
     if not sw["ok"]:
         return sw

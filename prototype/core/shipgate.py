@@ -704,5 +704,15 @@ def ship_check(ws, bp) -> dict:
     else:
         add("测试通过", False, "没有 tests/test_api.py")
 
+    # 4) 测试不是空壳（2026-11-23）：`pytest` 返回码 0 只说明"没红"，
+    # 不说明"测到了东西"。引擎自己生成的 tests/ 之外，作者手写的测试也算进来。
+    try:
+        from . import testweight as _tw
+        _scan = _tw.scan(Path(ws))
+        add("测试有真断言", not _scan["shell_files"] and _scan["verified"] > 0,
+            _tw.summarize(_scan, limit=2))          # 展示类截断：体检行 detail 的展示预算，只影响给人看多长；判据读原始 problems 列表
+    except Exception as exc:                             # noqa: BLE001
+        add("测试有真断言", False, f"扫描跑不动（{type(exc).__name__}），不给通过结论")
+
     ok = all(r["ok"] for r in rows)
     return {"ok": ok, "rows": rows}

@@ -575,7 +575,7 @@ def _payload_for(step: dict, r: dict, messages: list[dict], json_mode: bool,
     # 以前这里兜了个 8000，等于第二个真相源，会把小任务的配额顶大、大任务顶小。
     cap = int(step.get("max_output_tokens") or r.get("max_output_tokens") or 0)
     # **思考也要占 max_tokens**：官方口径里 max_tokens 是"思考 + 正文"的**总和**。
-    # 实测踩过（2026-11-05 甲方模式第一夜）：flash:max 档 8000 配额被 reasoning 吃满，
+    # 实测踩过（2026-11-05 造物模式第一夜）：flash:max 档 8000 配额被 reasoning 吃满，
     # 正文 0 token → 契约合成返回空 → 整夜白跑（两次调用各 ¥0.03）。
     # 所以开思考时必须把 reasoning 的额度**加在正文配额之上**，否则"越想越写不出来"。
     _mt = max_tokens_for(cap, effort, _ceiling_for(step, r))
@@ -990,7 +990,7 @@ def complete(prompt: str = '', task_id: str = '', node_id: str = 'architect',
     ok, why = available()
     if not ok:
         return {'ok': False, 'error': why, 'answer': ''}
-    # 关键节点守卫：开发者模式在"把代码发往远端"前要人点头（甲方模式自动放行）
+    # 关键节点守卫：精修模式在"把代码发往远端"前要人点头（造物模式自动放行）
     try:
         from . import guards
         g = guards.gate_remote_call(workspace,

@@ -671,7 +671,7 @@ def ask_architect(ws: Path, task_id: str, contracts: dict, state: dict,
     实测依据见 docs/模型门槛 §4.0：符号级编辑关思考不掉质量，但开放式诊断有风险，
     所以这件事必须由阶梯控制，不能全局一刀切。
 
-    plan：人给的实现方案（开发者模式）。给了就是**权威**，远端只负责在它里面派工，
+    plan：人给的实现方案（精修模式）。给了就是**权威**，远端只负责在它里面派工，
     不许另起一套架构 —— 这一档的上限是人，不是远端。
     """
     from . import remote
@@ -707,7 +707,7 @@ def ask_architect(ws: Path, task_id: str, contracts: dict, state: dict,
         lines.append("# 当前源码（小文件全文）")
         lines.extend(src_dump)
     if want_plan:
-        # 甲方模式开局：先要"方案"，再要"工作单"。方案定了，后面每一张单都照它做，
+        # 造物模式开局：先要"方案"，再要"工作单"。方案定了，后面每一张单都照它做，
         # 避免系统在实现过程中自己改架构（这种事在夜班里极难事后发现）。
         lines.append("")
         lines.append("# 本轮额外要求（方案优先）")
@@ -1112,7 +1112,7 @@ def execute_local(ws: Path, order: dict, model: str, attempts: int = 1,
         text = res.get("text") or ""
         if re.search(r'"edits"', text):
             break
-        # 模型选择"不猜、发问"（开发者模式）：登记成待答；已经有人答过就直接复用答案重问。
+        # 模型选择"不猜、发问"（精修模式）：登记成待答；已经有人答过就直接复用答案重问。
         q = _extract_question(text)
         if q:
             try:
@@ -1196,7 +1196,7 @@ def execute_local(ws: Path, order: dict, model: str, attempts: int = 1,
                 break
         if not rep.ok:
             return {"ok": False, "reason": f"渲染失败：{rep.reason}"}
-    # 关键节点守卫：开发者模式在这里等人点头（甲方模式自动放行；只读模式根本走不到）
+    # 关键节点守卫：精修模式在这里等人点头（造物模式自动放行；审阅模式根本走不到）
     try:
         from . import guards
         g = guards.gate_file_write(ws, path, source, rep.new_source, emit=emit)
@@ -1279,7 +1279,7 @@ def execute_order_remote(ws: Path, order: dict, evidence: str = "", brief: str =
 
     两种身份：
       · as_author=False（默认）：**救援**。本地连续失败后让远端出符号级修复（RESCUE_PROMPT）。
-      · as_author=True：**主笔**。甲方模式下代码默认由远端写，用的是与本地完全相同的
+      · as_author=True：**主笔**。造物模式下代码默认由远端写，用的是与本地完全相同的
         执行者提示词（约束一致），远端只负责"想得比本地好"。
 
     为什么需要救援那一档（实测）：`create_table` 这种明显可实现的函数，本地连失败 3 次就被

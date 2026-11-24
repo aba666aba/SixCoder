@@ -170,6 +170,19 @@ def gate_assertions(ws: Path, test_paths: list[str]) -> GateResult:
                 verifications = [n for n in ast.walk(node) if _is_verify(n)]
                 if not asserts and not verifications:
                     problems.append(f"{rel}::{node.name} 无任何断言（恒真测试）")
+    # 2026-11-23：上面这轮只看**已有测试函数**，漏了三种更常见的空壳形态 ——
+    # 测试文件里 0 个测试函数、只有 `assert True`、函数体只有 pass。night3 的
+    # `test_clean.py` 全文一行 docstring，pytest 照样"1 passed"，交付报告 8/8。
+    # 统一交给 core/testweight.py 判（同一份口径给交付报告与上线体检）。
+    try:
+        from . import testweight as _tw
+        scan = _tw.scan(Path(ws))
+        checked = max(checked, int(scan.get("tests") or 0))
+        for line in scan.get("problems") or []:
+            if line not in problems:
+                problems.append(line)
+    except Exception as exc:                             # noqa: BLE001
+        problems.append(f"空壳测试扫描跑不动（{type(exc).__name__}），不给通过结论")
     ok = not problems and checked > 0
     return GateResult("assertions", ok, "static_rule", evidence_ref=f"checked={checked}",
                       detail="；".join(problems[:5]) or f"{checked} 个测试均有断言",

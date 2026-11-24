@@ -259,7 +259,29 @@ def inject_sections(text: str, goal_text: str) -> str:
 
 # ------------------------------------------------------------------ 判据（真跑、机械可判）
 def _read_text(p: Path) -> str:
-    return p.read_text(encoding="utf-8", errors="replace")
+    """读产物源码；**多编码兼容**，别让非 UTF-8 的中文把判据变成假红。
+
+    为什么不能只写 `read_text(encoding="utf-8", errors="replace")`（2026-11-23）：
+    `errors="replace"` 会把 GBK 字节换成 U+FFFD，而中文**只要有一处坏字节，
+    `re` 的字符类就会连锁失配** —— 实测 `check_enterprise_cd.py` 的
+    `[7] 真跑 inspect` 用 GBK 写了个 `@router.get("/health")`，整个文件被替换成
+    乱码，健康端点判据直接报"源码里找不到"。用户机器上生成的代码是 GBK 很常见
+    （Windows 记事本、模型按"中文 Windows 默认编码"写文件），这条判据不能假设 UTF-8。
+
+    顺序：BOM 认出来 → UTF-8 → GBK/CP936 → latin-1（最后兜底，绝不抛）。
+    """
+    try:
+        raw = p.read_bytes()
+    except OSError:
+        return ""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8", errors="replace")
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1", errors="replace")
 
 
 def _version_chain(p: Path) -> list[str]:
@@ -372,12 +394,26 @@ def _check_compose(txt: str) -> list[str]:
 
 
 def _iter_py(ws: Path):
+    """遍历产物仓里的 .py（跳掉引擎/依赖/版本库目录）。
+
+    2026-11-23 修：旧版写的是 `any(str(x).startswith(".tmp") for x in p.parts)` ——
+    `p.parts` 是**整条绝对路径**，只要用户把项目放在任何名字以 `.tmp` 开头的目录
+    下面（`C:\\tmp\\proj`、`D:\\.tmp_home\\proj`，本项目自检就全在
+    `prototype/.tmp/` 下跑），所有源文件都会被静默跳过 → 判据报"源码里找不到"，
+    而源码明明在那儿。**结果不是漏报而是误报**：把有健康端点的仓判成没注册。
+    正确做法：只看**相对于产物仓根**的那几段路径。
+    """
+    root = Path(ws).resolve()
     try:
-        for p in Path(ws).rglob("*.py"):
-            parts = set(p.parts)
-            if parts & _SKIP_DIRS:
+        for p in root.rglob("*.py"):
+            try:
+                rel_parts = p.relative_to(root).parts
+            except ValueError:
                 continue
-            if any(str(x).startswith(".tmp") for x in p.parts):
+            dirs = set(rel_parts[:-1])
+            if dirs & _SKIP_DIRS:
+                continue
+            if any(str(x).startswith(".tmp") for x in dirs):
                 continue
             yield p
     except Exception:                                    # noqa: BLE001

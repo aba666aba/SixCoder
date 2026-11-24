@@ -463,16 +463,28 @@ def _typecheck_sources(ws, lang: str) -> list[str]:
 
     只扫产物仓里**用户代码**（跳过 .sixcoder / node_modules / .git / 隐藏目录），
     按路径排序保证可重复。找不到源文件就返回空 → 由 `_run` 如实判"测不了"。
+
+    2026-11-23 修（与 `enterprise._iter_py` 同一个 bug）：旧版对 **`p.parts`（整条
+    绝对路径的所有段）** 做 `startswith(".tmp")` 判断，于是
+        · 产物仓在 `C:\\Users\\x\\AppData\\Local\\Temp\\...` 下 → 命中 `Temp`？不，命中不了；
+        · 但产物仓只要在**任何** `.tmp*` 目录下（包括 `prototype/.tmp/`，
+          自检全在那儿跑），所有 .c 源文件被静默跳过 → "找不到源文件" → 判"测不了"。
+    只看仓内相对路径，才是"跳过仓里的临时目录"，而不是"跳过仓本身"。
     """
     if lang not in ("c", "cpp"):
         return []
     exts = (".c", ".h") if lang == "c" else (".cpp", ".cc", ".cxx", ".hpp", ".h")
     skip = {".sixcoder", "node_modules", ".git", "__pycache__", ".tmp"}
+    root = Path(ws).resolve()
     out: list[str] = []
-    for p in sorted(Path(ws).rglob("*")):
+    for p in sorted(root.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in exts:
             continue
-        if any(part in skip or str(part).startswith(".tmp") for part in p.parts):
+        try:
+            dirs = p.relative_to(root).parts[:-1]
+        except ValueError:
+            continue
+        if any(part in skip or str(part).startswith(".tmp") for part in dirs):
             continue
         out.append(str(p))
     return out

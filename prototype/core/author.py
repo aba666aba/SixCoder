@@ -1,4 +1,4 @@
-"""整文件 / 多文件由远端写（甲方模式的主力方式）—— v2。
+"""整文件 / 多文件由远端写（造物模式的主力方式）—— v2。
 
 与 v1 的区别（按用户要求改的）：
 1. **上下文不再"无脑扔源码"**：先用 `contextpack` 压成
@@ -1397,7 +1397,7 @@ def author_module(ws: Path, path: str, contract, contracts_all: dict, model_plan
     """让远端把**整个文件**写出来：提炼上下文 → 一次生成 → 本地验收 → 窄证据重试。
 
     max_out=0（默认）→ 按"要写的文件多大"自动算输出配额（见 tokens.output_budget）。
-    attempts 是"自愈轮数"（甲方模式默认 4，来自 policy.heal_attempts）；
+    attempts 是"自愈轮数"（造物模式默认 4，来自 policy.heal_attempts）；
     stop_on_repeat=True 时，若新一轮的失败证据与已用过的完全相同就不发这次调用。
     deadline 是本片的时间截止点（unix 秒）：单轮 4 次自愈每次可能耗两分钟，
     只在外层 round 边界查时间会让 --slice-hours 形同虚设（实测 dev1106c）。
@@ -1896,7 +1896,7 @@ def _verify(ws: Path, contracts: dict, scope: list[str] | None = None) -> dict:
 def save_issues(ws: Path, issues: list[dict]) -> int:
     """把远端指出的"本地系统缺陷"落盘（给人和下一轮架构师看）。
 
-    只做建议，不改任何系统代码：改系统本身必须走开发者模式、由人批准。
+    只做建议，不改任何系统代码：改系统本身必须走精修模式、由人批准。
     """
     if not issues:
         return 0

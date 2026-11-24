@@ -1,9 +1,9 @@
-"""开工三件事 + 规模推导（§8.2 / §8.3 / §8.4）—— **甲方模式与全自主模式共用**。
+"""开工三件事 + 规模推导（§8.2 / §8.3 / §8.4）—— **造物模式与全自主模式共用**。
 
 2026-11-10 的由来（真实事故，不是设计想象）：
-甲方模式（`company.night`）长期**绕开 blueprint 这条线**，于是：
+造物模式（`company.night`）长期**绕开 blueprint 这条线**，于是：
   · 写出来的模块**路由接不上**（契约只验函数、不验路由 → 35/35 全过但端到端 13/84）
-  · 端到端红灯**没人知道**（甲方模式从不跑能力覆盖，账本停在 16:34）
+  · 端到端红灯**没人知道**（造物模式从不跑能力覆盖，账本停在 16:34）
   · 完成判据**只看模块契约**（齐了就收工）
 
 根因就是"开工三件事"（骨架树 / 接口锁定 / 扩展点）只接在 `night_auto` 上。
@@ -42,7 +42,7 @@ def prepare(ws: Path, bp, emit=None, llm=None) -> dict:
                  "interfaces": 0, "extpoints": {}, "extended": 0,
                  "injected": [], "http_modules_filled": 0}
 
-    # ---- 0) 机制注入 + HTTP 能力补落点（auto 原有，甲方模式同享）----
+    # ---- 0) 机制注入 + HTTP 能力补落点（auto 原有，造物模式同享）----
     # 鉴权拦截 / 页面可打开 / 数据真落盘 —— 这三类是"能上线"的硬要求，
     # 但远端模型经常"忘了做"，于是系统给绿灯、交付物却不能用（实测 2026-11-07）。
     try:
@@ -225,9 +225,9 @@ def _emit_note(emit, kind: str, payload: dict) -> None:
 def wire(ws: Path, bp, emit=None, route_funcs: dict | None = None) -> list[str]:
     """接线：把能力表里期望的路由真正挂到产物引擎段（`apply_web_wiring` + 刷新入口）。
 
-    为什么甲方模式必须做这件事：
+    为什么造物模式必须做这件事：
     契约判据只验**函数**，不验**路由**。远端把处理函数写对了、判据全过，
-    但路由没挂上去 → 端到端 404 → 甲方模式却认为"这个模块做完了"。
+    但路由没挂上去 → 端到端 404 → 造物模式却认为"这个模块做完了"。
     实测：`web_routes.json` 停在 2026-11-09 16:34，之后 4 轮甲方夜班
     写出的新模块路由**一个都没接上**。
 
@@ -399,7 +399,7 @@ def observe(ws: Path, bp, emit=None, only=None, timeout: int = 0) -> dict:
     """端到端能力观测（§三「机械验收：判据 + 闸门 + 端到端业务流」）。
 
     返回 coverage 字典（每条能力真实状态 + 证据）。**不写账本** ——
-    记账由调用方决定（甲方模式要写，全自主模式自己写）。
+    记账由调用方决定（造物模式要写，全自主模式自己写）。
     """
     try:
         from . import coverage as _covmod
@@ -434,7 +434,7 @@ def module_candidates(ws, path: str) -> list[str]:
 
     为什么不是只给一个（实测 2026-11-10）：
     `/api/v1/auth/login` 的候选是 `app/api/auth.py`（存在，**引擎接线生成**）
-    和 `app/authz.py`（甲方模式契约点名的**业务层**）。
+    和 `app/authz.py`（造物模式契约点名的**业务层**）。
     只返回第一个 → 红灯落到路由文件上，而远端改路由文件没用（下次接线就覆盖）
     → 契约层的工作单永远派不出去。两层都要给，让契约层那个能落上。
     """
@@ -482,13 +482,13 @@ def module_for_path(ws, path: str) -> str:
 
     为什么按**路径**而不是按能力表的 modules（实测 2026-11-10）：
     能力表按"路由文件"规划落点（`app/api/analytics.py`），
-    而甲方模式的契约点名的是**扁平业务模块**（`app/analytics.py`）——
+    而造物模式的契约点名的是**扁平业务模块**（`app/analytics.py`）——
     两套体系只有 4 个 `matching_core/*.py` 重叠。
     直接拿 caps.modules 去匹配契约键，71 项红灯里只有 4 项能落到工作单上。
     按端点路径反查才对得上：`/api/v1/analytics/heat` → `app/analytics.py`。
 
     （原在 `core/auto.py:_module_for_path`，2026-11-10 挪到这里 ——
-      auto 与甲方模式共用同一份，避免两处漂移。）
+      auto 与造物模式共用同一份，避免两处漂移。）
     """
     _c = module_candidates(ws, path)
     return _c[0] if _c else ""

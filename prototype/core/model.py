@@ -1267,7 +1267,7 @@ def ensure(bp, ws, write: bool = True) -> Model:
     """拿到模型：有就用（并增量补新实体），没有就从蓝图提。
 
     `write=False` 用于只读查看：**仍然要带上磁盘上的语义层**（transitions /
-    invariants / status_src），否则 `model` 只读模式会看到一份"没有不变式"的模型，
+    invariants / status_src），否则 `model` 审阅模式会看到一份"没有不变式"的模型，
     于是探针生成永远是 0 条（实测 2026-11-08，排查了半小时）。
     """
     old = load(ws)

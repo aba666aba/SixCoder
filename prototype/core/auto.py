@@ -826,7 +826,7 @@ def _module_for_path(ws, path: str) -> str:
     """按**单个路径**解析落点模块（文件必须已存在），解析不到返回空。
 
     2026-11-10：实现挪到 `core/openhouse.module_for_path` ——
-    甲方模式也要用同一份（能力红灯 → 工作单的映射），放一份避免漂移。
+    造物模式也要用同一份（能力红灯 → 工作单的映射），放一份避免漂移。
     本函数保留为转发器，老调用方不用改。
     """
     from . import openhouse as _oh
@@ -1506,7 +1506,7 @@ def write_web_entry(ws, bp) -> dict:
     2026-11-10 关键修正：include 列表必须按**实际有路由的模块**来生成，
     不能只按能力表点名的模块。实测的连环错位：
       · 能力表按 `app/api/analytics.py` 规划落点；
-      · 但甲方模式的契约让远端写的是**业务层** `app/analytics.py`；
+      · 但造物模式的契约让远端写的是**业务层** `app/analytics.py`；
       · 接线（`apply_web_wiring`）只渲染**已存在**的文件 → 路由落到 `app/analytics.py`；
       · 入口却 include `app.api.analytics`（不存在）→ **一个路由都没注册** → 全线 404。
     所以这里以**接线产物**（`web_routes.json` 的模块键）为准，能力表只作补充。
@@ -3539,8 +3539,8 @@ def night_auto(repo, goal: str = "", *,
         return _fail(ws, "蓝图等人确认（没开跑，一分钱没花）", blueprint=bp)
 
     # ---- 开工三件事（§8.2 / §8.4 / §8.3）：先看清现状，再锁接口，最后验扩展点 ----
-    # 2026-11-10：这整段抽到 core/openhouse.prepare，与**甲方模式共用一份实现** ——
-    # 甲方模式以前没有这段，于是写出的模块路由接不上、端到端红灯没人知道
+    # 2026-11-10：这整段抽到 core/openhouse.prepare，与**造物模式共用一份实现** ——
+    # 造物模式以前没有这段，于是写出的模块路由接不上、端到端红灯没人知道
     # （实测 84 项能力只过 13 项）。复制两份必然漂移，所以共用。
     try:
         from . import openhouse as _oh

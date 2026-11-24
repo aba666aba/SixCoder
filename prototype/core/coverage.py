@@ -173,7 +173,7 @@ def run(bp, ws, *, timeout: int = _probe.PROBE_TIMEOUT, only=None, emit=None,
     `only` 只测指定能力（增量用）；默认全量重测 —— 全量才有回归网。
 
     **观测前先把判据自洽化**（确定性、零 token、幂等）。
-    为什么必须在这一层而不是只挂在甲方模式的 `openhouse.observe`：
+    为什么必须在这一层而不是只挂在造物模式的 `openhouse.observe`：
     实测 2026-11-11 —— 全自主模式（`auto.night_auto`）直接调 `covmod.run`，
     **绕过** openhouse → 挂在 openhouse 上的自洽化在全自主模式下**根本不生效**，
     而看门狗固定用 `--goal-file`（= 全自主模式）→ 修了个寂寞。

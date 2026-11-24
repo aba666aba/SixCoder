@@ -2,16 +2,16 @@
 
 用户把两档的本质说清楚了，这里把它落成代码里的策略对象：
 
-    甲方模式 = 写代码的**完全体**。上限是远端 API 的推理能力：需求一句话进来，
+    造物模式 = 写代码的**完全体**。上限是远端 API 的推理能力：需求一句话进来，
                内部所有决策自己做完，**任何问题都由远端 API 做最终裁判**。
                本地小模型只负责便宜、可机械验证的活；一旦本地拿不出硬证据，
                立刻把决策权和代码生成交给远端，直到交付。
 
-    开发者模式 = **工具**。上限是开发者本人的思维架构能力：
+    精修模式 = **工具**。上限是开发者本人的思维架构能力：
                必须由人说出具体的实现方案，系统照着实现；
                系统不许悄悄换架构、不许让远端替人拍板 —— 有分歧就抛 needhuman 问人。
 
-    只读模式 = 不写任何东西，只做意图理解与改进分析（不能跑夜班）。
+    审阅模式 = 不写任何东西，只做意图理解与改进分析（不能跑夜班）。
 
 所以这三档的差别不只是"审批开关"，而是三个策略位：
     arbiter          谁做最终裁判：remote（甲方） / human（开发者）
@@ -43,18 +43,18 @@ class Policy:
     code_author: str = "local"
     # 开局先让远端出"实现方案"（把远端当架构师用，而不是等卡住才问）
     plan_first: bool = False
-    # 规划/诊断阶段的思考默认值（远端推理能力是甲方模式的上限，这里该开就开）
+    # 规划/诊断阶段的思考默认值（远端推理能力是造物模式的上限，这里该开就开）
     thinking_plan: str = "off"
     # ------------------------------------------------------------------
-    # 「规格优先」（甲方模式 v1.1，目标：从 0 生产、人不改代码）
+    # 「规格优先」（造物模式 v1.1，目标：从 0 生产、人不改代码）
     # 规格（接口/数据形状/错误语义/示例）决定后面每个模块的对错，是最高杠杆的一步。
     # 旧行为是"从最低档开始生成规格然后固化"——用最弱的算力做最高杠杆的决定，本末倒置。
     # ------------------------------------------------------------------
     spec_tier: str = "ladder"          # ladder（从最低档起）| strongest（最强档）
     spec_thinking: str = "off"         # 生成规格时开不开思考
     # 写代码从哪一档起（**单模型**下就是"从哪一档思考强度起"）：
-    #   auto     甲方模式：由 core/effort.py 按需求/难度自动选强度（本次运行只用一个模型）
-    #   ladder   开发者模式：从最低强度往上爬（省钱优先）
+    #   auto     造物模式：由 core/effort.py 按需求/难度自动选强度（本次运行只用一个模型）
+    #   ladder   精修模式：从最低强度往上爬（省钱优先）
     #   max      总是用该模型最深的一档（最贵、最不求人）
     effort_mode: str = "ladder"
     # 写代码的思考强度上限（"最深档留给规格和诊断，不留给写代码"）。
@@ -62,10 +62,10 @@ class Policy:
     # 一次 ¥0.108，5 个函数照样全红 —— 深思考没换来正确率，只换来账单。
     # 而同一轮里 high 档写的 numeric/compare/interval 全绿。所以默认封顶 high。
     code_effort_ceiling: str = "high"
-    # 规格有歧义时怎么办：decide = 远端自己拍板并把假设写清楚（甲方模式）；
-    #                    ask    = 停下来问人，不许猜（开发者模式）
+    # 规格有歧义时怎么办：decide = 远端自己拍板并把假设写清楚（造物模式）；
+    #                    ask    = 停下来问人，不许猜（精修模式）
     ambiguity: str = "decide"
-    # 模块划分 / 范围由谁定：remote（甲方模式，远端拆分）| human（开发者模式）
+    # 模块划分 / 范围由谁定：remote（造物模式，远端拆分）| human（精修模式）
     scope_authority: str = "human"
     # 单个模块的"自愈"轮数：AI 内部反复改到判据全绿，中间不需要人介入
     heal_attempts: int = 2
@@ -87,13 +87,13 @@ class Policy:
 
 POLICIES: dict[str, Policy] = {
     "client": Policy(
-        mode="client", name="甲方模式", arbiter="remote", code_escalation=FIRST_RED,
+        mode="client", name="造物模式", arbiter="remote", code_escalation=FIRST_RED,
         plan_authority="remote", remote_code_budget=0,
         code_author="remote", plan_first=True, thinking_plan="on",
         spec_tier="strongest", spec_thinking="on", ambiguity="decide",
         scope_authority="remote", heal_attempts=4, heal_stop_on_repeat=True,
         effort_mode="auto",
-        notes=("甲方模式就是夜班：提需求 → 系统自己做完 → 早上看交付报告",
+        notes=("造物模式就是夜班：提需求 → 系统自己做完 → 早上看交付报告",
                "**规格优先**：接口/数据形状/错误语义/示例由最强档 + 思考全开产出（一次几毛钱，"
                "却决定后面每个模块的对错）",
                "规格有歧义时远端自己拍板并把假设写进交付报告，不回头问人、不猜着往下走",
@@ -102,7 +102,7 @@ POLICIES: dict[str, Policy] = {
                "每一次落盘仍要过全部机械判据：远端强不等于必然对"),
     ),
     "developer": Policy(
-        mode="developer", name="开发者模式", arbiter="human", code_escalation=ON_APPROVAL,
+        mode="developer", name="精修模式", arbiter="human", code_escalation=ON_APPROVAL,
         plan_authority="human", remote_code_budget=0,
         code_author="local", plan_first=False, thinking_plan="off",
         spec_tier="ladder", spec_thinking="off", ambiguity="ask",
@@ -114,7 +114,7 @@ POLICIES: dict[str, Policy] = {
                "每次决策与审批都留在审计日志里"),
     ),
     "readonly": Policy(
-        mode="readonly", name="只读模式", arbiter="human", code_escalation=OFF,
+        mode="readonly", name="审阅模式", arbiter="human", code_escalation=OFF,
         plan_authority="human", remote_code_budget=0,
         code_author="none", plan_first=False, thinking_plan="off",
         notes=("不写任何文件，不跑夜班",
@@ -135,10 +135,10 @@ def current() -> Policy:
 def should_escalate(pol: Policy, n_fail: int, hard_evidence: bool, used: int) -> tuple[bool, str]:
     """本张单要不要把代码交给远端？返回 (要不要, 理由)。
 
-    甲方模式：只要本地被**硬判据**判红就升级（不等第二次失败）——这是"完全体"的关键，
+    造物模式：只要本地被**硬判据**判红就升级（不等第二次失败）——这是"完全体"的关键，
               本地小模型做不出来的东西，多试两次只是多烧时间。
-    开发者模式：远端写代码是关键节点，必须走审批；次数预算不作为自动接管依据。
-    只读模式：永不接管（它根本没有写权限）。
+    精修模式：远端写代码是关键节点，必须走审批；次数预算不作为自动接管依据。
+    审阅模式：永不接管（它根本没有写权限）。
     """
     if pol.code_escalation == OFF:
         return False, "该模式不升级（只读）"
@@ -146,9 +146,9 @@ def should_escalate(pol: Policy, n_fail: int, hard_evidence: bool, used: int) ->
         return False, f"远端写代码预算已用完（{used}/{pol.remote_code_budget}）"
     if pol.code_escalation == FIRST_RED:
         if hard_evidence:
-            return True, "本地被硬判据判红 → 远端接管（甲方模式）"
+            return True, "本地被硬判据判红 → 远端接管（造物模式）"
         if n_fail >= 2:
-            return True, "连续失败 2 次 → 远端接管（甲方模式主力接手）"
+            return True, "连续失败 2 次 → 远端接管（造物模式主力接手）"
         return False, "本地还有重试余地"
     # ON_APPROVAL：只在连续失败后提请远端（是否会真的执行由审批门决定）
     if n_fail >= 2:
@@ -174,20 +174,20 @@ def plan_block(plan: str, pol: Policy | None = None) -> str:
 def remote_allowed(mode_id: str | None = None) -> tuple[bool, str]:
     """远端调用允许不允许（三档口径不同，用户明确要求）。
 
-    · 甲方模式（= 夜班）：**强制开启**，上限就是远端能力；
-    · 开发者模式：**开关**（设置 → 远端模型 → 开发者模式远端），默认关，
+    · 造物模式（= 夜班）：**强制开启**，上限就是远端能力；
+    · 精修模式：**开关**（设置 → 远端模型 → 精修模式远端），默认关，
       开了等于"一定程度加强本地模型能力"；
-    · 只读模式：**强制关闭**（它本来就不该有任何远端写操作）。
+    · 审阅模式：**强制关闭**（它本来就不该有任何远端写操作）。
     """
     from . import permissions, settings_store
     m = permissions.get(mode_id).id if mode_id else permissions.current_mode().id
     if m == "client":
-        return True, "甲方模式：强制开启远端（上限就是远端能力）"
+        return True, "造物模式：强制开启远端（上限就是远端能力）"
     if m == "readonly":
-        return False, "只读模式：强制关闭远端"
+        return False, "审阅模式：强制关闭远端"
     on = bool(settings_store.get_remote().get("dev_remote", False))
-    return on, ("开发者模式：远端开关已打开" if on else
-                "开发者模式：远端开关已关闭（本地模型自己写；要开去设置里打勾）")
+    return on, ("精修模式：远端开关已打开" if on else
+                "精修模式：远端开关已关闭（本地模型自己写；要开去设置里打勾）")
 
 
 def describe(pol: Policy | None = None) -> str:

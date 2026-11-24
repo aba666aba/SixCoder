@@ -270,7 +270,7 @@ def snapshot(ws: Path, message: str, author: str = "SixCoder",
              paths: list[str] | None = None) -> dict:
     """提交快照。**paths 给了就只提交这些文件**（推荐）；不给则 add -A 并如实报告范围。"""
     ws = _ws(ws)
-    # 关键节点守卫：开发者模式下"创建提交（版本控制关键点）"要人点头；甲方模式自动放行
+    # 关键节点守卫：精修模式下"创建提交（版本控制关键点）"要人点头；造物模式自动放行
     try:
         from . import guards
         g = guards.gate_git_commit(ws, message or "snapshot")
@@ -339,7 +339,7 @@ def push(ws: Path, remote: str = "origin", branch: str = "", force: bool = False
     if force:
         # 红线：force 必须显式声明，且单独记为高危操作
         _audit(ws, "PUSH_FORCE", f"{remote} {branch}", ok=False)
-    # 关键节点守卫：开发者模式下"推送到远端"要人点头（含 force 的情况）
+    # 关键节点守卫：精修模式下"推送到远端"要人点头（含 force 的情况）
     try:
         from . import guards
         g = guards.gate_git_push(ws, "push", f"{remote}/{branch or '当前分支'}"

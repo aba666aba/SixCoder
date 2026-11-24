@@ -21,7 +21,7 @@
      引用提供：`env:VAR` / `file:PATH` / `prompt`，明文一律拒绝写进配置。执行时经
      一次性 SSH_ASKPASS helper 只注入 ssh 子进程（见 core/sshcred.py），不落盘、
      不进 argv / 审计 / 对外视图。裸写的明文密码在 save_targets 阶段就被丢弃。
-3. **每次执行强制人审，fail-closed**。即使是甲方模式（auto_approve=True）也要审——
+3. **每次执行强制人审，fail-closed**。即使是造物模式（auto_approve=True）也要审——
    外联到生产服务器是高危操作，不因为"甲方要全自动"就放行。超时/没人答 = 拒绝。
    （见 approval.request 的 force=True 参数。）
 
@@ -301,7 +301,7 @@ def execute(target_id: str, command: str, *, reason: str = "",
                         "command": command[:200], "tally": cons["tally"]})
             return result
 
-    # 5) 强制人审（即使甲方模式 auto_approve=True 也要审；fail-closed）
+    # 5) 强制人审（即使造物模式 auto_approve=True 也要审；fail-closed）
     ap = _approval.request(
         node="deploy.exec",
         title=f"部署命令：{target_id} ({user}@{host})",

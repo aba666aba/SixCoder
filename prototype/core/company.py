@@ -132,7 +132,7 @@ def _wait_network(ws=None, emit=None, max_seconds: float = 900.0,
 def _is_hard_failure(reason) -> bool:
     """这张单的失败是不是**硬判据**给的（机械证据），而不是"模型没吐 JSON"这类软失败。
 
-    为什么用它决定升级：甲方模式的上限是远端推理能力，本地被机械判据判红说明"它做不出来
+    为什么用它决定升级：造物模式的上限是远端推理能力，本地被机械判据判红说明"它做不出来
     这件事已经被证明了"，再本地重试只是烧时间；而"没吐 JSON""超时"属于偶发，值得本地重试。
     """
     t = str(reason or "")
@@ -350,6 +350,11 @@ def _night_foreign(ws: Path, requirement: str, model: str, lang_info: dict,
     def _suite_line(label: str, r: dict) -> str:
         if r.get("how") == "skipped":
             return f"{label}：未跑"
+        # unsupported = **这个语言没有验证方式**，不是"验证失败"。
+        # 2026-11-24 修正：原来它会落到最后一行的"未通过"，把"工具不认识"
+        # 显示成了"代码不行"。用户口径：拿不到信号要说拿不到，不能说成不通过。
+        if r.get("how") == "unsupported":
+            return f"{label}：测不了——该语言没有验证方式（不是不通过）"
         if r.get("skipped"):
             return f"{label}：测不了（{r.get('how')}）"
         return f"{label}：{'通过' if r.get('ok') else '未通过'}（{r.get('how')}）"
@@ -389,9 +394,9 @@ def _night_inner(repo: Path, requirement: str, model: str,
     """夜班：在预算内反复"体检→派工→开发→质检"，直到收敛或预算耗尽。
 
     三档模式的**协作方式**不同（见 core/policy.py）：
-      甲方模式：任何决策由远端拍板；本地被硬判据判红就立刻交给远端写代码；
-      开发者模式：实现方案必须由人给；要架构决策而没有方案时抛 needhuman，不替人拍板；
-      只读模式：不写任何文件，直接拒绝跑夜班。
+      造物模式：任何决策由远端拍板；本地被硬判据判红就立刻交给远端写代码；
+      精修模式：实现方案必须由人给；要架构决策而没有方案时抛 needhuman，不替人拍板；
+      审阅模式：不写任何文件，直接拒绝跑夜班。
     """
     t0 = time.time()
     # 项目宪法：跑夜班前先落盘（幂等，已存在不覆盖）。作者提示词会把宪法当稳定前缀注入。
@@ -418,12 +423,12 @@ def _night_inner(repo: Path, requirement: str, model: str,
     from . import policy as _policy
     pol = _policy.current()
     if pol.code_escalation == _policy.OFF or not _perms.allows("file.write"):
-        return NightResult(False, reason=f"{pol.name}不写文件，不能跑夜班；请切到甲方模式或开发者模式",
+        return NightResult(False, reason=f"{pol.name}不写文件，不能跑夜班；请切到造物模式或精修模式",
                            spent_s=round(time.time() - t0, 1))
 
     ws = Path(repo)
     # 规模分级：不同代码规模该有的约束不一样（见 core/scale.py）。
-    # 甲方模式的要求是"提需求时写明目标规模"；没写就按实测推断，并在交付报告里写明。
+    # 造物模式的要求是"提需求时写明目标规模"；没写就按实测推断，并在交付报告里写明。
     from . import scale as _scale
     scope = _scale.resolve(requirement, ws)
     if emit:
@@ -516,7 +521,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
     if not contracts:
         # 夜班要"机械判据"，就得先有**结构化契约**。但甲方提的需求常常是自然语言
         # （实测："写一个计算器，支持加减乘除、根号、求导、不定积分" → 解析不出任何模块）。
-        # 甲方模式的契约本来就该由系统内部搞定：先试确定性兜底，再让远端把需求翻译成契约。
+        # 造物模式的契约本来就该由系统内部搞定：先试确定性兜底，再让远端把需求翻译成契约。
         fallback = _single_module_fallback(requirement)
         if fallback:
             contracts = fallback
@@ -532,8 +537,8 @@ def _night_inner(repo: Path, requirement: str, model: str,
                                      "ambiguity": pol.ambiguity,
                                      "why": "规格是全链最高杠杆的一步：用最强档+思考产出，"
                                             "之后每个模块都照它做"})
-            # 规格优先：甲方模式用**最强档 + 思考开**产出规格（这是全链最高杠杆的一步）；
-            # 开发者模式走阶梯默认，且歧义会停下来问人而不是自己拍板。
+            # 规格优先：造物模式用**最强档 + 思考开**产出规格（这是全链最高杠杆的一步）；
+            # 精修模式走阶梯默认，且歧义会停下来问人而不是自己拍板。
             # 一轮写多少**不是常数 16**：按这一档的输出配额、依赖数、近期一次通过率算（core/dosing）。
             from . import dosing as _dosing
             _spec_step = None
@@ -607,8 +612,8 @@ def _night_inner(repo: Path, requirement: str, model: str,
     except Exception as _exc:                            # noqa: BLE001        if emit:
             emit("notice", {"message": f"项目地图生成失败：{type(_exc).__name__}"})
 
-    # ---- 甲方模式也要有 blueprint（能力表 + 路由期望）----
-    # 2026-11-10：甲方模式长期**绕开 blueprint 这条线**，于是形成了闭环：
+    # ---- 造物模式也要有 blueprint（能力表 + 路由期望）----
+    # 2026-11-10：造物模式长期**绕开 blueprint 这条线**，于是形成了闭环：
     #   写出来的模块**路由接不上**（契约只验函数、不验路由 → 35/35 全过）
     #   → 端到端红灯**没人知道**（从不跑能力覆盖，账本停在 16:34）
     #   → 完成判据**只看模块契约**（齐了就收工）。
@@ -650,7 +655,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
     if bp is not None:
         if emit:
             emit("blueprint_loaded", {"caps": len(bp.caps),
-                                      "note": "甲方模式接上 blueprint：能力表 + 路由期望（§八）"})
+                                      "note": "造物模式接上 blueprint：能力表 + 路由期望（§八）"})
         # 开工三件事（骨架树 / 接口锁定 / 扩展点）+ 规模推导 —— 与全自主共用一份实现
         try:
             from . import openhouse as _oh
@@ -770,10 +775,10 @@ def _night_inner(repo: Path, requirement: str, model: str,
     tier_of: dict[str, int] = {}        # 单 key → 当前档位（0 = flash:none）
     tier_fail: dict[str, int] = {}      # 单 key → 当前档连续失败次数
     used_tier: dict[str, int] = {}
-    # 甲方模式：开局先让远端出实现方案（远端推理能力是这一档的上限，方案先由它定，
+    # 造物模式：开局先让远端出实现方案（远端推理能力是这一档的上限，方案先由它定，
     # 细节也由它定；后面每一张单都按这个方案做，避免"系统自己边做边改架构"）
     auto_plan = ""
-    # #17 甲方模式两段式：`SIXCODER_CLIENT_PLAN_GATE=1` 或设置里打开后，
+    # #17 造物模式两段式：`SIXCODER_CLIENT_PLAN_GATE=1` 或设置里打开后，
     # 先只出计划、写进 .sixcoder/plan.md，然后**停下等人批**；
     # 人批之后就按 --plan-file 传入继续跑（计划成为权威，不许系统自己改架构）。
     client_gate = str(_os_cap.environ.get("SIXCODER_CLIENT_PLAN_GATE") or "") == "1"
@@ -791,7 +796,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
                                    "text": (gate_plan or "")[:600],
                                    "next": f"人批后：night --plan-file {pfile}"})
             return NightResult(False, spent_s=round(time.time() - t0, 1), reason=(
-                "甲方模式计划门禁：已生成实现计划并停下等人批（不会先写代码）。"
+                "造物模式计划门禁：已生成实现计划并停下等人批（不会先写代码）。"
                 f"计划在 {pfile}；批/改后用 --plan-file {pfile} 继续跑"))
         except Exception as exc:                         # noqa: BLE001
             if emit:
@@ -800,9 +805,9 @@ def _night_inner(repo: Path, requirement: str, model: str,
     if pol.plan_first and use_remote and _remote_available():
         try:
             # 方案/规格的档位策略由 policy 决定：
-            #   甲方模式（spec_tier="strongest"）→ **先用最强档**再思考开：方案定了之后
+            #   造物模式（spec_tier="strongest"）→ **先用最强档**再思考开：方案定了之后
             #   每一张单都照它做，用最低档定方案等于用最弱的算力做最高的决定；
-            #   开发者模式（spec_tier="ladder"）→ 仍从最低档起（人会给方案，这里只是兜底）。
+            #   精修模式（spec_tier="ladder"）→ 仍从最低档起（人会给方案，这里只是兜底）。
             _strong = settings_store.strongest_step_index()
             if pol.spec_tier == "strongest" and _strong > 0:
                 _order = [_strong, 0]        # 最强档顶不住（欠费/限流）再退到最低档，别整夜起不来
@@ -947,7 +952,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
     from . import budget_estimate as _be   # 唯一停机线：系统总预算（用户不可设上限）
 
     # ---- 能力覆盖状态（§三「机械验收：判据 + 闸门 + 端到端业务流」）----
-    # 甲方模式长期**不跑**能力覆盖 → 端到端红灯没人知道 → 完成判据只看模块契约。
+    # 造物模式长期**不跑**能力覆盖 → 端到端红灯没人知道 → 完成判据只看模块契约。
     # 这里是那缺失的一环：观测 → 红灯变工作单 → 写码 → 接线 → 下轮重新观测。
     cap_red: set[str] = set()               # 端到端红的模块（要干活）
     triage: dict | None = None              # 本轮失败分诊（决定派单与否）
@@ -960,7 +965,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
     if bp is not None:
         if emit:
             emit("cap_stage", {"stage": "ready", "caps": len(bp.caps),
-                                "note": "能力覆盖观测已接进甲方模式（§三 端到端业务流）"})
+                                "note": "能力覆盖观测已接进造物模式（§三 端到端业务流）"})
 
     for rnd in range(1, max_rounds + 1):
         # 夜班批开始时审核者休眠（2026-11-18 死局协商：状态按批清零，
@@ -1075,7 +1080,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
                             # 记账：能力覆盖账本（append-only，救过命）
                             try:
                                 from . import coverage as _covmod
-                                _covmod.record(ws, _cov, f"甲方模式第 {rnd} 轮观测")
+                                _covmod.record(ws, _cov, f"造物模式第 {rnd} 轮观测")
                                 from . import blueprint as _bp_mod
                                 _bp_mod.save(_covmod.mark(bp, _cov), ws)
                             except Exception:            # noqa: BLE001
@@ -1315,7 +1320,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
                 if emit:
                     emit("notice", {"message": "整仓模式：跳过独立架构师调用（归因并入整仓会话的 rootcause）"})
             if ask_architect_ok and pol.arbiter == "human" and not (plan or "").strip():
-                # 开发者模式：架构决策归人。没有方案就不许让远端替人拍板 —— 抛 needhuman 停下问人，
+                # 精修模式：架构决策归人。没有方案就不许让远端替人拍板 —— 抛 needhuman 停下问人，
                 # 这一轮只做机械派工（triage），不产生任何"系统自己定的架构"。
                 ask_architect_ok = False
                 if emit:
@@ -1323,7 +1328,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
                         "round": rnd, "node": "architect",
                         "question": "需要架构决策，但还没有实现方案。请给出具体实现方案"
                                     "（模块划分/函数职责/数据流），系统只会照它实现，不会自己改架构。",
-                        "why": "开发者模式下 plan_authority=human"})
+                        "why": "精修模式下 plan_authority=human"})
                 plan_waiting = True
             if ask_architect_ok:
                 # 思考模式按阶梯走：第一次 off（便宜）；off 没解决（已经问过架构师且仍无增长）
@@ -1362,7 +1367,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
 
             orders = [o for o in orders if blocked.get(okey(o), 0) < 3
                       and okey(o) not in tried_blocked]
-            # 2026-11-10：**端到端红灯 → 生成工作单**（甲方模式并入 blueprint 后的关键一环）。
+            # 2026-11-10：**端到端红灯 → 生成工作单**（造物模式并入 blueprint 后的关键一环）。
             # 以前工作单只由 `workorder.triage` 按**模块级判据**分诊 ——
             # 契约 35/35 全过 → 无单 → 收工，于是"契约过了但端到端 404"的那些活
             # 永远没人干（实测 84 项能力只过 13 项，账本停在 16:34）。
@@ -1573,7 +1578,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
                                                       for m in stats["modules"]],
                                           "issues": len(stats.get("system_issues") or [])})
                 # ---- 接线（写码后立刻把新路由挂上）----
-                # 2026-11-10：甲方模式以前**从不接线** —— 远端把处理函数写对了、
+                # 2026-11-10：造物模式以前**从不接线** —— 远端把处理函数写对了、
                 # 契约判据全过，但路由没挂到 app 上 → 端到端 404 → 交付物不能用。
                 # 实测 `web_routes.json` 停在 2026-11-09 16:34，之后 4 轮甲方夜班
                 # 写出的新模块路由**一个都没接上**。接线是纯机械动作（零 token）。
@@ -1848,9 +1853,9 @@ def _night_inner(repo: Path, requirement: str, model: str,
                     tier_fail[okey(o)] = 0
                 else:
                     # 隔离前的最后一档：让远端直接把这张单做出来。
-                    # 什么时候升级**由模式决定**（core/policy.py）：甲方模式下一旦本地被硬判据
+                    # 什么时候升级**由模式决定**（core/policy.py）：造物模式下一旦本地被硬判据
                     # 判红就升级（不再等满 2 次，本地小模型做不出来的东西多试只是烧时间）；
-                    # 开发者模式仍按"连续失败 2 次 + 人工批准"走。
+                    # 精修模式仍按"连续失败 2 次 + 人工批准"走。
                     n_fail = blocked.get(okey(o), 0) + 1
                     hard = _is_hard_failure(r.get("reason"))
                     go, why = _policy.should_escalate(pol, n_fail, hard, remote_code_used)
@@ -1920,7 +1925,7 @@ def _night_inner(repo: Path, requirement: str, model: str,
     final = iterate.inspect(ws, contracts)
     verified = sum(s["verified"] for s in final.values())
     total = sum(s["funcs"] for s in final.values())
-    # 关键节点守卫：开发者模式在"标记可交付"前要人点头（甲方模式自动放行）
+    # 关键节点守卫：精修模式在"标记可交付"前要人点头（造物模式自动放行）
     approved = True
     try:
         from . import guards
@@ -2311,8 +2316,8 @@ def _auto_effort(contracts: dict, deps_map: dict, rel: str, fails: int = 0,
 def _code_start_tier(pol, steps: list[dict]) -> int:
     """代码从哪一档起（**单模型**：就是"从哪一档思考强度起"）。
 
-    `effort_mode="auto"`（甲方模式）→ 规格/方案走最深、代码按难度路由（见 _auto_effort）；
-    `"ladder"`（开发者模式）→ 第 0 档（最省）；
+    `effort_mode="auto"`（造物模式）→ 规格/方案走最深、代码按难度路由（见 _auto_effort）；
+    `"ladder"`（精修模式）→ 第 0 档（最省）；
     `"max"` → 该模型最深的一档。
     """
     try:
@@ -2594,7 +2599,7 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
     def needs_work(path: str) -> bool:
         # 2026-11-10：**端到端红灯也算"要干活"**。
         # 契约判据只验**函数**，不验**路由/接线/权限** —— 远端把处理函数写对了、
-        # 判据全过，但路由没挂上去（实测 404），甲方模式却认为"这个模块做完了"。
+        # 判据全过，但路由没挂上去（实测 404），造物模式却认为"这个模块做完了"。
         # 能力表里每条能力都带 `modules`，说清它落在哪些文件上，
         # 于是"端到端红了"能直接变成工作单（这是契约测不出的那半边）。
         if cap_red and path in cap_red:
@@ -3252,7 +3257,7 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
             emit("notice", {"message": f"粒度被环境变量覆盖：{granular}（自动判断是 {auto}）"})
         # 输出配额记忆：这个模块被截断过一次，下一轮直接从放大后的值开始，
         # 不再"每轮从 3000 重算、再被截断一次"（实测 search-index 因此连输三次）。
-        # 自愈轮数由 policy 决定（甲方模式 4 轮：AI 内部改到判据全绿，人不在中间）；
+        # 自愈轮数由 policy 决定（造物模式 4 轮：AI 内部改到判据全绿，人不在中间）；
         # stop_on_repeat 保证"反复刺激"只在有新证据时才发生，不白烧调用。
         try:
             from . import policy as _pol_h
@@ -3529,7 +3534,7 @@ def _author_round(ws: Path, contracts: dict, state: dict, plan: str, steps: list
                                    cost_cny=_module_spend(ws, rel, _round_since))
         except Exception:                    # noqa: BLE001
             pass
-        # 「一次通过率」是甲方模式唯一的自检指标：**没有重试就全绿**的模块占比。
+        # 「一次通过率」是造物模式唯一的自检指标：**没有重试就全绿**的模块占比。
         # 它比"最终通过率"严格得多——最终通过率可以靠反复刺激刷出来，一次通过率不能。
         _tot = int(stats.get("mod_total") or 0) + 1
         _first = int(stats.get("mod_first_pass") or 0) + (
@@ -4230,17 +4235,89 @@ def write_delivery(ws: Path, requirement: str, state: dict, hist: list[dict],
     except Exception as exc:                             # noqa: BLE001
         lines += ["", "### 骨架", "", f"- 跳过（{type(exc).__name__}）"]
 
+    lines += ["", "## 这份报告能证明什么、不能证明什么", ""]
+    lines += _delivery_ceiling(ws, verified, total)
+
     lines += ["", "## 如何验证我交付的东西", "",
-              "```powershell", "cd prototype",
-              "python cli.py run --repo <本目录> --requirement-file <需求文件> --model qwen2.5-coder:7b",
-              "# 独立验收（与引擎不共享代码，自己连库、自己断言）",
+              "```powershell",
+              "# 引擎根目录（安装版是 <安装目录>\\resources\\prototype；源码版是 <SixCoder>\\prototype）",
+              f"cd {Path(__file__).resolve().parent.parent}",
+              "# 独立验收（与引擎不共享代码，自己连库、自己断言）—— 这是**唯一**能推翻本报告的证据",
               f"python tools\\hq_verify.py {ws}",
               "# 追溯矩阵：需求条目 ↔ 判据 ↔ 证据",
               f"python tools\\trace.py {Path(ws).name}",
+              "# （安装版自带 Python，用 <安装目录>\\resources\\python\\python.exe 代替 python）",
               "```", "", "## 需求原文", "", "```", (requirement or "")[:1500], "```", ""]
     p = Path(ws) / "DELIVERY.md"
     p.write_text("\n".join(lines), encoding="utf-8")
     return p
+
+
+def _delivery_ceiling(ws: Path, verified: int, total: int) -> list[str]:
+    """交付报告的诚实边界（2026-11-23）。
+
+    为什么必须有：`projects/night3` 的 DELIVERY.md 写「验收通过函数：8/8」，
+    TRACE.md 写「证据全部为 engine_assertion」。用仓库自带的独立验收跑同一目录是
+    **22/25 FAIL**：`summarize([])` 除零、`clean_row(age=None)` 属性错误——
+    报告一个字的提示都没有。报告没有说谎（那些判据确实过了），但它**没说自己
+    没测什么**，于是"8/8"被读成"没问题"。这里把边界写进报告本身，并明确
+    "本报告不覆盖以下四类"。
+    """
+    out: list[str] = [
+        f"- **本报告只证明：契约里写出来的判据通过了 {verified}/{total} 条。**",
+        "  它**不证明**下列任何一项（这些是实测踩过的盲区，不是理论担心）：",
+        "  - **输入校验 / 边界值**：契约示例通常只写正常路径。`night3` 实测"
+        "`summarize([])` 除零崩溃、`clean_row(age=None)` 属性错误，而报告是 8/8。",
+        "  - **业务语义正确**：机械判据拦得住\"不符合契约 / 模块接不上 / 读写不一致\"，"
+        "拦不住\"需求理解错了\"。",
+        "  - **性能 / 并发 / 安全 / 合规**：完全没有覆盖。",
+        "  - **测试质量**：报告不统计测试是否为空壳（0 个测试函数、`assert True`、"
+        "只判键名不判值都算\"测试通过\"）。看 `pytest` 的 passed 数前先看测试正文。",
+    ]
+    # 测试空壳：能扫就扫，扫不动如实说（绝不假装"测试没问题"）
+    try:
+        from . import testweight as _tw
+        scan = _tw.scan(Path(ws))
+        verdict = _tw.summarize(scan, limit=2)
+        mark = "**空壳**" if scan["shell_files"] else "可用"
+        out.append(f"- 本次产物测试静态体检：{mark} —— {verdict}")
+        if scan.get("verified"):
+            out.append("  - 测试在写，但覆盖的只是契约示例那一层；边界与异常路径要看独立验收。")
+        elif scan["shell_files"]:
+            out.append("  - 上列测试文件里没有一个真断言；它们显示「通过」不代表任何功能被验证。")
+    except Exception as exc:                             # noqa: BLE001
+        out.append(f"- 测试静态体检：跑不动（{type(exc).__name__}），不给结论")
+    # 独立验收现算：能在夜班收工时跑一次就别让用户自己去跑
+    try:
+        import subprocess as _sp
+        import sys as _sys
+        root = Path(__file__).resolve().parent.parent          # prototype/
+        hv = root / "tools" / "hq_verify.py"
+        if hv.is_file():
+            proc = _sp.run([_sys.executable, str(hv), str(Path(ws).resolve())],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=180)
+            head = [ln.strip() for ln in (proc.stdout or "").splitlines()
+                    if "独立验收：" in ln or "独立验收:" in ln]
+            fails = [ln.strip() for ln in (proc.stdout or "").splitlines()
+                     if ln.strip().startswith("FAIL ")]
+            if head:
+                _verdict_line = head[0].replace("独立验收：", "").replace("独立验收:", "").strip()
+                out.append(f"- **独立验收（现算，与引擎不共享代码）**：{_verdict_line}")
+                for ln in fails[:5]:
+                    out.append(f"  - {ln}")
+                if len(fails) > 5:
+                    out.append(f"  - ……另有 {len(fails) - 5} 条没列出，跑上面的命令看全量")
+                if proc.returncode != 0:
+                    out.append("  - **两边不一致时，以独立验收为准**：本报告的判据是"
+                               "从契约生成的，独立验收的判据是手写的边界用例。")
+            else:
+                out.append("- 独立验收：跑不出结论（该脚本输出无法解析），请手动执行")
+        else:
+            out.append("- 独立验收：本安装不含 `tools/hq_verify.py`，无法自动现算")
+    except Exception as exc:                             # noqa: BLE001
+        out.append(f"- 独立验收：没能现算（{type(exc).__name__}: {exc}）")
+    return out
 
 def _restore_frozen(ws: Path, rel: str, before: bytes) -> dict:
     """把本轮被改坏的**冻结函数**按旧实现回填（只回填这些函数，不动别的）。
@@ -4331,7 +4408,7 @@ def night(repo: Path, requirement: str, model: str,
           scale_level: str = "") -> NightResult:
     """夜班入口：内部任何异常都不许让"早上没有交付物"，一定写 DELIVERY.md。
 
-    plan：人给的实现方案（开发者模式用它当权威；甲方模式留空，由系统内部自己决定）。
+    plan：人给的实现方案（精修模式用它当权威；造物模式留空，由系统内部自己决定）。
     """
     # 进程级栈：一次设定，后续所有 `_stack()`（不带 ws 的几十处调用）都用它。
     # 不设 = 恒落回 fastapi（Django 项目会补出 `router = APIRouter()` 之类）。

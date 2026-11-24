@@ -1,4 +1,4 @@
-"""三种模式：甲方模式 / 开发者模式 / 只读模式。
+"""三种模式：造物模式 / 精修模式 / 审阅模式。
 
 这是**授权档位**，决定三件事：
 1. 能用哪些能力（caps）；
@@ -7,15 +7,15 @@
 
 三个模式（名字固定，不要改）：
 
-- **甲方模式**（client）：甲方只提需求，不关心实现。人工处置全部放行（auto_approve），
+- **造物模式**（client）：甲方只提需求，不关心实现。人工处置全部放行（auto_approve），
   从 0 直接做到 1（空仓库也能一路建成可交付的成品），夜里跑完早上看报告。
   **边界：只能改工作区里的文件，越界一律拒绝**（沙箱牢笼）。
 
-- **开发者模式**（developer）：给开发者用，做细节化版本控制和代码写作。
+- **精修模式**（developer）：给开发者用，做细节化版本控制和代码写作。
   **关键节点必须人工审核，不会自动放行**——每个节点抛 `needhuman` 事件并阻塞等待，
   人点"通过"才继续，点"拒绝"或超时就中止该节点。
 
-- **只读模式**（readonly）：只让系统读代码，没有任何写权限。用于**最后成品的意图了解与改进分析**
+- **审阅模式**（readonly）：只让系统读代码，没有任何写权限。用于**最后成品的意图了解与改进分析**
   （读文件、检索、静态审查、语义比对），不写、不跑、不提交。
 
 设计原则（docs/13 判定权分离）：
@@ -47,7 +47,7 @@ CAPS: dict[str, str] = {
     "deploy.exec": "在预留的服务器上执行白名单命令（独立通道，强制人审）",
 }
 
-# 关键节点：开发者模式下这些动作**必须有人点头**
+# 关键节点：精修模式下这些动作**必须有人点头**
 KEY_NODES: dict[str, str] = {
     "file.write":   "即将写入/修改工作区文件",
     "git.commit":   "即将创建 git 提交（版本控制关键点）",
@@ -83,8 +83,9 @@ _DEPLOY = {"deploy.exec"}
 
 MODES: dict[str, Mode] = {
     "client": Mode(
-        id="client", name="甲方模式", color="b-ok", sandbox="write",
-        desc="甲方只提需求，不看实现。全部人工处置自动放行，从 0 做到 1，夜里跑完早上看交付报告。",
+        id="client", name="造物模式", color="b-ok", sandbox="write",
+        desc="你只描述想要什么，不关心实现。全部人工处置自动放行，从 0 做到 1，"
+             "夜里跑完早上看交付报告。适合小工具、小网页这类一件就能成的事。",
         caps=frozenset(_READ | _WRITE | _DEPLOY | {"git.remote"}),
         auto_approve=True,
         boundary="只能改工作区内的文件，越界一律拒绝；部署需预留目标且每次强制人审",
@@ -93,8 +94,9 @@ MODES: dict[str, Mode] = {
                 "出问题看 DELIVERY.md 与 TRACE.md，不用读代码"),
     ),
     "developer": Mode(
-        id="developer", name="开发者模式", color="b-acc", sandbox="write",
-        desc="给开发者用：细节化版本控制与代码写作。关键节点必须人工审核，不会自动放行。",
+        id="developer", name="精修模式", color="b-acc", sandbox="write",
+        desc="在软件里直接改代码：编辑器 + AI 浮窗（解释 / 改写 / 补测试）+ 运行调试。"
+             "关键节点必须人工审核，不会自动放行。",
         caps=frozenset(_READ | _WRITE | _DEPLOY | {"git.remote"}),
         auto_approve=False,
         key_nodes=("file.write", "git.commit", "git.push", "remote.call", "deliver",
@@ -105,23 +107,24 @@ MODES: dict[str, Mode] = {
                 "可以在审批时拒绝，该节点会中止并留下证据"),
     ),
     "readonly": Mode(
-        id="readonly", name="只读模式", color="b-dim", sandbox="readonly",
-        desc="只读：读取代码、检索、静态审查、语义比对。没有写权限，用于成品意图了解与改进分析。",
+        id="readonly", name="审阅模式", color="b-dim", sandbox="readonly",
+        desc="只读不写：审计代码、检查文档、按代码生成说明文档。"
+             "没有写权限，用于接手交付物时先读懂它、再判断能不能用。",
         caps=frozenset(_READ),
         auto_approve=True,           # 没有写操作，也就没有要批的事
         boundary="任何写入/执行/提交/推送都被拒绝（沙箱 readonly）",
         extras=("适合：接手别人的交付物时，先读懂它想干什么",
-                "可以跑静态审查与模型语义比对，得到改进建议",
+                "零 token 审计：架构违规 / 空壳测试 / 临时方案 / TODO 一次列清",
+                "按代码生成 MODULES / ARCHITECTURE / HANDOVER 三份文档",
                 "不会产生任何文件改动，也不会动 git"),
     ),
 }
 
-# 旧 id → 新 id：保证老配置/命令/书签不会突然失效
-ALIASES = {
-    "readonly": "readonly", "read": "readonly", "ro": "readonly",
-    "edit": "developer", "safe": "developer", "developer": "developer",
-    "full": "client", "auto": "client", "client": "client",
-}
+# 三个正式 id，**没有别名**（2026-11-23 用户口径："全都改为最新的，不要留旧接口日后容易混"）。
+# 以前这里有一张旧 id → 新 id 的兼容表（read/ro/edit/safe/full/auto），
+# 结果是：同一个模式有六个名字，命令行能传、配置里能存，查问题时分不清到底在用哪个。
+# 现在只认这三个；传错一律回落到默认（造物模式），并在 normalize 里写清原因。
+MODE_IDS = ("client", "developer", "readonly")
 
 DEFAULT_MODE = "client"
 
@@ -129,8 +132,13 @@ _current = {"mode": DEFAULT_MODE}
 
 
 def normalize(mode_id: str | None) -> str:
+    """把输入收敛成三个正式 id 之一；认不出的回落到默认。
+
+    没有别名表（2026-11-23）：只认 client / developer / readonly。
+    旧 id（read/ro/edit/safe/full/auto）不再接受 —— 同一个模式六个名字太容易混。
+    """
     key = str(mode_id or "").strip().lower()
-    return ALIASES.get(key, DEFAULT_MODE)
+    return key if key in MODE_IDS else DEFAULT_MODE
 
 
 def get(mode_id: str | None = None) -> Mode:

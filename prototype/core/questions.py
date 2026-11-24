@@ -1,4 +1,4 @@
-"""开发者模式的"主动提问"通道（照 DSH 的 ask_user_question 语义做）。
+"""精修模式的"主动提问"通道（照 DSH 的 ask_user_question 语义做）。
 
 用户要求：本地模型遇到关键问题时**主动提问找人解决，不自己胡写**。
 
@@ -133,8 +133,8 @@ def answered(ws: Path) -> dict[str, str]:
 def review_plan(ws: Path, plan: str, emit=None, mode: str = "developer") -> dict:
     """plan-mode 的流程（照 DSH）：出计划 → 人审 → 再执行。
 
-    甲方模式（mode="client"）：**自动通过**（无人值守，上限是远端能力）；
-    开发者模式：**必须人审** —— 人会看到计划并选择"通过"或"修改"，
+    造物模式（mode="client"）：**自动通过**（无人值守，上限是远端能力）；
+    精修模式：**必须人审** —— 人会看到计划并选择"通过"或"修改"，
     选择以 human 证据入账；不通过就把修改意见作为答案带回去。
     """
     text = (plan or "").strip()
@@ -145,7 +145,7 @@ def review_plan(ws: Path, plan: str, emit=None, mode: str = "developer") -> dict
             emit("plan_review", {"auto": True, "chars": len(text)})
         return {"ok": True, "approved": True, "answer": "", "auto": True}
     r = ask(ws, f"是否按这个实现方案执行？\n{text[:1200]}", options=["通过", "修改"],
-            why="开发者模式下架构决策归人", node="plan", emit=emit)
+            why="精修模式下架构决策归人", node="plan", emit=emit)
     if r.get("ok"):
         ans = (r.get("answer") or "").strip()
         return {"ok": True, "approved": ans.startswith(("通过", "可以", "ok", "OK", "同意")),

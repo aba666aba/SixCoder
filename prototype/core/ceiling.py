@@ -89,7 +89,7 @@ def record_autonomy(ws: Path, level: str, verified: int, total: int, mode: str =
                     did_work: bool = False) -> dict:
     """记一条"自主完成"实证。
 
-    完成口径（缺一条就不算）：甲方模式 + 无人工介入 + 全部验收通过 + **真干了活**。
+    完成口径（缺一条就不算）：造物模式 + 无人工介入 + 全部验收通过 + **真干了活**。
     为什么要有 did_work：一次"什么活都不用干"的运行（所有函数本来就已验收）证明不了
     系统能自主建成东西，把它记成自主实证就是自我表扬。
     human_interventions=None 表示"这一轮没统计到人工介入数"，同样不算。
@@ -264,7 +264,7 @@ def _probe_autonomy(ws: Path, contracts: dict | None, level: str) -> dict:
     return {"status": ABSENT,
             "measured": (f"自主完成实证 {len(good)} 条（口径：人工介入=0 + 真干过活 + 全部验收通过，"
                          f"当前记录 {len(rows)} 条）"),
-            "blocker": "没有'完全自主'的实证：需要一次甲方模式、人工介入为 0、真正写了/改了模块、"
+            "blocker": "没有'完全自主'的实证：需要一次造物模式、人工介入为 0、真正写了/改了模块、"
                        "全部验收通过、花费在预算内的完整运行",
             "next": "跑一次这样的夜班并写入 autonomy.jsonl（三个条件都必须是真的）"}
 

@@ -3,7 +3,7 @@
 为什么需要它（实测）：
     需求："写一个计算器，支持加减乘除、根号、求导、不定积分"
     旧行为：parse_requirement → 空 → 夜班直接结束（0/0），报"请按 1) xxx.py：f(a: int) -> int …… 格式写"
-    也就是说：**甲方必须自己写契约**。这跟"甲方模式内部做完所有决策"是矛盾的。
+    也就是说：**甲方必须自己写契约**。这跟"造物模式内部做完所有决策"是矛盾的。
 
 现在的做法：需求解析不出契约时，让远端按固定 JSON 结构产出契约 →
 渲染成我们自己的契约文本 → 用 `parse_requirement` 解析 → **校验能不能机判** →
@@ -69,9 +69,9 @@ JSON 结构（严格）：
 def _ambiguity_block(mode: str) -> str:
     """规格歧义怎么处理 —— 这是两种模式最本质的差别之一。
 
-    甲方模式（decide）：没人可问，所以**远端自己拍板**，但必须把假设写进 purpose，
+    造物模式（decide）：没人可问，所以**远端自己拍板**，但必须把假设写进 purpose，
     交付报告会把这些假设列出来 —— 事后可以追责，事前不阻塞。
-    开发者模式（ask）：不许猜。只输出 {"question":...,"options":[...]}，系统停下等人回答。
+    精修模式（ask）：不许猜。只输出 {"question":...,"options":[...]}，系统停下等人回答。
     """
     if str(mode).lower() == "ask":
         return ("7. **有歧义就停下来问**：如果需求里有会影响接口/语义/边界的分歧，"
@@ -269,8 +269,8 @@ def synthesize(requirement: str, task_id: str = "contract", step_index: int | st
     """需求 → 契约。返回 {ok, contracts, text, by, problems, usage, allowance}
     （或 need_human）。
 
-    step_index 可以传 "strongest" → 用阶梯最强档（甲方模式的规格优先）。
-    ambiguity="ask" 时，远端被允许只回一个问题，本函数以 need_human 返回（开发者模式）。
+    step_index 可以传 "strongest" → 用阶梯最强档（造物模式的规格优先）。
+    ambiguity="ask" 时，远端被允许只回一个问题，本函数以 need_human 返回（精修模式）。
     budget：这一轮的验收带宽参数（`core/dosing.context_for()` 的产物）；
             没有就按"什么都没测到"的保守值算，绝不假装知道。
     """
