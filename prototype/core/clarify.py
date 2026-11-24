@@ -98,12 +98,44 @@ _SYSTEM = (
     "先写一段实现思路叙述，再用 ```choices 的 JSON 块列出所有还需要人类拍板的待定项，"
     "每项必须有 question（人类看到的问题）和 options（≥2 个可选项）。"
     "若你认为细节已足够开发、无需再问，就输出空的 choices（```choices\n[]\n```）。"
+    "\n\n**第一项必须是技术栈（key 固定为 \"stack\"）**："
+    "这是决定生成骨架的**唯一依据**，选错整晚的代码都白写。"
+    "options 里每一项必须是引擎已支持的栈标识之一，格式为 \"<标识>：<一句话说明>\"，"
+    "例如 \"fastapi：Python Web 后端，models/services/api 三层\"、"
+    "\"cli：命令行工具，单层入口+子命令\"。"
+    "**只给引擎支持的选项，不要编造**：可选范围会在用户提示里列出。"
+    "如果需求明显不是 Web 也不是 CLI（例如要桌面程序、游戏），"
+    "就把这一项写成 \"不支持：<说明为什么不能做>\"，让人类知道边界。"
 )
+
+
+def available_stacks() -> list[tuple[str, str]]:
+    """引擎当前支持的栈（标识, 说明）。
+
+    从 layerplan 动态取 —— 新增一种形态只要注册一个 LayerPlan，
+    这里的可选范围自动变宽，不用改提示词。
+    取不到时退回最小集合（fastapi/cli），保证提示词不为空。
+    """
+    try:
+        from . import layerplan as _lp
+        plans = _lp.default_registry().all()
+        got = [(p.stack, p.description or "") for p in plans if getattr(p, "stack", "")]
+        if got:
+            return got
+    except Exception:                                  # noqa: BLE001
+        pass
+    return [("fastapi", "Python Web 后端"), ("cli", "命令行工具")]
 
 
 def _user_prompt(requirement: str, doc: DesignDoc) -> str:
     if doc.rounds == 0:
-        return f"需求：{requirement}\n请产出第 1 版设计文档与待定项。"
+        stacks = available_stacks()
+        menu = "\n".join(f"  - {k}：{v}" for k, v in stacks)
+        return (
+            f"需求：{requirement}\n"
+            f"引擎当前支持的栈（技术栈那一项的 options 只能从这里挑）：\n{menu}\n"
+            "请产出第 1 版设计文档与待定项，第一项必须是 stack。"
+        )
     answered = "\n".join(
         f"- {c.question} → {c.picked}" for c in doc.choices if c.picked
     )

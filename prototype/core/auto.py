@@ -4472,6 +4472,68 @@ def clarify_design_doc_to_arch(doc) -> dict:
     return {"questions": qs, "answers": ans}
 
 
+def _persist_stack_choice(ws, doc) -> dict:
+    """把 DesignDoc 里 key == "stack" 的选择写进 .sixcoder/stack.json。
+
+    返回 {"ok": bool, "stack": str, "path": str, "why": str}。
+
+    识别规则（宽松但安全）：
+      · 选项文本形如 "fastapi：说明" 或 "fastapi: 说明" -> 取冒号前的标识
+      · 标识必须在引擎已支持的栈里（layerplan 注册表）
+      · 形如 "不支持：..." 的选项**不落盘** —— 那是边界提示，不是可选技术栈
+    """
+    import json as _json_io
+    import re as _re
+    picked = ""
+    for c in (getattr(doc, "choices", None) or []):
+        if str(getattr(c, "key", "")) != "stack":
+            continue
+        picked = str(getattr(c, "picked", "") or "").strip()
+        break
+    if not picked:
+        return {"ok": False, "why": "澄清里没有选定技术栈（或用户没选）"}
+    if picked.startswith("不支持"):
+        return {"ok": False, "why": f"模型判定当前形态超出引擎能力：{picked}"}
+
+    name = _re.split(r"[：:]", picked, maxsplit=1)[0].strip().lower()
+    # 判定"引擎认不认识这个栈"，以 **layerplan 为准**（它决定生成骨架）。
+    #
+    # 为什么不用 stack.names()（2026-11-24 实测踩到）：
+    #   stack._ADAPTERS 只有 fastapi/django —— 那是"有代码模板能渲染入口"的栈；
+    #   cli / frontend 有生成计划和判据包，但还没有独立的 stack 适配器。
+    #   于是用户选 cli -> 被判成"不认识的栈"，明明方案是支持的。
+    #
+    # 三个子系统各维护一份栈清单是 P0 留下的债（stack 2 / layerplan 4 / judges 3）。
+    # 这里用并集判断"支持"，比任何单一来源都稳；真正的收敛留到后面单独一刀。
+    known = set()
+    try:
+        from . import layerplan as _lp
+        known |= {_p.stack for _p in _lp.default_registry().all() if getattr(_p, "stack", "")}
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        from . import stack as _stack_k
+        known |= set(_stack_k.names())
+    except Exception:                                  # noqa: BLE001
+        known |= {"fastapi", "django"}
+    if name not in known:
+        return {"ok": False, "why": f"选了引擎不认识的栈 {name!r}（已知：{', '.join(sorted(known))}）"}
+
+    # 落盘：有适配器的走 write_choice（它会校验）；
+    # 没有适配器但 layerplan 支持的（cli/frontend）直接写同一份 stack.json ——
+    # 那本来就是"配置不是猜"的载体，谁读都认这个路径。
+    from . import stack as _stack
+    if name in set(_stack.names()):
+        r = _stack.write_choice(ws, name)
+        if not r.get("ok"):
+            return {"ok": False, "why": str(r.get("why") or "写入失败")}
+        return {"ok": True, "stack": name, "path": _stack.STACK_FILE}
+    path = ws / ".sixcoder" / "stack.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json_io.dumps({"stack": name}, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+    return {"ok": True, "stack": name, "path": ".sixcoder/stack.json"}
+
 def run_clarify_phase(ws, requirement: str, complete=None, answers: dict | None = None,
                       interactive: bool = True, force: bool = False) -> dict:
     """跑澄清循环：远端最强模型列全量待定项+多选 → 人类选 → 落进同一份设计文档（越改越细）
@@ -4511,6 +4573,23 @@ def run_clarify_phase(ws, requirement: str, complete=None, answers: dict | None 
     doc = _clarify.clarify_loop(requirement, complete, human_answer, effort="max", max_rounds=8)
     md_path.write_text(doc.render(), encoding="utf-8")
     arch = clarify_design_doc_to_arch(doc)
+
+    # 2026-11-24：把澄清里选定的技术栈落盘成 .sixcoder/stack.json。
+    #
+    # 为什么必须有这一步：clarify 的 choices 里第一项是 stack（提示词已强制），
+    # 但以前选完只存进 design_doc.json，**没有写进 stack.json** ——
+    # 于是后面的生成、判据、闸门全都在按默认 fastapi 猜。
+    # 用户明明选了 CLI，生成侧仍然按 Web 三分层走，这是最隐蔽的一类错。
+    #
+    # 只认引擎支持的栈；"不支持：..." 这种选项不落盘（那是边界提示，不是选择）。
+    try:
+        _stack_pick = _persist_stack_choice(ws, doc)
+    except Exception as _e:                            # noqa: BLE001
+        _stack_pick = {"ok": False, "why": f"{type(_e).__name__}: {_e}"}
+    if _stack_pick.get("ok"):
+        print(f"> 技术栈已锁定：{_stack_pick.get('stack')}（{_stack_pick.get('path')}）")
+    elif _stack_pick.get("why"):
+        print(f"> 技术栈未锁定：{_stack_pick['why']}")
     import json as _json  # noqa: WPS433
     json_path.write_text(_json.dumps(arch, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"> 设计文档已落盘：{md_path}")
