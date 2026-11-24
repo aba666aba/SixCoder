@@ -4516,6 +4516,13 @@ def _persist_stack_choice(ws, doc) -> dict:
         known |= set(_stack_k.names())
     except Exception:                                  # noqa: BLE001
         known |= {"fastapi", "django"}
+    # 短名 -> 生态包名的别名表（2026-11-24 打通时统一了两边命名）。
+    # 为什么保留别名：澄清提示词、存量用户配置、测试里都还写着 cli / frontend，
+    # 直接拒收会让它们全部报"不认识的栈"。别名表把两边接上。
+    _ALIASES = {"cli": "cli_tool", "frontend": "frontend_spa"}
+    if name in _ALIASES and _ALIASES[name] in known:
+        name = _ALIASES[name]
+
     if name not in known:
         return {"ok": False, "why": f"选了引擎不认识的栈 {name!r}（已知：{', '.join(sorted(known))}）"}
 

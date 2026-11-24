@@ -687,6 +687,57 @@ register(FastAPIAdapter())
 register(DjangoAdapter())
 
 
+def _register_ecosystem_adapters() -> list:
+    """把生态包里的栈适配器注册进来（2026-11-24 打通）。
+
+    ## 为什么必须有这一步
+
+    data/ecosystem/ 下有 8 个栈包（cli_tool / electron / frontend_spa /
+    go_service / microservice / node_express / py_lib / spring_boot），
+    每个都写好了 adapter（识别 + 探针约定）。
+
+    但核对时发现：**它们一个都没进 _ADAPTERS** —— 上面那两行只注册了
+    fastapi / django。于是主流程根本不知道这些栈存在：
+      用户选 electron -> _ADAPTERS 里没有 -> 回退 fastapi 适配器
+      -> 一个 Electron 项目被按 app/models.py 生成
+
+    ## 安全边界
+
+    · **加载失败不影响启动**：单个包坏了只跳过它，主流程照常
+    · **同名不覆盖内置**：fastapi / django 已有，生态包不能顶掉它们
+    · **没有生态包目录时零影响**：返回空列表，行为与改动前逐字一致
+
+    返回成功注册的名字列表（供日志/自检用）。
+    """
+    added = []
+    try:
+        from . import ecosystem as _eco
+        rows = _eco.list_packs() or []
+    except Exception:                                    # noqa: BLE001
+        return added
+    for row in rows:
+        if str(row.get("kind") or "") != "stack":
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name or name in _ADAPTERS:
+            continue                                     # 不覆盖内置
+        try:
+            ad, _why = _eco.load_adapter(name)
+        except Exception:                                # noqa: BLE001
+            continue
+        if ad is None:
+            continue
+        try:
+            register(ad)
+            added.append(name)
+        except Exception:                                # noqa: BLE001
+            continue
+    return added
+
+
+ECOSYSTEM_STACKS = _register_ecosystem_adapters()
+
+
 def names() -> list:
     """已注册的栈名。"""
     return sorted(_ADAPTERS)

@@ -323,6 +323,8 @@ def full_registry() -> JudgeRegistry:
         _cli.register_cli(reg)
         from . import judges_lang as _lang
         _lang.register_lang(reg)
+        from . import judges_probe as _probe
+        _probe.register_probes(reg)
         _with_cli = reg
     return _with_cli
 

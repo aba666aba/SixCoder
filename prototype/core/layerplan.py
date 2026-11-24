@@ -210,12 +210,94 @@ class PlanRegistry:
 _default: Optional[PlanRegistry] = None
 
 
+def ecosystem_plan(name: str, description: str = "") -> Optional[SimplePlan]:
+    """给"有骨架模板的生态包"生成一个通用计划（2026-11-24 打通）。
+
+    ## 为什么用通用计划而不是每个包写一个
+
+    生态包的骨架已经在 templates/ 里声明好了（cli_tool / electron /
+    frontend_spa 都有）。生成侧只需要知道两件事：
+      1. 有几层 —— 这类项目都是**单层**（骨架给齐结构，业务写模块）
+      2. 落点文件 —— 蓝图声明的 .js/.py 模块
+
+    所以不必为每个包手写 targets 函数，一个通用实现就够。
+    这也避免了"加一个生态包要同时改 layerplan"的负担。
+
+    ## 只给有 templates 的包
+
+    没有骨架模板的包（go_service / microservice / node_express /
+    py_lib / spring_boot）返回 None —— 让它们回退到旧逻辑，
+    避免"没有骨架却声称能生成"。
+    """
+    def _targets(ctx, layer):
+        # **只回答本计划声明的那一层**（2026-11-24 修正）。
+        # 早先这里不看 layer 参数，问任何层名都返回同一批文件 ——
+        # 于是 plan.targets(ctx, "models") 也会返回组件列表，
+        # 让 FastAPI 的三层语义和生态包的单层语义混在一起。
+        if layer != "modules":
+            return []
+        # 单层：把蓝图声明的业务模块都算进来，骨架文件由生态包负责
+        try:
+            from . import ecosystem as _eco
+            tpl_dir = _eco.pack_dir(name) / "templates"
+        except Exception:                            # noqa: BLE001
+            tpl_dir = None
+        skeleton = set()
+        if tpl_dir is not None and tpl_dir.is_dir():
+            for f in tpl_dir.rglob("*"):
+                if f.is_file():
+                    skeleton.add(f.relative_to(tpl_dir).as_posix())
+        out = []
+        for m in ctx.module_paths():
+            rel = str(m or "").strip()
+            if not rel:
+                continue
+            if rel in skeleton:
+                continue                             # 骨架文件不由远端写
+            out.append(rel)
+        return out
+
+    return SimplePlan(
+        stack=name,
+        layers=(("modules",),),
+        resolver=_targets,
+        description=description or f"{name}：单层（骨架来自生态包 templates/）",
+    )
+
+
 def default_registry() -> PlanRegistry:
     global _default
     if _default is None:
         reg = PlanRegistry()
-        for p in (FASTAPI_PLAN, DJANGO_PLAN, FRONTEND_PLAN, CLI_PLAN):
+        # 只注册"没有生态包对应物"的内置计划。
+        #
+        # 2026-11-24 打通时发现名字重复：我早先造的 cli / frontend 计划，
+        # 与生态包 cli_tool / frontend_spa 是同一个东西的两个名字。
+        # 统一以**生态包名**为准（那是真适配器、真探针所在），
+        # 我造的 CLI_PLAN / FRONTEND_PLAN 不再注册 —— 但代码保留，
+        # 因为 judges_cli 等地方仍用 "cli" 这个短名，删了会牵连更多。
+        for p in (FASTAPI_PLAN, DJANGO_PLAN):
             reg.register(p)
+
+        # 有骨架模板的生态包 -> 自动补一个通用计划（2026-11-24 打通）
+        # 失败不影响内置计划；同名已注册的跳过（内置优先）。
+        try:
+            from . import ecosystem as _eco
+            for row in (_eco.list_packs() or []):
+                if str(row.get("kind") or "") != "stack":
+                    continue
+                nm = str(row.get("name") or "").strip()
+                if not nm or reg.get(nm) is not None:
+                    continue
+                tpl = _eco.pack_dir(nm) / "templates"
+                if not tpl.is_dir():
+                    continue
+                plan = ecosystem_plan(nm, str(row.get("description") or "")[:80])
+                if plan is not None:
+                    reg.register(plan)
+        except Exception:                            # noqa: BLE001
+            pass
+
         _default = reg
     return _default
 
@@ -231,10 +313,9 @@ def plan_for(ws: Path, adapter=None) -> Optional[LayerPlan]:
             from . import stack as _st
             adapter = _st.from_workspace(ws)
         name = str(getattr(adapter, "name", "") or "")
-        # 前端判定沿用旧逻辑：看落点模板后缀（这样以后加 Vue/Native 不用改这里）
-        if str(getattr(adapter, "module_file_fmt", "") or "").endswith(
-                (".jsx", ".tsx", ".vue")):
-            name = "frontend"
+        # 适配器名就是生态包名（stack 启动时注册的就是它们），直接用。
+        # 早先这里有一句"前端判定后改成裸 frontend"，已删除：
+        # 那是自造的名字，跟生态包 frontend_spa 对不上（2026-11-24 打通时统一）。
         return default_registry().get(name)
     except Exception:                                # noqa: BLE001
         return None

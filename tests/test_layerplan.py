@@ -86,24 +86,30 @@ def test_django_skips_models_layer():
 
 def test_cli_plan_is_independent():
     """CLI 计划是新加的能力：证明抽象可扩展，不是只为既有三种写的。"""
-    ws = _mkws({"main.py": "print(1)\n", ".sixcoder/stack.json": '{"stack":"cli"}'})
+    # 2026-11-24 打通：CLI 的生成计划改用生态包名 cli_tool，
+    # 且骨架文件（templates/ 里的）不算落点 —— 那是引擎复制的，不该交给远端写。
+    ws = _mkws({"cli.py": "print(1)\n", ".sixcoder/stack.json": '{"stack":"cli_tool"}'})
     reg = layerplan.default_registry()
-    plan = reg.get("cli")
-    assert plan is not None, "cli 生成计划未注册"
-    bp = FakeBP([FakeCap(["main.py", "cmd/add.py"]), FakeCap(["unused.js"])])
+    plan = reg.get("cli_tool")
+    assert plan is not None, "cli_tool 生成计划未注册"
+    bp = FakeBP([FakeCap(["cli.py", "commands/add.py"]), FakeCap(["unused.js"])])
     ctx = layerplan.LayerContext(ws=ws, blueprint=bp)
-    got = plan.targets(ctx, "cli")
-    assert got == ["cmd/add.py", "main.py"], f"CLI 落点不对: {got}"
+    got = plan.targets(ctx, "modules")
+    assert "commands/add.py" in got, f"CLI 落点不对: {got}"
+    assert "cli.py" not in got, "入口 cli.py 由生态包骨架提供，不该交给远端写"
 
 
 def test_frontend_plan_only_components():
     ws = _mkws({"package.json": "{}", "src/App.jsx": "x\n"})
-    plan = layerplan.default_registry().get("frontend")
+    # 2026-11-24 打通：前端计划改用生态包名 frontend_spa，生态包通用计划是单层 modules
+    plan = layerplan.default_registry().get("frontend_spa")
+    assert plan is not None, "frontend_spa 生成计划未注册"
     bp = FakeBP([FakeCap(["src/App.jsx", "src/util.ts", "app/models.py"])])
     ctx = layerplan.LayerContext(ws=ws, blueprint=bp)
-    got = plan.targets(ctx, "ui")
-    assert got == ["src/App.jsx", "src/util.ts"], got
-    assert plan.targets(ctx, "models") == [], "前端不该有 models 层"
+    got = plan.targets(ctx, "modules")
+    assert "src/util.ts" in got, got
+    assert "src/App.jsx" not in got, "骨架文件不交给远端写"
+    assert plan.targets(ctx, "models") == [], "生态包通用计划只有 modules 一层"
 
 
 def test_unknown_stack_returns_none():

@@ -88,10 +88,10 @@ def test_layerplan_cli_excludes_entry():
         def __init__(self, c):
             self.caps = c
 
-    plan = layerplan.default_registry().get("cli")
+    plan = layerplan.default_registry().get("cli_tool")
     assert plan is not None
     ctx = layerplan.LayerContext(ws=None, blueprint=_B([_C(["cli.py", "commands/add.py"])]))
-    got = plan.targets(ctx, "cli")
+    got = plan.targets(ctx, "modules")
     assert got == ["commands/add.py"], f"入口不该出现在落点里，实际 {got}"
 
 

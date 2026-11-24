@@ -184,10 +184,18 @@ CLI_JUDGES = ("cli.exit_code", "cli.stdout", "cli.artifact")
 
 
 def register_cli(reg: JudgeRegistry) -> None:
-    """把 CLI 判据装进注册表，只对 cli 栈生效。"""
+    """把 CLI 判据装进注册表。
+
+    **栈名同时认 cli 和 cli_tool**（2026-11-24 打通时统一）：
+      · cli_tool 是生态包名 —— stack 注册的适配器、layerplan 的计划都用它
+      · cli      是早期短名 —— 存量代码/测试里还在用
+    只认一个会让另一半取不到判据（实测：计划按 cli_tool 选，
+    判据按 cli 注册 -> CLI 项目一条 cli.* 判据都跑不到）。
+    """
+    targets = frozenset({STACK_CLI, "cli_tool"})
     reg.register(CtxJudge("cli.exit_code", judge_exit_code,
-                          frozenset({STACK_CLI}), "程序能跑，退出码 0"))
+                          targets, "程序能跑，退出码 0"))
     reg.register(CtxJudge("cli.stdout", judge_stdout,
-                          frozenset({STACK_CLI}), "输出含约定文本"))
+                          targets, "输出含约定文本"))
     reg.register(CtxJudge("cli.artifact", judge_artifact,
-                          frozenset({STACK_CLI}), "产物文件存在且非空"))
+                          targets, "产物文件存在且非空"))

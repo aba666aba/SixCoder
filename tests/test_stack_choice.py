@@ -52,8 +52,9 @@ def test_cli_choice_is_persisted():
     ws = _ws()
     r = auto._persist_stack_choice(ws, _D([_C("stack", "cli：命令行工具，单层入口+子命令")]))
     assert r.get("ok") is True, r
-    assert r.get("stack") == "cli"
-    assert _stack_of(ws) == "cli"
+    # 2026-11-24 打通：短名 cli 会映射到生态包名 cli_tool（真适配器/真探针所在）
+    assert r.get("stack") == "cli_tool", r
+    assert _stack_of(ws) == "cli_tool"
 
 
 def test_fastapi_choice_persisted_via_adapter():
@@ -69,7 +70,7 @@ def test_colon_variants_accepted():
         ws = _ws()
         r = auto._persist_stack_choice(ws, _D([_C("stack", text)]))
         assert r.get("ok") is True, f"{text!r} -> {r}"
-        assert _stack_of(ws) == "cli", text
+        assert _stack_of(ws) == "cli_tool", f"{text!r} -> {_stack_of(ws)}"
 
 
 def test_unsupported_choice_is_not_persisted():
